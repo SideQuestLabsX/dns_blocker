@@ -77,7 +77,7 @@ define assert_static
 	fi
 endef
 
-.PHONY: all check clean
+.PHONY: all check clean test fuzz fuzz-quick
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
@@ -94,6 +94,42 @@ $(BUILD)/dns_blocker.check: tools/check.c | $(BUILD)
 
 $(BUILD)/%.o: src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# Host tests. Sanitizers are incompatible with -static-pie, so these do not
+# share CFLAGS with the shipped binary
+TEST_CFLAGS := -std=c11 -O1 -g \
+	-fsanitize=address,undefined -fno-omit-frame-pointer \
+	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
+	-Isrc
+
+# These compile and link in one command, so -MMD would scatter depfiles. Depend
+# on every header instead: a stale test binary reports PASS for code that is no
+# longer there
+HDR := $(wildcard src/*.h)
+
+test: $(BUILD)/wire_test $(BUILD)/fuzz_quick
+	@$(BUILD)/wire_test
+	@$(BUILD)/fuzz_quick 50000
+
+$(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+# Coverage-blind driver for the same entry point, so the fuzz target is
+# exercised on any toolchain with a sanitizer
+fuzz-quick: $(BUILD)/fuzz_quick
+	@$(BUILD)/fuzz_quick
+
+$(BUILD)/fuzz_quick: tests/fuzz_standalone.c tests/fuzz_wire.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+# libFuzzer needs clang. Run the binary directly, optionally with -max_total_time
+FUZZ_CC ?= clang
+
+fuzz: $(BUILD)/fuzz_wire
+	@echo "run: $(BUILD)/fuzz_wire -max_total_time=60"
+
+$(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c $(HDR) | $(BUILD)
+	$(FUZZ_CC) -std=c11 -O1 -g -fsanitize=fuzzer,address,undefined -Isrc $(filter %.c,$^) -o $@
 
 $(BUILD):
 	@mkdir -p $(BUILD)
