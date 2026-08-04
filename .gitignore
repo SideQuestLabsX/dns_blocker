@@ -1,0 +1,32 @@
+# build output
+/build/
+/out/
+*.o
+*.a
+*.so
+*.elf
+*.bin
+*.map
+*.d
+dns_blocker
+
+# vendored deps
+/vendor/
+
+# generated and downloaded blocklists. Only sources are tracked
+/blocklists/*.bin
+/blocklists/*.trie
+/blocklists/generated/
+
+# editors / tooling
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+*.swp
+*~
+
+# archives
+*.7z
+*.zip
+*.tar.*

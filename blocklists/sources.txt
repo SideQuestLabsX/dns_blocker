@@ -1,0 +1,11 @@
+# Upstream blocklist sources, one URL per line.
+#
+# The weekly pipeline fetches these, deduplicates them, compiles the result to
+# the flat trie format and publishes it as a release asset. Only this file is
+# tracked. Fetched and generated lists stay out of the repository.
+#
+# Every entry must be a plain hosts file or a domain-per-line list.
+
+https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/pro.txt
+https://small.oisd.nl/domainswild
