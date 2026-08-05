@@ -289,6 +289,52 @@ bool WireFindEdns(const uint8_t *msg, size_t len, WireEdns *out)
     return true;
 }
 
+bool WireNameInZone(const WireName *name, const WireName *zone)
+{
+    if(zone->len == 0 || name->len < zone->len)
+        return false;
+
+    /* The root zone is one zero byte, and every name ends with it. */
+    if(zone->len == 1)
+        return true;
+
+    size_t offset = 0;
+    while(offset < name->len)
+    {
+        if(name->len - offset == zone->len)
+        {
+            for(size_t i = 0; i < zone->len; i++)
+            {
+                uint8_t c = name->wire[offset + i];
+                uint8_t z = zone->wire[i];
+
+                if(c >= 'A' && c <= 'Z')
+                    c = (uint8_t)(c + 32);
+                if(z >= 'A' && z <= 'Z')
+                    z = (uint8_t)(z + 32);
+
+                if(c != z)
+                    return false;
+            }
+
+            return true;
+        }
+
+        uint8_t label = name->wire[offset];
+        if(label == 0)
+            break;
+
+        offset += 1u + label;
+    }
+
+    return false;
+}
+
+bool WireNameEqualExact(const WireName *a, const WireName *b)
+{
+    return a->len == b->len && memcmp(a->wire, b->wire, a->len) == 0;
+}
+
 bool WireNameEqual(const WireName *a, const WireName *b)
 {
     if(a->len != b->len)

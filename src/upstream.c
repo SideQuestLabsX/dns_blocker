@@ -4,6 +4,8 @@
 
 #include "config.h"
 #include "msg.h"
+#include "verify.h"
+#include "wire.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -24,6 +26,50 @@ static uint16_t RandomId(void)
     }
 
     return id;
+}
+
+/* 0x20 encoding. DNS matches names without regard to case, so the case of the
+   question is free entropy on top of the transaction ID and the source port.
+   A resolver echoes the question byte for byte, and VerifyResponse requires
+   that, so an attacker has to guess the case of every letter as well. */
+static void ApplyCaseRandomisation(uint8_t *msg, size_t len)
+{
+#if CFG_UPSTREAM_0X20
+    Reader     reader;
+    WireHeader header;
+    uint8_t    bits[CFG_MAX_NAME_BYTES];
+
+    ReaderInit(&reader, msg, len);
+    if(!WireParseHeader(&reader, &header) || header.qdCount != 1)
+        return;
+
+    size_t start = reader.pos;
+    WireName name;
+    if(!WireReadName(&reader, &name))
+        return;
+
+    size_t nameBytes = reader.pos - start;
+    if(nameBytes > sizeof bits)
+        return;
+
+    /* One draw for the whole name. A per-byte call would be the same entropy
+       at many times the syscall cost. */
+    if(getrandom(bits, nameBytes, 0) != (ssize_t)nameBytes)
+        return;
+
+    for(size_t i = 0; i < nameBytes; i++)
+    {
+        uint8_t c = msg[start + i];
+
+        if(c >= 'a' && c <= 'z' && (bits[i] & 1u))
+            msg[start + i] = (uint8_t)(c - 32);
+        else if(c >= 'A' && c <= 'Z' && (bits[i] & 1u) == 0)
+            msg[start + i] = (uint8_t)(c + 32);
+    }
+#else
+    (void)msg;
+    (void)len;
+#endif
 }
 
 bool UpstreamInit(Upstream *upstream, const char *address, uint16_t port)
@@ -64,20 +110,20 @@ static bool QueryOnce(Upstream *upstream, const uint8_t *query, size_t queryLen,
         return false;
     }
 
+    uint8_t sent[CFG_UDP_MSG_BYTES];
+    if(queryLen > sizeof sent)
+    {
+        close(fd);
+        return false;
+    }
+
+    memcpy(sent, query, queryLen);
+
     uint16_t id = RandomId();
-    uint8_t  header[2] = { (uint8_t)(id >> 8), (uint8_t)id };
+    MsgSetId(sent, queryLen, id);
+    ApplyCaseRandomisation(sent, queryLen);
 
-    struct iovec  parts[2] = {
-        { header, sizeof header },
-        { (void *)(uintptr_t)(query + 2), queryLen - 2 }
-    };
-    struct msghdr message;
-
-    memset(&message, 0, sizeof message);
-    message.msg_iov    = parts;
-    message.msg_iovlen = 2;
-
-    if(sendmsg(fd, &message, 0) != (ssize_t)queryLen)
+    if(send(fd, sent, queryLen, 0) != (ssize_t)queryLen)
     {
         close(fd);
         return false;
@@ -103,6 +149,16 @@ static bool QueryOnce(Upstream *upstream, const uint8_t *query, size_t queryLen,
     if(MsgId(out, (size_t)got) != id)
     {
         upstream->mismatches++;
+        return false;
+    }
+
+    /* Checked against the copy that went out, so the question comparison sees
+       the randomised case and the bailiwick set uses the name really asked. */
+    VerifyResult verdict = VerifyResponse(sent, queryLen, out, (size_t)got);
+    if(verdict != VerifyResult_Ok)
+    {
+        upstream->rejected++;
+        upstream->lastReject = verdict;
         return false;
     }
 

@@ -64,7 +64,11 @@
 #define CFG_MAX_PTR_JUMPS       16
 #define CFG_EDNS_PAYLOAD_BYTES  1232
 
-/* Upstream */
+/* Upstream. 0x20 encoding randomises the case of the question sent upstream.
+   A resolver echoes the question unchanged, so an attacker who wants to forge
+   a response must guess the case of every letter as well as the transaction ID
+   and the source port. */
+#define CFG_UPSTREAM_0X20       1
 #define CFG_UPSTREAM_ADDR       "1.1.1.1"
 #define CFG_UPSTREAM_PORT       53
 #define CFG_UPSTREAM_TIMEOUT_MS 2000

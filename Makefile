@@ -115,10 +115,11 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 # longer there
 HDR := $(wildcard src/*.h)
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/server_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/server_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
+	@$(BUILD)/verify_test
 	@$(BUILD)/server_test
 	@$(BUILD)/fuzz_quick 50000
 
@@ -131,14 +132,17 @@ $(BUILD)/cache_test: tests/cache_test.c src/cache.c src/wire.c src/arena.c $(HDR
 $(BUILD)/msg_test: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
+$(BUILD)/verify_test: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
 # Binds loopback sockets and drives a real query through the whole path
-$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@ -lpthread
 
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is
 # the only way the byte-wise field reads get exercised on real ARM
-XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native
+XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native
 
 test-static: $(XTEST)
 
@@ -154,12 +158,15 @@ $(BUILD)/cache_test_native: tests/cache_test.c src/cache.c src/wire.c src/arena.
 $(BUILD)/msg_test_native: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
+$(BUILD)/verify_test_native: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
 # Coverage-blind driver for the same entry point, so the fuzz target is
 # exercised on any toolchain with a sanitizer
 fuzz-quick: $(BUILD)/fuzz_quick
 	@$(BUILD)/fuzz_quick
 
-$(BUILD)/fuzz_quick: tests/fuzz_standalone.c tests/fuzz_wire.c src/wire.c src/cache.c src/arena.c $(HDR) | $(BUILD)
+$(BUILD)/fuzz_quick: tests/fuzz_standalone.c tests/fuzz_wire.c src/wire.c src/cache.c src/verify.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # libFuzzer needs clang. Run the binary directly, optionally with -max_total_time
@@ -168,7 +175,7 @@ FUZZ_CC ?= clang
 fuzz: $(BUILD)/fuzz_wire
 	@echo "run: $(BUILD)/fuzz_wire -max_total_time=60"
 
-$(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c src/cache.c src/arena.c $(HDR) | $(BUILD)
+$(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c src/cache.c src/verify.c src/arena.c $(HDR) | $(BUILD)
 	$(FUZZ_CC) -std=c11 -O1 -g -fsanitize=fuzzer,address,undefined -Isrc $(filter %.c,$^) -o $@
 
 $(BUILD):

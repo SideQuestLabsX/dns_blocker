@@ -1,6 +1,8 @@
 #ifndef DNS_BLOCKER_UPSTREAM_H
 #define DNS_BLOCKER_UPSTREAM_H
 
+#include "verify.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -14,7 +16,10 @@ typedef struct
     uint64_t queries;
     uint64_t timeouts;
     uint64_t mismatches;
+    uint64_t rejected;
     uint64_t failures;
+
+    VerifyResult lastReject;
 } Upstream;
 
 /* Accepts a literal IPv4 or IPv6 address only. Resolving a name here would

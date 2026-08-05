@@ -13,8 +13,10 @@
 
 #define WIRE_HEADER_BYTES   12
 #define WIRE_TYPE_A         1
+#define WIRE_TYPE_CNAME     5
 #define WIRE_TYPE_SOA       6
 #define WIRE_TYPE_AAAA      28
+#define WIRE_TYPE_DNAME     39
 #define WIRE_TYPE_OPT       41
 #define WIRE_TYPE_HTTPS     65
 #define WIRE_CLASS_IN       1
@@ -107,5 +109,13 @@ uint64_t WireNameHash(const WireName *name, uint16_t type, uint16_t klass);
 bool WireFindEdns(const uint8_t *msg, size_t len, WireEdns *out);
 
 bool WireNameEqual(const WireName *a, const WireName *b);
+
+/* True when name is zone itself, or a name below it. The comparison lands on a
+   label boundary, so evilexample.com is not below example.com. */
+bool WireNameInZone(const WireName *name, const WireName *zone);
+
+/* Byte-exact, including letter case. 0x20 randomisation needs this, because
+   the defence is the case surviving the round trip unchanged. */
+bool WireNameEqualExact(const WireName *a, const WireName *b);
 
 #endif

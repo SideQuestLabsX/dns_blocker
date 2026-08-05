@@ -1,5 +1,6 @@
 #include "arena.h"
 #include "cache.h"
+#include "verify.h"
 #include "wire.h"
 
 #include <stdint.h>
@@ -57,6 +58,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     WireEdns   edns;
 
     FuzzCache(data, size);
+
+    /* VerifyResponse walks an untrusted response against an untrusted query,
+       and follows CNAME rdata as a name, so it needs the same coverage as the
+       parser it sits on. */
+    (void)VerifyResponse(data, size, data, size);
+    if(size > 16)
+    {
+        (void)VerifyResponse(data, 16, data + 16, size - 16);
+        (void)VerifyResponse(data + 16, size - 16, data, 16);
+    }
 
     (void)WireFindEdns(data, size, &edns);
 
