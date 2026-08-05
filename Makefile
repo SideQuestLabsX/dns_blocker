@@ -15,22 +15,26 @@ CC      ?= gcc
 # length-prefixed data
 CFLAGS_COMMON := \
 	-std=c11 -O2 -flto \
-	-static-pie \
 	-fstack-protector-strong \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
 	-Isrc
 
+# 32-bit ARM musl has no -static-pie. gcc accepts the flag and emits a dynamic
+# binary, so those targets link -static and lose ASLR. Measured on the
+# cross-tools toolchain and on Alpine, which agree. The 64-bit targets keep
+# -static-pie. assert_static below rejects a dynamic result either way
+#
 # ARMv6 (Pi Zero W / ARM1176): no movw/movt, no NEON, unaligned access unsafe.
 # Read multi-byte DNS fields byte-wise regardless of target.
 ifeq ($(ARCH),x86_64)
-  CFLAGS_ARCH := -m64
+  CFLAGS_ARCH := -m64 -static-pie
 else ifeq ($(ARCH),aarch64)
-  CFLAGS_ARCH := -march=armv8-a
+  CFLAGS_ARCH := -march=armv8-a -static-pie
 else ifeq ($(ARCH),armv7)
-  CFLAGS_ARCH := -march=armv7-a -mfloat-abi=hard -mfpu=vfpv3-d16
+  CFLAGS_ARCH := -march=armv7-a -mfloat-abi=hard -mfpu=vfpv3-d16 -static
 else ifeq ($(ARCH),armv6)
-  CFLAGS_ARCH := -march=armv6 -mfloat-abi=hard -mfpu=vfp
+  CFLAGS_ARCH := -march=armv6 -mfloat-abi=hard -mfpu=vfp -static
 else
   $(error Unknown ARCH '$(ARCH)'. Use: x86_64 aarch64 armv7 armv6)
 endif
@@ -57,12 +61,16 @@ SRC := $(wildcard src/*.c)
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)
 
-# make sets CC to cc by default, so a plain patsubst on %gcc leaves the compiler
-# name here and the check below silently does nothing
-READELF ?= $(if $(filter %gcc,$(CC)),$(patsubst %gcc,%readelf,$(CC)),readelf)
+# A cross compiler has a matching readelf beside it, so prefer that name. Two
+# cases need the fallback: make sets CC to cc by default, and a wrapper such as
+# musl-gcc has no musl-readelf. Host readelf reads a foreign ELF header, so the
+# fallback stays correct for a cross build
+READELF_GUESS := $(if $(filter %gcc,$(CC)),$(patsubst %gcc,%readelf,$(CC)),readelf)
+READELF ?= $(shell command -v $(READELF_GUESS) >/dev/null 2>&1 \
+             && echo $(READELF_GUESS) || echo readelf)
 
-# Some toolchains accept -static-pie and still produce a dynamic binary. The
-# compiler reports no error, and the result needs a loader on the target.
+# Some toolchains accept a static link flag and still produce a dynamic binary.
+# The compiler reports no error, and the result needs a loader on the target.
 # Examine the linked output
 define assert_static
 	@if ! $(READELF) --version >/dev/null 2>&1; then \
@@ -71,7 +79,7 @@ define assert_static
 		exit 1; \
 	fi
 	@if $(READELF) -l $(1) | grep -q INTERP; then \
-		echo "$(1): dynamically linked. $(CC) did not honour -static-pie"; \
+		echo "$(1): dynamically linked. $(CC) ignored the static link flag"; \
 		rm -f $(1); \
 		exit 1; \
 	fi

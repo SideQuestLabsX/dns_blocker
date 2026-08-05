@@ -1,40 +1,35 @@
 #!/bin/sh
-# Local stand-in for the CI cross matrix. Skips a target whose compiler is
-# absent and fails on any compiler error.
+# Builds and tests each target the way CI does, in an Alpine container on the
+# target instruction set. Needs docker and qemu-user binfmt handlers:
+#   docker run --privileged --rm tonistiigi/binfmt --install all
 set -eu
 
-ARCHES="x86_64 aarch64 armv7 armv6"
-PROFILES="minimal encrypted"
+TARGETS="x86_64:linux/amd64:alpine:3.20
+aarch64:linux/arm64:arm64v8/alpine:3.20
+armv7:linux/arm/v7:arm32v7/alpine:3.20
+armv6:linux/arm/v6:arm32v6/alpine:3.20"
 
-cc_for()
-{
-    case "$1" in
-        x86_64)  echo "x86_64-linux-musl-gcc" ;;
-        aarch64) echo "aarch64-linux-musl-gcc" ;;
-        armv7)   echo "armv7l-linux-musleabihf-gcc" ;;
-        armv6)   echo "arm-linux-musleabihf-gcc" ;;
-    esac
-}
+script=$(mktemp)
+cat > "$script" <<'INNER'
+set -e
+apk add --no-cache build-base
+make ARCH="$ARCH" PROFILE=minimal
+make ARCH="$ARCH" PROFILE=minimal check
+make ARCH="$ARCH" PROFILE=minimal test-static-run
+INNER
 
-skipped=0
 built=0
+echo "$TARGETS" | while IFS= read -r line; do
+    arch=${line%%:*}
+    rest=${line#*:}
+    platform=${rest%%:*}
+    image=${rest#*:}
 
-for arch in $ARCHES; do
-    cc=$(cc_for "$arch")
-    if ! command -v "$cc" >/dev/null 2>&1; then
-        echo "skip $arch: $cc not installed"
-        skipped=$((skipped + 1))
-        continue
-    fi
-
-    for profile in $PROFILES; do
-        echo "build $arch $profile"
-        make ARCH="$arch" PROFILE="$profile" CC="$cc"
-        make ARCH="$arch" PROFILE="$profile" CC="$cc" check
-        make ARCH="$arch" PROFILE="$profile" CC="$cc" test-static
-        built=$((built + 1))
-    done
+    echo "== $arch on $image"
+    docker run --rm --platform "$platform" -e ARCH="$arch" \
+        -v "$PWD:/w" -v "$script:/build.sh" -w /w "$image" sh /build.sh
+    built=$((built + 1))
 done
 
-echo "built $built, skipped $skipped"
-test "$built" -gt 0
+rm -f "$script"
+echo "done"

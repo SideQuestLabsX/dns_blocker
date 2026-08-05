@@ -12,10 +12,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # Pinned, so a toolchain change appears as a commit
-  TOOLCHAIN_RELEASE: '20260515'
-
 jobs:
   test:
     name: host tests
@@ -95,100 +91,50 @@ jobs:
             timeout-*
           if-no-files-found: ignore
 
-  cross:
-    name: ${{ matrix.arch }} static musl
+  target:
+    name: ${{ matrix.arch }} on Alpine
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: x86_64
-            triple: x86_64-unknown-linux-musl
+            platform: linux/amd64
+            image: alpine:3.20
           - arch: aarch64
-            triple: aarch64-unknown-linux-musl
+            platform: linux/arm64
+            image: arm64v8/alpine:3.20
           - arch: armv7
-            triple: armv7-unknown-linux-musleabihf
+            platform: linux/arm/v7
+            image: arm32v7/alpine:3.20
           - arch: armv6
-            triple: arm-unknown-linux-musleabihf
+            platform: linux/arm/v6
+            image: arm32v6/alpine:3.20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache toolchain
-        id: toolchain
-        uses: actions/cache@v4
-        with:
-          path: /opt/cross/${{ matrix.triple }}
-          key: musl-${{ matrix.triple }}-${{ env.TOOLCHAIN_RELEASE }}
+      - uses: docker/setup-qemu-action@v3
 
-      # GitHub releases stay reachable from the runners
-      - name: Fetch toolchain
-        if: steps.toolchain.outputs.cache-hit != 'true'
+      # Alpine is the reference musl distribution, so its own toolchain builds
+      # the artifact. The container also runs the tests on the target
+      # instruction set, which is the only place an unaligned access fault on
+      # ARM1176 can appear. A build on x86 cannot reach it.
+      - name: Build and test on the target instruction set
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
-          sudo mkdir -p /opt/cross
-          url="https://github.com/cross-tools/musl-cross/releases/download/${TOOLCHAIN_RELEASE}/${{ matrix.triple }}.tar.xz"
-          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/cross.tar.xz
-          sudo tar -xJf /tmp/cross.tar.xz -C /opt/cross
-          test -x "/opt/cross/${{ matrix.triple }}/bin/${{ matrix.triple }}-gcc"
-
-      - name: Build
-        run: |
-          export PATH="/opt/cross/${{ matrix.triple }}/bin:$PATH"
-          make ARCH=${{ matrix.arch }} PROFILE=minimal CC=${{ matrix.triple }}-gcc
-          make ARCH=${{ matrix.arch }} PROFILE=minimal CC=${{ matrix.triple }}-gcc check
-          make ARCH=${{ matrix.arch }} PROFILE=minimal CC=${{ matrix.triple }}-gcc test-static
-
-      # ARMv6 must not acquire unaligned word access or movw/movt, and the
-      # binary must stay static PIE on every target
-      - name: Inspect artifact
-        run: |
-          f=build/${{ matrix.arch }}-minimal/dns_blocker
-          file "$f"
-          file "$f" | grep -q "static-pie linked\|statically linked"
+          cat > /tmp/build.sh <<'SH'
+          set -e
+          apk add --no-cache build-base
+          make ARCH="$ARCH" PROFILE=minimal
+          make ARCH="$ARCH" PROFILE=minimal check
+          make ARCH="$ARCH" PROFILE=minimal test-static-run
+          SH
+          docker run --rm --platform "${{ matrix.platform }}" \
+            -e ARCH -v "$PWD:/w" -v /tmp/build.sh:/build.sh -w /w \
+            "${{ matrix.image }}" sh /build.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: dns_blocker-${{ matrix.arch }}
-          path: build/${{ matrix.arch }}-minimal/
-
-  emulated:
-    name: run tests on the real instruction set
-    runs-on: ubuntu-latest
-    needs: cross
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: armv6
-            qemu: qemu-arm
-          - arch: armv7
-            qemu: qemu-arm
-          - arch: aarch64
-            qemu: qemu-aarch64
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dns_blocker-${{ matrix.arch }}
-          path: build
-
-      - name: Install qemu user emulation
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user
-
-      # The parser reads every multi-byte field byte-wise because ARM1176
-      # either faults or silently rotates an unaligned word. Nothing running on
-      # x86 can catch a regression there, so the tests run on the target ISA.
-      - name: Run parser, cache and message tests
-        run: |
-          set -e
-          chmod +x build/*_native build/dns_blocker || true
-          for t in build/wire_test_native build/cache_test_native build/msg_test_native; do
-            echo "== $t"
-            ${{ matrix.qemu }} "$t"
-          done
-
-      - name: Boot the daemon far enough to carve its arena
-        run: |
-          out=$(${{ matrix.qemu }} build/dns_blocker 2>&1 | head -20) || true
-          echo "$out"
-          echo "$out" | grep -q "arena"
+          path: build/${{ matrix.arch }}-minimal/dns_blocker

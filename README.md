@@ -77,9 +77,10 @@ make ARCH=armv6
 make PROFILE=minimal
 ```
 
-The build is static PIE with `-fstack-protector-strong`. A daemon that parses
-data from the network needs both. The build examines the linked file and stops
-if the toolchain gave a dynamic binary.
+Every target links static, and `-fstack-protector-strong` is always on. The
+64-bit targets also link position independent, so they get ASLR. 32-bit ARM
+does not, because gcc there accepts `-static-pie` and gives a dynamic binary.
+The build reads the linked file and stops if the result needs a loader.
 
 ## Test
 
@@ -93,10 +94,11 @@ libFuzzer target and needs clang. `make test-static` builds the same tests
 without sanitizers, so they cross-compile and run under emulation on the target
 instruction set.
 
-CI runs the host tests, links the encrypted profile, fuzzes against a corpus
-that stays between runs, cross-builds each architecture against static musl,
-and runs the parser tests under QEMU for ARM. An x86 test cannot find an
-unaligned access fault on ARM1176.
+CI runs the host tests, links the encrypted profile and fuzzes against a corpus
+that stays between runs. It then builds each target in an Alpine container on
+that target's instruction set and runs the tests there. An x86 test cannot find
+an unaligned access fault on ARM1176. `ci/build.sh` runs the same containers
+locally, and needs docker with qemu binfmt handlers.
 
 ## Health probe
 
