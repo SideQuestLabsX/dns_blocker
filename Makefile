@@ -137,7 +137,7 @@ $(BUILD)/verify_test: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUI
 
 # Binds loopback sockets and drives a real query through the whole path
 $(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/wire.c src/arena.c $(HDR) | $(BUILD)
-	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@ -lpthread
+	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is

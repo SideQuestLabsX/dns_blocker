@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 static int G_FAILURES;
@@ -36,13 +37,30 @@ static int G_FAILURES;
    test prove the daemon rewrites it before replying to the client. */
 typedef struct
 {
-    int      fd;
-    uint32_t answerTtl;
-    int      padding;
-    bool     bSilent;
+    int         fd;
+    uint32_t    answerTtl;
+    int         padding;
+    bool        bSilent;
+    const char *silentName;
+    int         delayMs;
     volatile bool bStop;
     volatile int  served;
 } FakeUpstream;
+
+/* The answer has to be owned by the name that was asked, or the daemon's
+   bailiwick check rejects it, which is exactly what that check is for. */
+static void PutAnswerFor(Builder *b, const WireQuestion *question, uint32_t ttl)
+{
+    PutBytes(b, question->name.wire, question->name.len);
+    PutU16(b, WIRE_TYPE_A);
+    PutU16(b, WIRE_CLASS_IN);
+    PutU32(b, ttl);
+    PutU16(b, 4);
+    PutU8(b, 93);
+    PutU8(b, 184);
+    PutU8(b, 216);
+    PutU8(b, 34);
+}
 
 static void *FakeUpstreamMain(void *arg)
 {
@@ -75,15 +93,37 @@ static void *FakeUpstreamMain(void *arg)
            || !WireParseQuestion(&reader, &question))
             continue;
 
+        /* One name the resolver never answers, so a test can hold a query open
+           while other clients keep being served. */
+        if(fake->silentName != NULL)
+        {
+            WireName quiet;
+            if(NameOf(fake->silentName, &quiet)
+               && WireNameEqual(&question.name, &quiet))
+            {
+                fake->served++;
+                continue;
+            }
+        }
+
+        if(fake->delayMs > 0)
+        {
+            struct timespec nap = {
+                .tv_sec  = fake->delayMs / 1000,
+                .tv_nsec = (long)(fake->delayMs % 1000) * 1000000L
+            };
+            nanosleep(&nap, NULL);
+        }
+
         Builder b = { reply, sizeof reply, 0 };
         PutHeader(&b, header.id, 0x8180u, 1, 1, 0, 0);
         PutBytes(&b, query + WIRE_HEADER_BYTES,
                  reader.pos - WIRE_HEADER_BYTES);
-        PutARecord(&b, "a.example.com", fake->answerTtl);
+        PutAnswerFor(&b, &question, fake->answerTtl);
 
         /* Optional filler so the reply crosses the 512-byte UDP limit. */
         for(int i = 0; i < fake->padding; i++)
-            PutARecord(&b, "a.example.com", fake->answerTtl);
+            PutAnswerFor(&b, &question, fake->answerTtl);
 
         if(fake->padding > 0)
         {
@@ -139,6 +179,8 @@ static int ConnectLoopback(uint16_t port, int type)
 typedef struct
 {
     Arena        arena;
+    Arena        connArena;
+    Arena        txArena;
     Cache        cache;
     Upstream     upstream;
     Server       server;
@@ -161,11 +203,13 @@ static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
     if(pthread_create(&fix->thread, NULL, FakeUpstreamMain, &fix->fake) != 0)
         return false;
 
-    return ArenaInit(&fix->arena, 512u * 1024u)
+    return ArenaInit(&fix->arena, 2048u * 1024u)
         && CacheInit(&fix->cache, &fix->arena)
+        && ArenaCarve(&fix->arena, &fix->connArena, ARENA_CONN_BYTES)
+        && ArenaCarve(&fix->arena, &fix->txArena, ARENA_TXTABLE_BYTES)
         && UpstreamInit(&fix->upstream, "127.0.0.1", UPSTREAM_PORT)
         && ServerOpen(&fix->server, &fix->cache, &fix->upstream,
-                      &fix->arena, SERVER_PORT);
+                      &fix->connArena, &fix->txArena, SERVER_PORT);
 }
 
 static void FixtureDown(Fixture *fix)
@@ -199,6 +243,13 @@ static void Pump(Server *server, int times)
         ServerPoll(server, 200);
 }
 
+/* Short waits, so a whole sequence finishes inside one upstream timeout. */
+static void PumpBriefly(Server *server, int times)
+{
+    for(int i = 0; i < times; i++)
+        ServerPoll(server, 10);
+}
+
 static void TestUdpQueryIsForwardedAndAnswered(void)
 {
     Fixture  fix;
@@ -218,7 +269,7 @@ static void TestUdpQueryIsForwardedAndAnswered(void)
                                  "a.example.com", WIRE_TYPE_A);
     CHECK(send(client, query, queryLen, 0) == (ssize_t)queryLen);
 
-    Pump(&fix.server, 2);
+    Pump(&fix.server, 6);
 
     ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
     CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
@@ -255,13 +306,13 @@ static void TestSecondQueryIsACacheHit(void)
     size_t queryLen = BuildQuery(query, sizeof query, 0x1111,
                                  "a.example.com", WIRE_TYPE_A);
     send(client, query, queryLen, 0);
-    Pump(&fix.server, 2);
+    Pump(&fix.server, 6);
     recv(client, reply, sizeof reply, MSG_DONTWAIT);
 
     queryLen = BuildQuery(query, sizeof query, 0x2222,
                           "a.example.com", WIRE_TYPE_A);
     send(client, query, queryLen, 0);
-    Pump(&fix.server, 2);
+    Pump(&fix.server, 6);
 
     ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
     CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
@@ -295,7 +346,7 @@ static void TestTcpQuery(void)
     int client = ConnectLoopback(SERVER_PORT, SOCK_STREAM);
     CHECK(client >= 0);
 
-    Pump(&fix.server, 1);
+    Pump(&fix.server, 2);
 
     size_t queryLen = BuildQuery(query, sizeof query, 0x7A7A,
                                  "a.example.com", WIRE_TYPE_A);
@@ -305,7 +356,7 @@ static void TestTcpQuery(void)
 
     CHECK(send(client, framed, queryLen + 2, 0) == (ssize_t)(queryLen + 2));
 
-    Pump(&fix.server, 4);
+    Pump(&fix.server, 8);
 
     ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
     CHECK(got > (ssize_t)(2 + WIRE_HEADER_BYTES));
@@ -341,7 +392,7 @@ static void TestOversizedUdpAnswerSetsTruncated(void)
     size_t queryLen = BuildQuery(query, sizeof query, 0x0F0F,
                                  "a.example.com", WIRE_TYPE_A);
     send(client, query, queryLen, 0);
-    Pump(&fix.server, 2);
+    Pump(&fix.server, 6);
 
     ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
     CHECK(got > 0);
@@ -378,7 +429,7 @@ static void TestUpstreamSilenceBecomesServfail(void)
     send(client, query, queryLen, 0);
 
     /* Three attempts at the two-second timeout. */
-    Pump(&fix.server, 2);
+    Pump(&fix.server, 6);
 
     ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
     CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
@@ -412,13 +463,180 @@ static void TestResponseSentToListenerIsIgnored(void)
     /* Two resolvers pointed at each other would trade this forever. */
     size_t len = BuildPositive(response, sizeof response, "a.example.com", 300);
     send(client, response, len, 0);
-    Pump(&fix.server, 2);
+    Pump(&fix.server, 6);
 
     CHECK(recv(client, reply, sizeof reply, MSG_DONTWAIT) < 0);
     CHECK(fix.server.malformed == 1);
     CHECK(fix.server.forwarded == 0);
 
     close(client);
+    FixtureDown(&fix);
+}
+
+
+/* The reason the in-flight table exists. Before it, HandleQuery waited inside
+   the poll loop, so one unanswered query stalled every other client for the
+   whole timeout and retry budget. */
+static void TestOneStalledQueryDoesNotBlockOthers(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP head of line: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.silentName = "slow.example.com";
+
+    int stalled = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    int prompt  = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(stalled >= 0 && prompt >= 0);
+
+    size_t slowLen = BuildQuery(query, sizeof query, 0xAAAA,
+                                "slow.example.com", WIRE_TYPE_A);
+    CHECK(send(stalled, query, slowLen, 0) == (ssize_t)slowLen);
+    PumpBriefly(&fix.server, 2);
+
+    size_t fastLen = BuildQuery(query, sizeof query, 0xBBBB,
+                                "a.example.com", WIRE_TYPE_A);
+    CHECK(send(prompt, query, fastLen, 0) == (ssize_t)fastLen);
+    PumpBriefly(&fix.server, 6);
+
+    /* The whole sequence fits inside one upstream timeout, so the first query
+       is still waiting. The synchronous path would not have read the second
+       query at all until the first gave up. */
+    ssize_t served = recv(prompt, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(served > (ssize_t)WIRE_HEADER_BYTES);
+    if(served > 0)
+        CHECK(MsgId(reply, (size_t)served) == 0xBBBB);
+
+    CHECK(recv(stalled, reply, sizeof reply, MSG_DONTWAIT) < 0);
+
+    /* And it does eventually give up rather than leaking the slot. */
+    Pump(&fix.server, 6);
+    ssize_t late = recv(stalled, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(late > (ssize_t)WIRE_HEADER_BYTES);
+    if(late > 0)
+    {
+        CHECK(MsgId(reply, (size_t)late) == 0xAAAA);
+        CHECK((MsgFlags(reply, (size_t)late) & 0x000Fu) == MSG_RCODE_SERVFAIL);
+    }
+
+    close(stalled);
+    close(prompt);
+    FixtureDown(&fix);
+}
+
+/* At capacity the oldest slot is taken. The client that loses it gets an
+   answer, so nothing is left waiting for a reply that never comes. */
+static void TestTableFullEvictsOldest(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+    int     clients[CFG_TX_SLOTS + 4];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP eviction: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.silentName = "slow.example.com";
+
+    for(size_t i = 0; i < CFG_TX_SLOTS + 4; i++)
+    {
+        clients[i] = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+        size_t len = BuildQuery(query, sizeof query, (uint16_t)(0x100 + i),
+                                "slow.example.com", WIRE_TYPE_A);
+        send(clients[i], query, len, 0);
+        PumpBriefly(&fix.server, 1);
+    }
+
+    PumpBriefly(&fix.server, 3);
+    CHECK(fix.server.evictedTransactions >= 4);
+
+    /* Counted before any upstream timeout can fire, so these answers can only
+       have come from eviction. A table that silently reuses a slot leaves the
+       displaced client waiting instead. */
+    size_t answered = 0;
+    for(size_t i = 0; i < CFG_TX_SLOTS + 4; i++)
+    {
+        if(recv(clients[i], reply, sizeof reply, MSG_DONTWAIT) > 0)
+            answered++;
+
+        close(clients[i]);
+    }
+
+    CHECK(answered >= 4);
+    FixtureDown(&fix);
+}
+
+/* A client that hangs up while its query is in flight must not have the answer
+   written into whatever now owns that connection slot. */
+static void TestTcpClientVanishingMidQuery(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t framed[514];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP tcp vanish: cannot bind test ports\n");
+        return;
+    }
+
+    /* The answer arrives after the first client has gone, which is what puts
+       a stale reply and a reused connection slot in the same moment. */
+    fix.fake.delayMs = 40;
+
+    int first = ConnectLoopback(SERVER_PORT, SOCK_STREAM);
+    CHECK(first >= 0);
+    PumpBriefly(&fix.server, 2);
+
+    size_t len = BuildQuery(query, sizeof query, 0xCCCC,
+                            "a.example.com", WIRE_TYPE_A);
+    framed[0] = (uint8_t)(len >> 8);
+    framed[1] = (uint8_t)len;
+    memcpy(framed + 2, query, len);
+    send(first, framed, len + 2, 0);
+    PumpBriefly(&fix.server, 1);
+    close(first);
+
+    /* The server has to notice the hang-up and free the slot, or the second
+       connection lands somewhere else and the reuse is never exercised. */
+    PumpBriefly(&fix.server, 3);
+    CHECK(fix.server.conns[0].fd < 0);
+
+    /* A new connection takes the slot the first one just released. */
+    int second = ConnectLoopback(SERVER_PORT, SOCK_STREAM);
+    CHECK(second >= 0);
+    PumpBriefly(&fix.server, 2);
+
+    CHECK(fix.server.conns[0].fd >= 0);
+    len = BuildQuery(query, sizeof query, 0xDDDD, "b.example.com", WIRE_TYPE_A);
+    framed[0] = (uint8_t)(len >> 8);
+    framed[1] = (uint8_t)len;
+    memcpy(framed + 2, query, len);
+    send(second, framed, len + 2, 0);
+
+    Pump(&fix.server, 10);
+
+    ssize_t got = recv(second, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)(2 + WIRE_HEADER_BYTES));
+
+    if(got > 2)
+    {
+        /* The first client's answer must not land here. */
+        size_t declared = ((size_t)reply[0] << 8) | reply[1];
+        CHECK(MsgId(reply + 2, declared) == 0xDDDD);
+    }
+
+    close(second);
     FixtureDown(&fix);
 }
 
@@ -430,6 +648,9 @@ int main(void)
     TestOversizedUdpAnswerSetsTruncated();
     TestUpstreamSilenceBecomesServfail();
     TestResponseSentToListenerIsIgnored();
+    TestOneStalledQueryDoesNotBlockOthers();
+    TestTableFullEvictsOldest();
+    TestTcpClientVanishingMidQuery();
 
     if(G_FAILURES != 0)
     {

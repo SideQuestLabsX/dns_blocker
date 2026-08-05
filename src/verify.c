@@ -52,17 +52,24 @@ VerifyResult VerifyResponse(const uint8_t *query, size_t queryLen,
                             const uint8_t *response, size_t responseLen)
 {
     Reader       queryReader;
-    Reader       reader;
     WireHeader   queryHeader;
-    WireHeader   header;
     WireQuestion asked;
-    WireQuestion answered;
-    ZoneSet      zones = { .count = 0 };
 
     ReaderInit(&queryReader, query, queryLen);
     if(!WireParseHeader(&queryReader, &queryHeader) || queryHeader.qdCount != 1
        || !WireParseQuestion(&queryReader, &asked))
         return VerifyResult_Malformed;
+
+    return VerifyAnswer(&asked, response, responseLen);
+}
+
+VerifyResult VerifyAnswer(const WireQuestion *asked,
+                          const uint8_t *response, size_t responseLen)
+{
+    Reader       reader;
+    WireHeader   header;
+    WireQuestion answered;
+    ZoneSet      zones = { .count = 0 };
 
     ReaderInit(&reader, response, responseLen);
     if(!WireParseHeader(&reader, &header))
@@ -74,11 +81,11 @@ VerifyResult VerifyResponse(const uint8_t *query, size_t queryLen,
     if(header.qdCount != 1 || !WireParseQuestion(&reader, &answered))
         return VerifyResult_Malformed;
 
-    if(answered.type != asked.type || answered.klass != asked.klass
-       || !WireNameEqualExact(&answered.name, &asked.name))
+    if(answered.type != asked->type || answered.klass != asked->klass
+       || !WireNameEqualExact(&answered.name, &asked->name))
         return VerifyResult_QuestionMismatch;
 
-    ZoneAdd(&zones, &asked.name);
+    ZoneAdd(&zones, &asked->name);
 
     uint32_t total = (uint32_t)header.anCount + header.nsCount + header.arCount;
     for(uint32_t i = 0; i < total; i++)

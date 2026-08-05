@@ -15,8 +15,8 @@
    writes lines and keeps no log buffer. */
 #define ARENA_TOTAL_BYTES       KIB(1280)
 #define ARENA_CACHE_BYTES       KIB(768)
-#define ARENA_TXTABLE_BYTES     KIB(64)
-#define ARENA_CONN_BYTES        KIB(256)
+#define ARENA_TXTABLE_BYTES     KIB(128)
+#define ARENA_CONN_BYTES        KIB(192)
 
 #if defined(PROFILE_ENCRYPTED)
   /* Backs MBEDTLS_MEMORY_BUFFER_ALLOC_C so the TLS stack never reaches libc. */
@@ -37,6 +37,13 @@
    is sized well above CFG_EDNS_PAYLOAD_BYTES rather than at it. TCP DNS is rare
    on a LAN, so slots are few and the cap is generous instead of the reverse. */
 #define CFG_DNS_PORT            53
+
+/* In-flight upstream queries. Each slot keeps the query, so a retry can resend
+   it and a failure can echo its question back. At capacity the oldest slot is
+   taken, which displaces the query closest to giving up instead of refusing
+   the new one. */
+#define CFG_TX_SLOTS            64
+#define CFG_TX_QUERY_BYTES      512
 #define CFG_TCP_SLOTS           16
 #define CFG_TCP_MSG_BYTES       8192
 #define CFG_TCP_IDLE_MS         5000
@@ -71,8 +78,14 @@
 #define CFG_UPSTREAM_0X20       1
 #define CFG_UPSTREAM_ADDR       "1.1.1.1"
 #define CFG_UPSTREAM_PORT       53
-#define CFG_UPSTREAM_TIMEOUT_MS 2000
-#define CFG_UPSTREAM_RETRIES    2
+/* Guarded so a test can shrink the wait. Without the guard a -D override is
+   silently discarded and the test still waits the shipped six seconds. */
+#ifndef CFG_UPSTREAM_TIMEOUT_MS
+  #define CFG_UPSTREAM_TIMEOUT_MS 2000
+#endif
+#ifndef CFG_UPSTREAM_RETRIES
+  #define CFG_UPSTREAM_RETRIES    2
+#endif
 #define CFG_MAX_UPSTREAMS       4
 
 /* Blocked response: 0 = NXDOMAIN, 1 = NODATA, 2 = null address. */

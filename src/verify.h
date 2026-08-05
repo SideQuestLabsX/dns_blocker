@@ -27,6 +27,12 @@ typedef enum
 VerifyResult VerifyResponse(const uint8_t *query, size_t queryLen,
                             const uint8_t *response, size_t responseLen);
 
+/* Same check against a question kept from the query that went out. The
+   in-flight table holds this instead of the whole query, which is the
+   difference between 270 bytes a slot and a buffer for a full message. */
+VerifyResult VerifyAnswer(const WireQuestion *asked,
+                          const uint8_t *response, size_t responseLen);
+
 const char *VerifyResultName(VerifyResult result);
 
 #endif

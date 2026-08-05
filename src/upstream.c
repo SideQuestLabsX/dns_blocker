@@ -97,89 +97,80 @@ bool UpstreamInit(Upstream *upstream, const char *address, uint16_t port)
     return false;
 }
 
-static bool QueryOnce(Upstream *upstream, const uint8_t *query, size_t queryLen,
-                      uint8_t *out, size_t cap, size_t *outLen)
+bool UpstreamBegin(Upstream *upstream, const uint8_t *query, size_t queryLen,
+                   UpstreamExchange *exchange)
 {
+    uint8_t      sent[CFG_UDP_MSG_BYTES];
+    Reader       reader;
+    WireHeader   header;
+
+    exchange->fd = -1;
+
+    if(queryLen < WIRE_HEADER_BYTES || queryLen > sizeof sent
+       || upstream->addrLen == 0)
+        return false;
+
+    memcpy(sent, query, queryLen);
+    exchange->id = RandomId();
+    MsgSetId(sent, queryLen, exchange->id);
+    ApplyCaseRandomisation(sent, queryLen);
+
+    /* Parsed after randomisation, so the stored question carries the case the
+       answer has to echo. */
+    ReaderInit(&reader, sent, queryLen);
+    if(!WireParseHeader(&reader, &header) || header.qdCount != 1
+       || !WireParseQuestion(&reader, &exchange->asked))
+        return false;
+
     int fd = socket(upstream->addr.ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if(fd < 0)
         return false;
 
-    if(connect(fd, (struct sockaddr *)&upstream->addr, upstream->addrLen) != 0)
+    if(connect(fd, (struct sockaddr *)&upstream->addr, upstream->addrLen) != 0
+       || send(fd, sent, queryLen, 0) != (ssize_t)queryLen)
     {
         close(fd);
         return false;
     }
 
-    uint8_t sent[CFG_UDP_MSG_BYTES];
-    if(queryLen > sizeof sent)
-    {
-        close(fd);
-        return false;
-    }
+    exchange->fd = fd;
+    upstream->queries++;
+    return true;
+}
 
-    memcpy(sent, query, queryLen);
+UpstreamRead UpstreamComplete(Upstream *upstream, const UpstreamExchange *exchange,
+                              uint8_t *out, size_t cap, size_t *outLen)
+{
+    ssize_t got = recv(exchange->fd, out, cap, MSG_DONTWAIT);
 
-    uint16_t id = RandomId();
-    MsgSetId(sent, queryLen, id);
-    ApplyCaseRandomisation(sent, queryLen);
-
-    if(send(fd, sent, queryLen, 0) != (ssize_t)queryLen)
-    {
-        close(fd);
-        return false;
-    }
-
-    struct pollfd waiting = { .fd = fd, .events = POLLIN, .revents = 0 };
-    int ready = poll(&waiting, 1, CFG_UPSTREAM_TIMEOUT_MS);
-
-    if(ready <= 0)
-    {
-        close(fd);
-        if(ready == 0)
-            upstream->timeouts++;
-        return false;
-    }
-
-    ssize_t got = recv(fd, out, cap, 0);
-    close(fd);
+    if(got < 0)
+        return UpstreamRead_Empty;
 
     if(got < (ssize_t)WIRE_HEADER_BYTES)
-        return false;
+        return UpstreamRead_Again;
 
-    if(MsgId(out, (size_t)got) != id)
+    if(MsgId(out, (size_t)got) != exchange->id)
     {
         upstream->mismatches++;
-        return false;
+        return UpstreamRead_Again;
     }
 
-    /* Checked against the copy that went out, so the question comparison sees
-       the randomised case and the bailiwick set uses the name really asked. */
-    VerifyResult verdict = VerifyResponse(sent, queryLen, out, (size_t)got);
+    VerifyResult verdict = VerifyAnswer(&exchange->asked, out, (size_t)got);
     if(verdict != VerifyResult_Ok)
     {
         upstream->rejected++;
         upstream->lastReject = verdict;
-        return false;
+        return UpstreamRead_Again;
     }
 
     *outLen = (size_t)got;
-    return true;
+    return UpstreamRead_Answer;
 }
 
-bool UpstreamQuery(Upstream *upstream, const uint8_t *query, size_t queryLen,
-                   uint8_t *out, size_t cap, size_t *outLen)
+void UpstreamEnd(UpstreamExchange *exchange)
 {
-    if(queryLen < WIRE_HEADER_BYTES || upstream->addrLen == 0)
-        return false;
+    if(exchange->fd >= 0)
+        close(exchange->fd);
 
-    upstream->queries++;
-
-    for(int attempt = 0; attempt <= CFG_UPSTREAM_RETRIES; attempt++)
-    {
-        if(QueryOnce(upstream, query, queryLen, out, cap, outLen))
-            return true;
-    }
-
-    upstream->failures++;
-    return false;
+    exchange->fd = -1;
 }

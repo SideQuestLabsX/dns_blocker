@@ -89,7 +89,8 @@ int main(void)
 
     Report(&mem, &list, &cache);
 
-    if(!ServerOpen(&server, &cache, &upstream, &mem.conn, CFG_DNS_PORT))
+    if(!ServerOpen(&server, &cache, &upstream, &mem.conn, &mem.txTable,
+                   CFG_DNS_PORT))
     {
         fprintf(stderr, "dns_blocker: cannot bind port %d\n", CFG_DNS_PORT);
         BlocklistUnload(&list);
