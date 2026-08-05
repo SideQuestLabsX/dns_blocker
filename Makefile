@@ -107,11 +107,15 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 # longer there
 HDR := $(wildcard src/*.h)
 
-test: $(BUILD)/wire_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
+	@$(BUILD)/cache_test
 	@$(BUILD)/fuzz_quick 50000
 
 $(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/cache_test: tests/cache_test.c src/cache.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # Coverage-blind driver for the same entry point, so the fuzz target is
@@ -119,7 +123,7 @@ $(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
 fuzz-quick: $(BUILD)/fuzz_quick
 	@$(BUILD)/fuzz_quick
 
-$(BUILD)/fuzz_quick: tests/fuzz_standalone.c tests/fuzz_wire.c src/wire.c $(HDR) | $(BUILD)
+$(BUILD)/fuzz_quick: tests/fuzz_standalone.c tests/fuzz_wire.c src/wire.c src/cache.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # libFuzzer needs clang. Run the binary directly, optionally with -max_total_time
@@ -128,7 +132,7 @@ FUZZ_CC ?= clang
 fuzz: $(BUILD)/fuzz_wire
 	@echo "run: $(BUILD)/fuzz_wire -max_total_time=60"
 
-$(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c $(HDR) | $(BUILD)
+$(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c src/cache.c src/arena.c $(HDR) | $(BUILD)
 	$(FUZZ_CC) -std=c11 -O1 -g -fsanitize=fuzzer,address,undefined -Isrc $(filter %.c,$^) -o $@
 
 $(BUILD):

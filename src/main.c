@@ -1,5 +1,6 @@
 #include "arena.h"
 #include "blocklist.h"
+#include "cache.h"
 #include "config.h"
 
 #include <stdio.h>
@@ -27,10 +28,11 @@ static bool MemoryInit(Memory *mem)
         && ArenaCarve(&mem->root, &mem->tls,     ARENA_TLS_BYTES);
 }
 
-static void Report(const Memory *mem, const Blocklist *list)
+static void Report(const Memory *mem, const Blocklist *list, const Cache *cache)
 {
     printf("arena     %zu bytes\n", mem->root.size);
-    printf("cache     %zu\n", mem->cache.size);
+    printf("cache     %zu (%zu entries)\n", mem->cache.size,
+           cache->bucketCount * CFG_CACHE_WAYS);
     printf("txtable   %zu\n", mem->txTable.size);
     printf("tls       %zu\n", mem->tls.size);
     printf("spare     %zu\n", ArenaRemaining(&mem->root));
@@ -41,6 +43,7 @@ int main(void)
 {
     Memory    mem;
     Blocklist list;
+    Cache     cache;
 
     if(!MemoryInit(&mem))
     {
@@ -48,10 +51,16 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    if(!CacheInit(&cache, &mem.cache))
+    {
+        fputs("dns_blocker: cache slice too small\n", stderr);
+        return EXIT_FAILURE;
+    }
+
     if(!BlocklistLoad(&list, CFG_BLOCKLIST_PATH))
         fputs("dns_blocker: no blocklist available, filtering is disabled\n", stderr);
 
-    Report(&mem, &list);
+    Report(&mem, &list, &cache);
 
     fputs("dns_blocker: no resolver implemented yet\n", stderr);
     BlocklistUnload(&list);

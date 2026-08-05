@@ -41,6 +41,17 @@
 #define CFG_CACHE_MIN_TTL_SEC   60
 #define CFG_CACHE_MAX_TTL_SEC   86400
 
+/* Set-associative. A lookup or an insert touches one bucket only. This bounds
+   the probe to CFG_CACHE_WAYS entries and keeps indexing to a mask. ARMv6 has
+   no hardware divide, so a modulo here would call libgcc on the hot path.
+
+   The cache refuses a response larger than CFG_CACHE_ENTRY_BYTES, and one that
+   carries more than CFG_CACHE_MAX_TTLS records. The daemon still serves
+   both. */
+#define CFG_CACHE_WAYS          8
+#define CFG_CACHE_ENTRY_BYTES   640
+#define CFG_CACHE_MAX_TTLS      16
+
 /* Parser. A compression pointer must target a strictly earlier offset, and the
    jump count is capped independently of message size. */
 #define CFG_MAX_NAME_BYTES      255

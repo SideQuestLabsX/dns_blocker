@@ -157,20 +157,87 @@ bool WireParseQuestion(Reader *reader, WireQuestion *out)
         && ReaderU16(reader, &out->klass);
 }
 
+bool WireReadRecord(Reader *reader, WireRecord *out)
+{
+    if(!WireReadName(reader, &out->name)
+       || !ReaderU16(reader, &out->type)
+       || !ReaderU16(reader, &out->klass))
+        return false;
+
+    out->ttlOffset = reader->pos;
+
+    if(!ReaderU32(reader, &out->ttl)
+       || !ReaderU16(reader, &out->rdLength))
+        return false;
+
+    out->rdOffset = reader->pos;
+    return ReaderSkip(reader, out->rdLength);
+}
+
 bool WireSkipRecord(Reader *reader)
 {
-    WireName name;
-    uint16_t type;
-    uint16_t klass;
-    uint32_t ttl;
-    uint16_t rdLength;
+    WireRecord record;
+    return WireReadRecord(reader, &record);
+}
 
-    return WireReadName(reader, &name)
-        && ReaderU16(reader, &type)
-        && ReaderU16(reader, &klass)
-        && ReaderU32(reader, &ttl)
-        && ReaderU16(reader, &rdLength)
-        && ReaderSkip(reader, rdLength);
+bool WireSoaMinimum(const uint8_t *msg, size_t len, const WireRecord *soa,
+                    uint32_t *out)
+{
+    Reader   reader;
+    WireName mname;
+    WireName rname;
+    uint32_t serial;
+    uint32_t refresh;
+    uint32_t retry;
+    uint32_t expire;
+
+    if(soa->type != WIRE_TYPE_SOA)
+        return false;
+
+    /* Bounded to the record's own rdata. A malformed length must not let the
+       walk read the bytes of the next record as SOA fields. */
+    if(soa->rdOffset > len || len - soa->rdOffset < soa->rdLength)
+        return false;
+
+    ReaderInit(&reader, msg, soa->rdOffset + soa->rdLength);
+    if(!ReaderSkip(&reader, soa->rdOffset))
+        return false;
+
+    return WireReadName(&reader, &mname)
+        && WireReadName(&reader, &rname)
+        && ReaderU32(&reader, &serial)
+        && ReaderU32(&reader, &refresh)
+        && ReaderU32(&reader, &retry)
+        && ReaderU32(&reader, &expire)
+        && ReaderU32(&reader, out);
+}
+
+uint16_t WireRcode(const WireHeader *header)
+{
+    return (uint16_t)(header->flags & 0x000Fu);
+}
+
+uint64_t WireNameHash(const WireName *name, uint16_t type, uint16_t klass)
+{
+    /* FNV-1a over the lowercased name, so the hash matches the
+       case-insensitive comparison in WireNameEqual. */
+    uint64_t hash = 0xCBF29CE484222325u;
+
+    for(size_t i = 0; i < name->len; i++)
+    {
+        uint8_t c = name->wire[i];
+        if(c >= 'A' && c <= 'Z')
+            c = (uint8_t)(c + 32);
+
+        hash ^= c;
+        hash *= 0x100000001B3u;
+    }
+
+    hash ^= type;
+    hash *= 0x100000001B3u;
+    hash ^= klass;
+    hash *= 0x100000001B3u;
+    return hash;
 }
 
 bool WireFindEdns(const uint8_t *msg, size_t len, WireEdns *out)
@@ -200,38 +267,23 @@ bool WireFindEdns(const uint8_t *msg, size_t len, WireEdns *out)
 
     for(uint16_t i = 0; i < header.arCount; i++)
     {
-        WireName name;
-        uint16_t type;
-        uint16_t klass;
-        uint32_t ttl;
-        uint16_t rdLength;
+        WireRecord record;
 
-        if(!WireReadName(&reader, &name)
-           || !ReaderU16(&reader, &type)
-           || !ReaderU16(&reader, &klass)
-           || !ReaderU32(&reader, &ttl)
-           || !ReaderU16(&reader, &rdLength))
+        if(!WireReadRecord(&reader, &record))
             return false;
 
-        if(type != WIRE_TYPE_OPT)
-        {
-            if(!ReaderSkip(&reader, rdLength))
-                return false;
+        if(record.type != WIRE_TYPE_OPT)
             continue;
-        }
 
         /* OPT must sit at the root name, and only one may appear. */
-        if(name.len != 1 || name.wire[0] != 0 || out->bPresent)
+        if(record.name.len != 1 || record.name.wire[0] != 0 || out->bPresent)
             return false;
 
         out->bPresent    = true;
-        out->payloadSize = klass;
-        out->extRcode    = (uint8_t)((ttl >> 24) & 0xFFu);
-        out->version     = (uint8_t)((ttl >> 16) & 0xFFu);
-        out->flags       = (uint16_t)(ttl & 0xFFFFu);
-
-        if(!ReaderSkip(&reader, rdLength))
-            return false;
+        out->payloadSize = record.klass;
+        out->extRcode    = (uint8_t)((record.ttl >> 24) & 0xFFu);
+        out->version     = (uint8_t)((record.ttl >> 16) & 0xFFu);
+        out->flags       = (uint16_t)(record.ttl & 0xFFFFu);
     }
 
     return true;

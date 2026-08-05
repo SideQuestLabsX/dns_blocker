@@ -13,6 +13,7 @@
 
 #define WIRE_HEADER_BYTES   12
 #define WIRE_TYPE_A         1
+#define WIRE_TYPE_SOA       6
 #define WIRE_TYPE_AAAA      28
 #define WIRE_TYPE_OPT       41
 #define WIRE_TYPE_HTTPS     65
@@ -60,6 +61,19 @@ typedef struct
     uint16_t flags;
 } WireEdns;
 
+/* Offsets are absolute within the message, so a cached copy can have its TTLs
+   rewritten in place without reparsing. */
+typedef struct
+{
+    WireName name;
+    uint16_t type;
+    uint16_t klass;
+    uint32_t ttl;
+    size_t   ttlOffset;
+    size_t   rdOffset;
+    uint16_t rdLength;
+} WireRecord;
+
 void ReaderInit(Reader *reader, const uint8_t *msg, size_t len);
 bool ReaderU8(Reader *reader, uint8_t *out);
 bool ReaderU16(Reader *reader, uint16_t *out);
@@ -74,8 +88,19 @@ bool WireReadName(Reader *reader, WireName *out);
 bool WireParseHeader(Reader *reader, WireHeader *out);
 bool WireParseQuestion(Reader *reader, WireQuestion *out);
 
+/* Reads one resource record, leaving the cursor after its rdata. */
+bool WireReadRecord(Reader *reader, WireRecord *out);
+
 /* Skips one resource record including its rdata. */
 bool WireSkipRecord(Reader *reader);
+
+/* MINIMUM field of an SOA record, which bounds negative cache lifetime per
+   RFC 2308. Fails when the record is not an SOA or its rdata is malformed. */
+bool WireSoaMinimum(const uint8_t *msg, size_t len, const WireRecord *soa,
+                    uint32_t *out);
+
+uint16_t WireRcode(const WireHeader *header);
+uint64_t WireNameHash(const WireName *name, uint16_t type, uint16_t klass);
 
 /* Walks the message and reports the OPT pseudo-record when the additional
    section carries one. Absence is not an error: out->bPresent says which. */
