@@ -5,9 +5,9 @@ one memory arena at start-up and does no other allocation. It uses no database
 engine and no scripting runtime. It links static musl, and mbedTLS for the
 encrypted profile.
 
-The boot arena, the memory budget and the health probe are built. The daemon
-does not resolve names yet: it reports its memory budget and exits non-zero. The
-table below gives the target behavior.
+The daemon resolves names. It listens on UDP and TCP, parses RFC 1035
+messages, caches responses and forwards to a plaintext upstream resolver.
+Filtering is not built yet, so this is a caching forwarder.
 
 ## Setup
 
@@ -34,14 +34,14 @@ Raspberry Pi Zero W and the Zero 2 W.
 
 | Area | Behavior |
 |---|---|
-| Filtering | A reverse-label trie with exact and suffix matches, for example `*.doubleclick.net` |
-| Blocked answers | `NXDOMAIN` by default, with `NODATA` and null-address alternatives |
-| Caching | Keeps each TTL and decrements it by the time that passed, negative caching to RFC 2308, CLOCK eviction |
 | Listeners | UDP and TCP on port 53, IPv4 and IPv6, with EDNS0 support |
-| Upstream | Plaintext, DNS-over-TLS or DNS-over-HTTPS |
-| Hardening | Random transaction IDs and source ports, bailiwick checking, bounded in-flight state |
-| Logging | One line for each query to `stdout`, one line for each fault to `stderr`. The daemon keeps no log |
-| Status | A read-only shared memory segment with counters and recent queries |
+| Caching | Keeps each TTL and decrements it by the time that passed, negative caching to RFC 2308, CLOCK eviction |
+| Upstream | Plaintext forwarding to one resolver |
+| Hardening | Random transaction IDs and random source ports |
+
+These parts are not built yet: domain filtering and the reverse-label trie,
+blocked-answer policy, bailiwick checking, DNS-over-TLS, DNS-over-HTTPS, query
+logging and the shared memory status segment.
 
 The daemon passes HTTPS and SVCB records through without change, so Encrypted
 Client Hello continues to operate.
@@ -80,6 +80,23 @@ make PROFILE=minimal
 The build is static PIE with `-fstack-protector-strong`. A daemon that parses
 data from the network needs both. The build examines the linked file and stops
 if the toolchain gave a dynamic binary.
+
+## Test
+
+```sh
+make test
+```
+
+This runs the unit tests and the end-to-end tests with AddressSanitizer and
+UndefinedBehaviorSanitizer, then a short fuzz run. `make fuzz` builds the
+libFuzzer target and needs clang. `make test-static` builds the same tests
+without sanitizers, so they cross-compile and run under emulation on the target
+instruction set.
+
+CI runs the host tests, links the encrypted profile, fuzzes against a corpus
+that stays between runs, cross-builds each architecture against static musl,
+and runs the parser tests under QEMU for ARM. An x86 test cannot find an
+unaligned access fault on ARM1176.
 
 ## Health probe
 

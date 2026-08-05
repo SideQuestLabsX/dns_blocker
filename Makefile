@@ -77,7 +77,7 @@ define assert_static
 	fi
 endef
 
-.PHONY: all check clean test fuzz fuzz-quick
+.PHONY: all check clean test test-static test-static-run fuzz fuzz-quick
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
@@ -107,9 +107,11 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 # longer there
 HDR := $(wildcard src/*.h)
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/server_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
+	@$(BUILD)/msg_test
+	@$(BUILD)/server_test
 	@$(BUILD)/fuzz_quick 50000
 
 $(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
@@ -117,6 +119,32 @@ $(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
 
 $(BUILD)/cache_test: tests/cache_test.c src/cache.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/msg_test: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+# Binds loopback sockets and drives a real query through the whole path
+$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@ -lpthread
+
+# Sanitizer-free copies of the pure tests, built with the shipped flags so they
+# cross-compile and run under qemu-user on the target instruction set. This is
+# the only way the byte-wise field reads get exercised on real ARM
+XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native
+
+test-static: $(XTEST)
+
+test-static-run: $(XTEST)
+	@for t in $(XTEST); do $(RUNNER) $$t || exit 1; done
+
+$(BUILD)/wire_test_native: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/cache_test_native: tests/cache_test.c src/cache.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/msg_test_native: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 # Coverage-blind driver for the same entry point, so the fuzz target is
 # exercised on any toolchain with a sanitizer

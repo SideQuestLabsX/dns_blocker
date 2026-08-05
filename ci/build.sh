@@ -1,6 +1,6 @@
 #!/bin/sh
-# Build every shipped artifact. Skips a target whose cross compiler is absent
-# and fails on any compiler error.
+# Local stand-in for the CI cross matrix. Skips a target whose compiler is
+# absent and fails on any compiler error.
 set -eu
 
 ARCHES="x86_64 aarch64 armv7 armv6"
@@ -9,9 +9,9 @@ PROFILES="minimal encrypted"
 cc_for()
 {
     case "$1" in
-        x86_64)  echo "musl-gcc" ;;
+        x86_64)  echo "x86_64-linux-musl-gcc" ;;
         aarch64) echo "aarch64-linux-musl-gcc" ;;
-        armv7)   echo "arm-linux-musleabihf-gcc" ;;
+        armv7)   echo "armv7l-linux-musleabihf-gcc" ;;
         armv6)   echo "arm-linux-musleabihf-gcc" ;;
     esac
 }
@@ -31,6 +31,7 @@ for arch in $ARCHES; do
         echo "build $arch $profile"
         make ARCH="$arch" PROFILE="$profile" CC="$cc"
         make ARCH="$arch" PROFILE="$profile" CC="$cc" check
+        make ARCH="$arch" PROFILE="$profile" CC="$cc" test-static
         built=$((built + 1))
     done
 done

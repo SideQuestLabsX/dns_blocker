@@ -13,9 +13,10 @@
    The blocklist has its own mapping, because a compiled list gives its size at
    boot. See blocklist.h. The supervisor owns output routing, so the daemon
    writes lines and keeps no log buffer. */
-#define ARENA_TOTAL_BYTES       KIB(1024)
+#define ARENA_TOTAL_BYTES       KIB(1280)
 #define ARENA_CACHE_BYTES       KIB(768)
 #define ARENA_TXTABLE_BYTES     KIB(64)
+#define ARENA_CONN_BYTES        KIB(256)
 
 #if defined(PROFILE_ENCRYPTED)
   /* Backs MBEDTLS_MEMORY_BUFFER_ALLOC_C so the TLS stack never reaches libc. */
@@ -32,10 +33,14 @@
 #define CFG_BLOCKLIST_PATH      "/run/dns_blocker/blocklist.trie"
 #define CFG_BLOCKLIST_MAX_BYTES MIB(16)
 
-/* Listeners */
+/* Listeners. TCP carries whatever exceeded the UDP payload size, so its buffer
+   is sized well above CFG_EDNS_PAYLOAD_BYTES rather than at it. TCP DNS is rare
+   on a LAN, so slots are few and the cap is generous instead of the reverse. */
 #define CFG_DNS_PORT            53
-#define CFG_TCP_SLOTS           32
+#define CFG_TCP_SLOTS           16
+#define CFG_TCP_MSG_BYTES       8192
 #define CFG_TCP_IDLE_MS         5000
+#define CFG_UDP_MSG_BYTES       1500
 
 /* Cache. Clamps bound both thrash and staleness. */
 #define CFG_CACHE_MIN_TTL_SEC   60
@@ -60,6 +65,8 @@
 #define CFG_EDNS_PAYLOAD_BYTES  1232
 
 /* Upstream */
+#define CFG_UPSTREAM_ADDR       "1.1.1.1"
+#define CFG_UPSTREAM_PORT       53
 #define CFG_UPSTREAM_TIMEOUT_MS 2000
 #define CFG_UPSTREAM_RETRIES    2
 #define CFG_MAX_UPSTREAMS       4

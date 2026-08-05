@@ -1,0 +1,194 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so the guided fuzzer gets a long run against a growing corpus
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned, so a toolchain change appears as a commit
+  TOOLCHAIN_RELEASE: '20260515'
+
+jobs:
+  test:
+    name: host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit and integration tests under ASan and UBSan
+        run: make test PROFILE=minimal
+
+      - name: Build the daemon and the probe
+        run: |
+          make PROFILE=minimal
+          make check PROFILE=minimal
+
+      - name: Whitespace
+        run: git diff --check HEAD
+
+      - name: Line endings
+        run: |
+          bad=$(git ls-files --eol | grep -E 'w/crlf|w/mixed' || true)
+          if [ -n "$bad" ]; then echo "$bad"; exit 1; fi
+
+  encrypted:
+    name: encrypted profile links
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mbedTLS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmbedtls-dev
+
+      # Proves -lmbedtls -lmbedx509 -lmbedcrypto actually resolve. The arena
+      # allocator wiring is not exercised until the TLS shim exists.
+      - name: Build
+        run: make PROFILE=encrypted
+
+  fuzz:
+    name: guided fuzzing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: .fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Build fuzzer
+        run: make fuzz PROFILE=minimal
+
+      - name: Run
+        run: |
+          mkdir -p .fuzz-corpus
+          seconds=120
+          if [ "${{ github.event_name }}" = "schedule" ]; then seconds=900; fi
+          ./build/x86_64-minimal/fuzz_wire .fuzz-corpus \
+            -max_total_time=$seconds -print_final_stats=1
+
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
+
+  cross:
+    name: ${{ matrix.arch }} static musl
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            triple: x86_64-unknown-linux-musl
+          - arch: aarch64
+            triple: aarch64-unknown-linux-musl
+          - arch: armv7
+            triple: armv7-unknown-linux-musleabihf
+          - arch: armv6
+            triple: arm-unknown-linux-musleabihf
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache toolchain
+        id: toolchain
+        uses: actions/cache@v4
+        with:
+          path: /opt/cross/${{ matrix.triple }}
+          key: musl-${{ matrix.triple }}-${{ env.TOOLCHAIN_RELEASE }}
+
+      # GitHub releases stay reachable from the runners
+      - name: Fetch toolchain
+        if: steps.toolchain.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/cross
+          url="https://github.com/cross-tools/musl-cross/releases/download/${TOOLCHAIN_RELEASE}/${{ matrix.triple }}.tar.xz"
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/cross.tar.xz
+          sudo tar -xJf /tmp/cross.tar.xz -C /opt/cross
+          test -x "/opt/cross/${{ matrix.triple }}/bin/${{ matrix.triple }}-gcc"
+
+      - name: Build
+        run: |
+          export PATH="/opt/cross/${{ matrix.triple }}/bin:$PATH"
+          make ARCH=${{ matrix.arch }} PROFILE=minimal CC=${{ matrix.triple }}-gcc
+          make ARCH=${{ matrix.arch }} PROFILE=minimal CC=${{ matrix.triple }}-gcc check
+          make ARCH=${{ matrix.arch }} PROFILE=minimal CC=${{ matrix.triple }}-gcc test-static
+
+      # ARMv6 must not acquire unaligned word access or movw/movt, and the
+      # binary must stay static PIE on every target
+      - name: Inspect artifact
+        run: |
+          f=build/${{ matrix.arch }}-minimal/dns_blocker
+          file "$f"
+          file "$f" | grep -q "static-pie linked\|statically linked"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dns_blocker-${{ matrix.arch }}
+          path: build/${{ matrix.arch }}-minimal/
+
+  emulated:
+    name: run tests on the real instruction set
+    runs-on: ubuntu-latest
+    needs: cross
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: armv6
+            qemu: qemu-arm
+          - arch: armv7
+            qemu: qemu-arm
+          - arch: aarch64
+            qemu: qemu-aarch64
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dns_blocker-${{ matrix.arch }}
+          path: build
+
+      - name: Install qemu user emulation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+
+      # The parser reads every multi-byte field byte-wise because ARM1176
+      # either faults or silently rotates an unaligned word. Nothing running on
+      # x86 can catch a regression there, so the tests run on the target ISA.
+      - name: Run parser, cache and message tests
+        run: |
+          set -e
+          chmod +x build/*_native build/dns_blocker || true
+          for t in build/wire_test_native build/cache_test_native build/msg_test_native; do
+            echo "== $t"
+            ${{ matrix.qemu }} "$t"
+          done
+
+      - name: Boot the daemon far enough to carve its arena
+        run: |
+          out=$(${{ matrix.qemu }} build/dns_blocker 2>&1 | head -20) || true
+          echo "$out"
+          echo "$out" | grep -q "arena"
