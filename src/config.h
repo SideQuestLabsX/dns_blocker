@@ -29,7 +29,11 @@
 
 /* Blocklist. Mapped separately from the arena at boot and sized from the
    compiled file. The cap bounds a hostile or accidentally huge list on a 512MB
-   board. A list above it is refused and the embedded fallback is used. */
+   board. A list above it is refused and the embedded fallback is used.
+
+   NULL consults no file, which leaves the list linked into .rodata as the whole
+   policy. That is the air-gapped build, where a list is changed by re-flashing
+   and by nothing else. */
 #define CFG_BLOCKLIST_PATH      "/run/dns_blocker/blocklist.trie"
 #define CFG_BLOCKLIST_MAX_BYTES MIB(16)
 

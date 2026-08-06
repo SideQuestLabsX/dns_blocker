@@ -181,6 +181,36 @@ static void TestEmptyAndAbsentList(void)
     CHECK(!BlocklistContains(&list, &name));
 }
 
+/* The list linked into .rodata, reached two ways: a path that maps nothing, and
+   the NULL path of an air-gapped build, which reads no file at all. The build
+   decides whether a list is there, so both outcomes are checked. */
+static void TestEmbeddedList(void)
+{
+    static const char *const paths[] = { "/nonexistent/blocklist.trie", NULL };
+
+    for(size_t i = 0; i < sizeof paths / sizeof paths[0]; i++)
+    {
+        Blocklist list;
+        bool      bLoaded = BlocklistLoad(&list, paths[i]);
+
+        if(G_EMBEDDED_SIZE == 0)
+        {
+            CHECK(!bLoaded);
+            CHECK(list.source == BlocklistSource_None);
+        }
+        else
+        {
+            CHECK(bLoaded);
+            CHECK(list.source == BlocklistSource_Embedded);
+            CHECK(list.nodeBytes > 0);
+            CHECK_BLOCKED(&list, "definitely-not-in-any-list-12345.example",
+                          false);
+        }
+
+        BlocklistUnload(&list);
+    }
+}
+
 /* The file arrives over the network, so a corrupt one has to be refused
    rather than followed. */
 static void TestCorruptHeaderRefused(void)
@@ -268,6 +298,7 @@ int main(void)
     TestExactAndSuffix();
     TestCaseIsIgnored();
     TestEmptyAndAbsentList();
+    TestEmbeddedList();
     TestCorruptHeaderRefused();
     TestCorruptBodyIsBounded();
 

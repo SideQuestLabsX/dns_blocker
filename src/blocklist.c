@@ -12,11 +12,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* The embedded list stays empty until the trie generator exists. A zero size
-   means the fallback is unavailable. */
-static const unsigned char G_EMBEDDED_TRIE[1] = { 0 };
-static const size_t        G_EMBEDDED_SIZE    = 0;
-
 static bool MapFile(Blocklist *list, const char *path)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -75,7 +70,8 @@ bool BlocklistLoad(Blocklist *list, const char *path)
     if(path != NULL && MapFile(list, path))
         return true;
 
-    if(G_EMBEDDED_SIZE > 0)
+    if(G_EMBEDDED_SIZE > 0 && BlocklistParseHeader(list, G_EMBEDDED_TRIE,
+                                                   G_EMBEDDED_SIZE))
     {
         list->base   = G_EMBEDDED_TRIE;
         list->size   = G_EMBEDDED_SIZE;

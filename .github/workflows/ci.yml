@@ -28,15 +28,21 @@ jobs:
           make check PROFILE=minimal
           make tools PROFILE=minimal
 
+      # The stub and the generated array define the same symbols, so a build
+      # without an embedded list has to link as well
+      - name: Build without an embedded list
+        run: make PROFILE=minimal EMBED_LIST= BUILD=build/no-embed
+
       # The generator reloads its own output through the daemon's lookup, so
       # this also checks that the two agree on ordering.
       - name: Compile a list into a trie
         run: |
           cat > /tmp/ci.txt <<'LIST'
-          # a comment, and a hosts-file line
+          # a comment, a hosts-file line and a wildcard rule
           doubleclick.net
           googlesyndication.com
           0.0.0.0 ads.example.com
+          *.tracker.example.org
           LIST
           ./build/x86_64-minimal/mkblocklist /tmp/ci.trie /tmp/ci.txt
 

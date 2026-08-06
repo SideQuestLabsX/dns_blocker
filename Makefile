@@ -10,6 +10,13 @@ BUILD   ?= build/$(ARCH)-$(PROFILE)
 TARGET  := $(BUILD)/dns_blocker
 
 CC      ?= gcc
+# mkblocklist runs on the build host and its output is linked into the daemon,
+# so a cross build still needs a native compiler for it
+HOSTCC  ?= gcc
+
+# Domain list compiled into .rodata as the cold-boot fallback. Set it empty to
+# link the zero-length stub and ship without one
+EMBED_LIST ?= blocklists/embedded.txt
 
 # -fstack-protector-strong is mandatory, the binary parses attacker-controlled
 # length-prefixed data
@@ -57,9 +64,11 @@ endif
 
 CFLAGS  := $(CFLAGS_COMMON) $(CFLAGS_ARCH) $(CFLAGS_PROFILE) $(FEATURES)
 
-SRC := $(wildcard src/*.c)
-OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
-DEP := $(OBJ:.o=.d)
+# src/embedded.c is compiled through its own rule below, because a generated
+# list replaces it
+SRC := $(filter-out src/embedded.c,$(wildcard src/*.c))
+OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC)) $(BUILD)/embedded.o
+DEP := $(patsubst src/%.c,$(BUILD)/%.d,$(SRC))
 
 # A cross compiler has a matching readelf beside it, so prefer that name. Two
 # cases need the fallback: make sets CC to cc by default, and a wrapper such as
@@ -85,6 +94,12 @@ define assert_static
 	fi
 endef
 
+# A prerequisite list expands where it is written, so this has to precede every
+# rule that names it. Commands built in one step get no depfiles and depend on
+# every header instead: a stale binary reports PASS for code that is gone, and a
+# stale generator writes a list in a format the daemon no longer reads
+HDR := $(wildcard src/*.h)
+
 .PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick
 all: $(TARGET)
 
@@ -95,10 +110,24 @@ $(TARGET): $(OBJ)
 	@echo "built $@"
 
 # Compiles domain lists into the trie the daemon maps. Host tool, so it is not
-# built with the shipped flags
+# built with the shipped flags, and it links the stub rather than its own output
 tools: $(BUILD)/mkblocklist
-$(BUILD)/mkblocklist: tools/mkblocklist.c src/blocklist.c src/wire.c $(HDR) | $(BUILD)
-	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Isrc $(filter %.c,$^) -o $@
+$(BUILD)/mkblocklist: tools/mkblocklist.c src/blocklist.c src/wire.c src/embedded.c $(HDR) | $(BUILD)
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Isrc $(filter %.c,$^) -o $@
+
+# One of the two definitions of G_EMBEDDED_TRIE reaches the link: the stub, or
+# the array mkblocklist writes from EMBED_LIST
+ifeq ($(strip $(EMBED_LIST)),)
+  EMBED_SRC := src/embedded.c
+else
+  EMBED_SRC := $(BUILD)/embedded_gen.c
+
+$(BUILD)/embedded_gen.c: $(EMBED_LIST) $(BUILD)/mkblocklist | $(BUILD)
+	$(BUILD)/mkblocklist -c $@ $(EMBED_LIST)
+endif
+
+$(BUILD)/embedded.o: $(EMBED_SRC) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 # Health probe binary run by a supervisor. Keep it tiny
 check: $(BUILD)/dns_blocker.check
@@ -116,17 +145,13 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
 	-Isrc
 
-# These compile and link in one command, so -MMD would scatter depfiles. Depend
-# on every header instead: a stale test binary reports PASS for code that is no
-# longer there
-HDR := $(wildcard src/*.h)
-
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/server_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/server_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
 	@$(BUILD)/verify_test
 	@$(BUILD)/blocklist_test
+	@$(BUILD)/listline_test
 	@$(BUILD)/server_test
 	@$(BUILD)/fuzz_quick 50000
 
@@ -142,11 +167,16 @@ $(BUILD)/msg_test: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD)
 $(BUILD)/verify_test: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
-$(BUILD)/blocklist_test: tests/blocklist_test.c src/blocklist.c src/wire.c $(HDR) | $(BUILD)
+$(BUILD)/blocklist_test: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
+# The generator's line parsing. Header-only, so the tool and the test read the
+# same code rather than two copies of one format
+$(BUILD)/listline_test: tests/listline_test.c tools/listline.h | $(BUILD)
+	$(CC) $(TEST_CFLAGS) -Itools $< -o $@
+
 # Binds loopback sockets and drives a real query through the whole path
-$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
@@ -171,7 +201,7 @@ $(BUILD)/msg_test_native: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD
 $(BUILD)/verify_test_native: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
-$(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.c $(HDR) | $(BUILD)
+$(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 # Coverage-blind driver for the same entry point, so the fuzz target is

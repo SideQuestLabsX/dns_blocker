@@ -55,6 +55,11 @@ typedef struct
 #define BLOCKLIST_CHILD_BYTES  12
 #define BLOCKLIST_FLAG_TERMINAL 1u
 
+/* The list compiled into .rodata, defined either by the stub in src/embedded.c
+   or by the file `mkblocklist -c` writes. A zero size means there is none. */
+extern const unsigned char G_EMBEDDED_TRIE[];
+extern const size_t        G_EMBEDDED_SIZE;
+
 /* Maps the compiled list at path. Falls back to the embedded list when the
    file is missing, empty, unreadable or above CFG_BLOCKLIST_MAX_BYTES.
    Returns false only when neither source yields a usable list, which leaves

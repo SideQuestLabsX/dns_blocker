@@ -70,7 +70,8 @@ external dependency, and only the `encrypted` profile needs it.
 ## Blocklists
 
 `make tools` builds `mkblocklist`, which compiles domain lists into the file the
-daemon maps. It reads one domain per line and hosts-file lines alike.
+daemon maps. It reads a domain per line, a hosts-file line and a `*.example.com`
+wildcard rule alike.
 
 ```sh
 mkblocklist blocklist.trie list1.txt list2.txt
@@ -80,9 +81,29 @@ An entry blocks the name and every name below it, so `doubleclick.net` also
 covers `ad.doubleclick.net`. The generator reloads its own output through the
 daemon's lookup and fails if anything it inserted does not match.
 
-Point `CFG_BLOCKLIST_PATH` at the result. If the file is missing or unreadable,
-the daemon says so and forwards without filtering, because a resolver that
-fails closed takes the network down with it.
+Point `CFG_BLOCKLIST_PATH` at the result.
+
+The binary also carries a list of its own. `EMBED_LIST` names the source and
+defaults to `blocklists/embedded.txt`. The build compiles it with
+`mkblocklist -c`, which writes the trie as a C array, and links that into
+`.rodata`.
+
+```sh
+make EMBED_LIST=my-list.txt
+make EMBED_LIST=
+```
+
+`CFG_BLOCKLIST_PATH` decides what that list is for. With a path, the mapped file
+wins whenever it is there, and the compiled-in list covers a boot that has no
+file yet. Set the path to `NULL` and the daemon reads no file at all: the
+compiled-in list is the whole policy, it changes only by re-flashing, and the
+device needs nothing from the network to filter. Embed the full list for that
+build rather than the small one.
+
+An empty `EMBED_LIST` ships without an embedded list. If the mapped file is
+missing or unreadable and there is no embedded list either, the daemon says so
+and forwards without filtering, because a resolver that fails closed takes the
+network down with it.
 
 ## Build
 
@@ -94,6 +115,10 @@ make
 make ARCH=armv6
 make PROFILE=minimal
 ```
+
+A cross build also needs a native compiler, because the generator that compiles
+the embedded list runs on the build host. `HOSTCC` names it and defaults to
+`gcc`.
 
 Every target links static, and `-fstack-protector-strong` is always on. The
 64-bit targets also link position independent, so they get ASLR. 32-bit ARM
