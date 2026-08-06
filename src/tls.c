@@ -101,6 +101,54 @@ static TlsIo Translate(int result, TlsChannel *channel)
     return TlsIo_Error;
 }
 
+static bool DerObjectSize(const uint8_t *der, size_t remaining, size_t *out)
+{
+    if(remaining < 2 || der[0] != 0x30)
+        return false;
+
+    size_t header = 2;
+    size_t body   = der[1];
+
+    if((der[1] & 0x80u) != 0)
+    {
+        size_t bytes = der[1] & 0x7Fu;
+        if(bytes == 0 || bytes > sizeof(size_t) || remaining - 2 < bytes)
+            return false;
+
+        header += bytes;
+        body = 0;
+        for(size_t i = 0; i < bytes; i++)
+        {
+            if(body > (SIZE_MAX >> 8))
+                return false;
+            body = (body << 8) | der[2 + i];
+        }
+    }
+
+    if(header > remaining || body > remaining - header)
+        return false;
+
+    *out = header + body;
+    return true;
+}
+
+static bool ParseTrust(mbedtls_x509_crt *ca, const uint8_t *der, size_t len)
+{
+    size_t at = 0;
+
+    while(at < len)
+    {
+        size_t certLen = 0;
+        if(!DerObjectSize(der + at, len - at, &certLen)
+           || mbedtls_x509_crt_parse_der_nocopy(ca, der + at, certLen) != 0)
+            return false;
+
+        at += certLen;
+    }
+
+    return at == len;
+}
+
 bool TlsBackendInit(TlsBackend *backend, Arena *arena,
                     const uint8_t *caDer, size_t caLen)
 {
@@ -118,17 +166,16 @@ bool TlsBackendInit(TlsBackend *backend, Arena *arena,
     mbedtls_x509_crt_init(&backend->ca);
     backend->bCaReady = true;
 
-    int result = mbedtls_x509_crt_parse_der_nocopy(&backend->ca, caDer, caLen);
-    if(result != 0)
+    if(!ParseTrust(&backend->ca, caDer, caLen))
         goto fail;
 
     mbedtls_ssl_config_init(&backend->config);
     backend->bConfigReady = true;
 
-    result = mbedtls_ssl_config_defaults(&backend->config,
-                                         MBEDTLS_SSL_IS_CLIENT,
-                                         MBEDTLS_SSL_TRANSPORT_STREAM,
-                                         MBEDTLS_SSL_PRESET_DEFAULT);
+    int result = mbedtls_ssl_config_defaults(&backend->config,
+                                             MBEDTLS_SSL_IS_CLIENT,
+                                             MBEDTLS_SSL_TRANSPORT_STREAM,
+                                             MBEDTLS_SSL_PRESET_DEFAULT);
     if(result != 0)
         goto fail;
 
@@ -210,7 +257,10 @@ ssize_t TlsChannelRead(TlsChannel *channel, uint8_t *out, size_t cap)
 
     int result = mbedtls_ssl_read(&channel->ssl, out, cap);
     if(result > 0)
+    {
+        channel->want = TlsIo_WantRead;
         return result;
+    }
     if(result == 0)
         return TlsIo_Closed;
 

@@ -519,6 +519,9 @@ int main(int argc, char **argv)
     Emit(root, &out);
 
     size_t   imageSize = BLOCKLIST_HEADER_BYTES + nodeBytes + out.poolUsed;
+    if(!bCArray && imageSize > CFG_BLOCKLIST_MAX_BYTES)
+        Fatal("compiled list exceeds CFG_BLOCKLIST_MAX_BYTES");
+
     uint8_t *image     = Alloc(imageSize);
 
     memcpy(image, BLOCKLIST_MAGIC, 4);

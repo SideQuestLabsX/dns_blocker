@@ -13,6 +13,7 @@ CC      ?= gcc
 # mkblocklist runs on the build host and its output is linked into the daemon,
 # so a cross build still needs a native compiler for it
 HOSTCC  ?= gcc
+MBEDTLS_DIR ?= $(BUILD)/mbedtls
 
 # Domain list compiled into .rodata as the cold-boot fallback. Set it empty to
 # link the zero-length stub and ship without one
@@ -46,14 +47,31 @@ else
   $(error Unknown ARCH '$(ARCH)'. Use: x86_64 aarch64 armv7 armv6)
 endif
 
+MBEDTLS_CFLAGS := -O2 -fstack-protector-strong \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables \
+	$(filter-out -static -static-pie,$(CFLAGS_ARCH))
+MBEDTLS_CC_ID := $(shell $(CC) --version 2>/dev/null | head -n 1)
+MBEDTLS_AR_ID := $(shell $(AR) --version 2>/dev/null | head -n 1)
+MBEDTLS_SCRIPT_ID := $(shell sha256sum tools/build-mbedtls.sh | cut -c1-16)
+MBEDTLS_BUILD_ID := $(shell printf '%s\n' \
+	'$(CC)|$(MBEDTLS_CC_ID)|$(AR)|$(MBEDTLS_AR_ID)|$(MBEDTLS_CFLAGS)|$(MBEDTLS_SCRIPT_ID)' \
+	| sha256sum | cut -c1-16)
+MBEDTLS_BUILD_DIR := $(MBEDTLS_DIR)/$(MBEDTLS_BUILD_ID)
+MBEDTLS_SOURCE_DIR := $(MBEDTLS_BUILD_DIR)/source
+MBEDTLS_MARKER := $(MBEDTLS_BUILD_DIR)/.ready
+
 ifeq ($(PROFILE),minimal)
   CFLAGS_PROFILE := -DPROFILE_MINIMAL=1
   LIBS :=
+  TLS_DEPS :=
+  TLS_CHECK :=
 else ifeq ($(PROFILE),encrypted)
   # MBEDTLS_MEMORY_BUFFER_ALLOC_C points mbedTLS at the boot arena, so the
   # zero-heap guarantee survives
-  CFLAGS_PROFILE := -DPROFILE_ENCRYPTED=1 -DFEATURE_DOH=1 -DFEATURE_DOT=1
-  LIBS := -lmbedtls -lmbedx509 -lmbedcrypto
+  CFLAGS_PROFILE := -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include
+  LIBS := -L$(MBEDTLS_SOURCE_DIR)/library -lmbedtls -lmbedx509 -lmbedcrypto
+  TLS_DEPS := $(MBEDTLS_MARKER)
+  TLS_CHECK := mbedtls
 else
   $(error Unknown PROFILE '$(PROFILE)'. Use: minimal | encrypted)
 endif
@@ -100,14 +118,29 @@ endef
 # stale generator writes a list in a format the daemon no longer reads
 HDR := $(wildcard src/*.h)
 
-.PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick
+.PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick mbedtls
 all: $(TARGET)
 
-$(TARGET): $(OBJ)
+$(TARGET): $(OBJ) $(TLS_DEPS) | $(TLS_CHECK)
 	@test -n "$(strip $(SRC))" || { echo "No sources in src/ yet"; exit 1; }
 	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LIBS)
 	$(call assert_static,$@)
 	@echo "built $@"
+
+mbedtls: $(MBEDTLS_MARKER)
+	@if [ ! -f "$(MBEDTLS_SOURCE_DIR)/include/mbedtls/ssl.h" ] \
+		|| [ ! -f "$(MBEDTLS_SOURCE_DIR)/library/libmbedtls.a" ] \
+		|| [ ! -f "$(MBEDTLS_SOURCE_DIR)/library/libmbedx509.a" ] \
+		|| [ ! -f "$(MBEDTLS_SOURCE_DIR)/library/libmbedcrypto.a" ]; then \
+		CC="$(CC)" AR="$(AR)" MBEDTLS_CFLAGS="$(MBEDTLS_CFLAGS)" \
+			sh tools/build-mbedtls.sh "$(MBEDTLS_BUILD_DIR)" \
+			&& touch "$(MBEDTLS_MARKER)"; \
+	fi
+
+$(MBEDTLS_MARKER): tools/build-mbedtls.sh | $(BUILD)
+	CC="$(CC)" AR="$(AR)" MBEDTLS_CFLAGS="$(MBEDTLS_CFLAGS)" \
+		sh $< "$(MBEDTLS_BUILD_DIR)"
+	@touch $@
 
 # Compiles domain lists into the trie the daemon maps. Host tool, so it is not
 # built with the shipped flags, and it links the stub rather than its own output
@@ -138,6 +171,10 @@ $(BUILD)/dns_blocker.check: tools/check.c | $(BUILD)
 $(BUILD)/%.o: src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+ifeq ($(PROFILE),encrypted)
+$(OBJ): $(TLS_DEPS) | $(TLS_CHECK)
+endif
+
 # Host tests. Sanitizers are incompatible with -static-pie, so these do not
 # share CFLAGS with the shipped binary
 TEST_CFLAGS := -std=c11 -O1 -g \
@@ -145,7 +182,13 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
 	-Isrc
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick
+ifeq ($(PROFILE),encrypted)
+  ENCRYPTED_TESTS := $(BUILD)/upstream_dot_test $(BUILD)/tls_backend_test
+else
+  ENCRYPTED_TESTS :=
+endif
+
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -157,6 +200,10 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/server_test
 	@$(BUILD)/tls_test
 	@$(BUILD)/fuzz_quick 50000
+ifeq ($(PROFILE),encrypted)
+	@$(BUILD)/upstream_dot_test
+	@$(BUILD)/tls_backend_test
+endif
 
 $(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
@@ -186,6 +233,12 @@ $(BUILD)/hosts_test: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR
 $(BUILD)/upstream_test: tests/upstream_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
+$(BUILD)/upstream_dot_test: tests/upstream_dot_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@
+
+$(BUILD)/tls_backend_test: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
+
 # Binds loopback sockets and drives a real query through the whole path
 $(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
@@ -197,6 +250,10 @@ $(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)
 # cross-compile and run under qemu-user on the target instruction set. This is
 # the only way the byte-wise field reads get exercised on real ARM
 XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native
+
+ifeq ($(PROFILE),encrypted)
+  XTEST += $(BUILD)/upstream_dot_test_native $(BUILD)/tls_backend_test_native
+endif
 
 test-static: $(XTEST)
 
@@ -220,6 +277,12 @@ $(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.
 
 $(BUILD)/hosts_test_native: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/upstream_dot_test_native: tests/upstream_dot_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/tls_backend_test_native: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@ $(LIBS)
 
 # Coverage-blind driver for the same entry point, so the fuzz target is
 # exercised on any toolchain with a sanitizer

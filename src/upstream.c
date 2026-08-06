@@ -11,9 +11,12 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/random.h>
 #include <unistd.h>
+
+_Static_assert(CFG_MAX_UPSTREAMS <= 32, "upstream exclusion mask is too small");
 
 static bool Elapsed(uint32_t nowMs, uint32_t deadlineMs)
 {
@@ -85,17 +88,55 @@ void UpstreamPoolInit(UpstreamPool *pool, uint32_t nowMs)
         pool->members[i].srttMs = UPSTREAM_RTT_NONE;
 
     pool->probe.fd        = -1;
+    pool->probe.tlsSlot   = UPSTREAM_NONE;
     pool->probeDeadlineMs = nowMs + CFG_UPSTREAM_PROBE_MS;
     pool->bProbeUsable    = WireEncodeName(CFG_UPSTREAM_PROBE_NAME,
                                            &pool->probeName);
 }
 
-bool UpstreamPoolAdd(UpstreamPool *pool, const char *address, uint16_t port)
+static bool PoolAdd(UpstreamPool *pool, const char *address, uint16_t port,
+                    UpstreamTransport transport, const char *hostname,
+                    const char *path)
 {
-    if(pool->count >= CFG_MAX_UPSTREAMS)
+    if(pool->count >= CFG_MAX_UPSTREAMS || address == NULL)
         return false;
 
     Upstream *member = &pool->members[pool->count];
+
+    if(transport == UpstreamTransport_Dot
+       || transport == UpstreamTransport_Doh)
+    {
+        if(hostname == NULL || hostname[0] == '\0'
+           || strlen(hostname) >= sizeof member->hostname)
+            return false;
+
+        for(size_t i = 0; hostname[i] != '\0'; i++)
+        {
+            if((unsigned char)hostname[i] <= 0x20u
+               || (unsigned char)hostname[i] >= 0x7Fu)
+                return false;
+        }
+
+        memcpy(member->hostname, hostname, strlen(hostname) + 1);
+    }
+
+    if(transport == UpstreamTransport_Doh)
+    {
+        if(path == NULL || path[0] != '/'
+           || strlen(path) >= sizeof member->path)
+            return false;
+
+        for(size_t i = 0; path[i] != '\0'; i++)
+        {
+            if((unsigned char)path[i] <= 0x20u
+               || (unsigned char)path[i] >= 0x7Fu)
+                return false;
+        }
+
+        memcpy(member->path, path, strlen(path) + 1);
+    }
+
+    member->transport = transport;
 
     struct sockaddr_in *v4 = (struct sockaddr_in *)&member->addr;
     if(inet_pton(AF_INET, address, &v4->sin_addr) == 1)
@@ -122,6 +163,29 @@ bool UpstreamPoolAdd(UpstreamPool *pool, const char *address, uint16_t port)
     return false;
 }
 
+bool UpstreamPoolAdd(UpstreamPool *pool, const char *address, uint16_t port)
+{
+    return PoolAdd(pool, address, port, UpstreamTransport_Plaintext, NULL, NULL);
+}
+
+bool UpstreamPoolAddDot(UpstreamPool *pool, const char *address, uint16_t port,
+                        const char *hostname)
+{
+    return PoolAdd(pool, address, port, UpstreamTransport_Dot, hostname, NULL);
+}
+
+bool UpstreamPoolAddDoh(UpstreamPool *pool, const char *address, uint16_t port,
+                        const char *hostname, const char *path)
+{
+    return PoolAdd(pool, address, port, UpstreamTransport_Doh, hostname, path);
+}
+
+void UpstreamPoolSetTlsBackend(UpstreamPool *pool, TlsBackend *backend)
+{
+    if(pool != NULL)
+        pool->tls = backend;
+}
+
 static bool InService(const Upstream *member, uint32_t nowMs)
 {
     return !member->bDown || Elapsed(nowMs, member->downUntilMs);
@@ -129,8 +193,8 @@ static bool InService(const Upstream *member, uint32_t nowMs)
 
 /* bInServiceOnly separates the two passes. The first honours the hold, and the
    second ignores it, so a pool that is entirely down still forwards. */
-static size_t BestOf(const UpstreamPool *pool, uint32_t nowMs, size_t avoid,
-                     bool bInServiceOnly)
+static size_t BestOf(const UpstreamPool *pool, uint32_t nowMs,
+                     uint32_t excludedMask, bool bInServiceOnly)
 {
     size_t best = UPSTREAM_NONE;
 
@@ -138,7 +202,7 @@ static size_t BestOf(const UpstreamPool *pool, uint32_t nowMs, size_t avoid,
     {
         const Upstream *member = &pool->members[i];
 
-        if(i == avoid)
+        if(i < 32 && (excludedMask & (UINT32_C(1) << i)) != 0)
             continue;
         if(bInServiceOnly && !InService(member, nowMs))
             continue;
@@ -154,12 +218,19 @@ static size_t BestOf(const UpstreamPool *pool, uint32_t nowMs, size_t avoid,
 
 size_t UpstreamPoolSelect(const UpstreamPool *pool, uint32_t nowMs, size_t avoid)
 {
-    size_t best = BestOf(pool, nowMs, avoid, true);
+    uint32_t excludedMask = (avoid < 32) ? UINT32_C(1) << avoid : 0;
+    return UpstreamPoolSelectExcept(pool, nowMs, excludedMask);
+}
+
+size_t UpstreamPoolSelectExcept(const UpstreamPool *pool, uint32_t nowMs,
+                                uint32_t excludedMask)
+{
+    size_t best = BestOf(pool, nowMs, excludedMask, true);
 
     if(best == UPSTREAM_NONE)
-        best = BestOf(pool, nowMs, avoid, false);
-    if(best == UPSTREAM_NONE && avoid != UPSTREAM_NONE)
-        best = BestOf(pool, nowMs, UPSTREAM_NONE, false);
+        best = BestOf(pool, nowMs, excludedMask, false);
+    if(best == UPSTREAM_NONE && excludedMask != 0)
+        best = BestOf(pool, nowMs, 0, false);
 
     return best;
 }
@@ -242,7 +313,8 @@ bool UpstreamPoolProbeBegin(UpstreamPool *pool, uint32_t nowMs)
                       RandomId(), &queryLen))
         return false;
 
-    if(!UpstreamBegin(pool, target, query, queryLen, nowMs, &pool->probe))
+    if(UpstreamBegin(pool, target, query, queryLen, nowMs, &pool->probe)
+       != UpstreamStart_Started)
         return false;
 
     pool->members[target].probes++;
@@ -262,9 +334,16 @@ void UpstreamPoolProbeReadable(UpstreamPool *pool, uint32_t nowMs)
 
     /* Only the arrival time is wanted, so the answer goes nowhere. The name is
        a constant, so the probe describes no client. */
-    if(UpstreamComplete(pool, &pool->probe, nowMs, answer, sizeof answer,
-                        &answerLen) != UpstreamRead_Answer)
+    UpstreamRead result = UpstreamComplete(pool, &pool->probe, nowMs, answer,
+                                           sizeof answer, &answerLen);
+    if(result == UpstreamRead_Again || result == UpstreamRead_Empty)
         return;
+
+    if(result == UpstreamRead_Failed)
+    {
+        pool->probeFailures++;
+        UpstreamPoolFail(pool, pool->probe.index, nowMs);
+    }
 
     UpstreamEnd(&pool->probe);
     pool->bProbing = false;
@@ -282,23 +361,14 @@ void UpstreamPoolProbeSweep(UpstreamPool *pool, uint32_t nowMs)
     pool->bProbing = false;
 }
 
-bool UpstreamBegin(UpstreamPool *pool, size_t index, const uint8_t *query,
-                   size_t queryLen, uint32_t nowMs, UpstreamExchange *exchange)
+static bool PrepareQuery(const uint8_t *query, size_t queryLen,
+                         UpstreamExchange *exchange, uint8_t *sent,
+                         size_t cap)
 {
-    uint8_t    sent[CFG_UDP_MSG_BYTES];
     Reader     reader;
     WireHeader header;
 
-    exchange->fd    = -1;
-    exchange->index = index;
-
-    if(index >= pool->count)
-        return false;
-
-    Upstream *member = &pool->members[index];
-
-    if(queryLen < WIRE_HEADER_BYTES || queryLen > sizeof sent
-       || member->addrLen == 0)
+    if(queryLen < WIRE_HEADER_BYTES || queryLen > cap)
         return false;
 
     memcpy(sent, query, queryLen);
@@ -313,6 +383,12 @@ bool UpstreamBegin(UpstreamPool *pool, size_t index, const uint8_t *query,
        || !WireParseQuestion(&reader, &exchange->asked))
         return false;
 
+    return true;
+}
+
+static bool BeginPlaintext(Upstream *member, const uint8_t *sent,
+                           size_t queryLen, UpstreamExchange *exchange)
+{
     int fd = socket(member->addr.ss_family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if(fd < 0)
         return false;
@@ -324,33 +400,528 @@ bool UpstreamBegin(UpstreamPool *pool, size_t index, const uint8_t *query,
         return false;
     }
 
-    exchange->fd     = fd;
-    exchange->sentMs = nowMs;
-    member->queries++;
+    exchange->fd = fd;
     return true;
 }
 
-UpstreamRead UpstreamComplete(UpstreamPool *pool, const UpstreamExchange *exchange,
+#if defined(PROFILE_ENCRYPTED)
+static size_t AcquireTlsSlot(UpstreamPool *pool)
+{
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        if(!pool->tlsSlots[i].bUsed)
+        {
+            pool->tlsSlots[i].bUsed = true;
+            return i;
+        }
+    }
+
+    return UPSTREAM_NONE;
+}
+
+static bool BuildTlsRequest(UpstreamTlsSlot *slot, const Upstream *member,
+                            const uint8_t *sent, size_t queryLen)
+{
+    if(member->transport == UpstreamTransport_Dot)
+    {
+        slot->query[0] = (uint8_t)(queryLen >> 8);
+        slot->query[1] = (uint8_t)queryLen;
+        memcpy(slot->query + 2, sent, queryLen);
+        slot->requestLen = queryLen + 2;
+        return true;
+    }
+
+    if(member->transport != UpstreamTransport_Doh)
+        return false;
+
+    uint16_t port = (member->addr.ss_family == AF_INET)
+                  ? ntohs(((const struct sockaddr_in *)&member->addr)->sin_port)
+                  : ntohs(((const struct sockaddr_in6 *)&member->addr)->sin6_port);
+    char host[CFG_TLS_HOSTNAME_BYTES + 8];
+    int hostLen = (port == 443)
+                ? snprintf(host, sizeof host, "%s", member->hostname)
+                : snprintf(host, sizeof host, "%s:%u", member->hostname,
+                           (unsigned int)port);
+    if(hostLen <= 0 || (size_t)hostLen >= sizeof host)
+        return false;
+
+    char header[CFG_DOH_REQUEST_BYTES];
+    int headerLen = snprintf(header, sizeof header,
+                             "POST %s HTTP/1.1\r\n"
+                             "Host: %s\r\n"
+                             "Accept: application/dns-message\r\n"
+                             "Content-Type: application/dns-message\r\n"
+                             "Content-Length: %zu\r\n"
+                             "Connection: close\r\n\r\n",
+                             member->path, host, queryLen);
+    if(headerLen <= 0 || (size_t)headerLen >= CFG_DOH_REQUEST_BYTES
+       || (size_t)headerLen + queryLen > sizeof slot->query)
+        return false;
+
+    memcpy(slot->query, header, (size_t)headerLen);
+    memcpy(slot->query + headerLen, sent, queryLen);
+    slot->requestLen = (size_t)headerLen + queryLen;
+    return true;
+}
+
+static UpstreamStart BeginTls(UpstreamPool *pool, Upstream *member,
+                              const uint8_t *sent, size_t queryLen,
+                              UpstreamExchange *exchange)
+{
+    if(pool->tls == NULL || !pool->tls->bReady
+       || queryLen > CFG_TX_QUERY_BYTES)
+        return UpstreamStart_Failed;
+
+    size_t slotIndex = AcquireTlsSlot(pool);
+    if(slotIndex == UPSTREAM_NONE)
+        return UpstreamStart_Busy;
+
+    UpstreamTlsSlot *slot = &pool->tlsSlots[slotIndex];
+    slot->channel.fd = -1;
+    slot->state      = DotState_Connect;
+    slot->sent       = 0;
+    slot->got        = 0;
+    slot->requestLen = 0;
+    slot->responseLen = 0;
+    if(!BuildTlsRequest(slot, member, sent, queryLen))
+        goto fail;
+
+    int fd = socket(member->addr.ss_family,
+                    SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if(fd < 0)
+        goto fail;
+
+    int connected = connect(fd, (struct sockaddr *)&member->addr,
+                            member->addrLen);
+    if(connected != 0 && errno != EINPROGRESS)
+    {
+        close(fd);
+        goto fail;
+    }
+
+    if(TlsChannelStart(pool->tls, &slot->channel, fd, member->hostname)
+       != TlsIo_Ok)
+        goto fail;
+
+    if(connected == 0)
+    {
+        slot->state = DotState_Handshake;
+        slot->channel.want = TlsIo_WantWrite;
+    }
+
+    exchange->fd      = fd;
+    exchange->tlsSlot = slotIndex;
+    return UpstreamStart_Started;
+
+fail:
+    memset(slot, 0, sizeof *slot);
+    slot->channel.fd = -1;
+    return UpstreamStart_Failed;
+}
+#endif
+
+UpstreamStart UpstreamBegin(UpstreamPool *pool, size_t index,
+                            const uint8_t *query, size_t queryLen,
+                            uint32_t nowMs, UpstreamExchange *exchange)
+{
+    uint8_t sent[CFG_UDP_MSG_BYTES];
+
+    exchange->fd        = -1;
+    exchange->index     = index;
+    exchange->tlsSlot   = UPSTREAM_NONE;
+    exchange->pool      = pool;
+
+    if(index >= pool->count)
+        return UpstreamStart_Failed;
+
+    Upstream *member = &pool->members[index];
+
+    if(member->addrLen == 0
+       || !PrepareQuery(query, queryLen, exchange, sent, sizeof sent))
+        return UpstreamStart_Failed;
+
+    exchange->transport = member->transport;
+
+    UpstreamStart result = UpstreamStart_Failed;
+    if(member->transport == UpstreamTransport_Plaintext)
+    {
+        result = BeginPlaintext(member, sent, queryLen, exchange)
+               ? UpstreamStart_Started : UpstreamStart_Failed;
+    }
+#if defined(PROFILE_ENCRYPTED)
+    else if(member->transport == UpstreamTransport_Dot
+            || member->transport == UpstreamTransport_Doh)
+        result = BeginTls(pool, member, sent, queryLen, exchange);
+#endif
+
+    if(result != UpstreamStart_Started)
+        return result;
+
+    exchange->sentMs = nowMs;
+    member->queries++;
+    return UpstreamStart_Started;
+}
+
+short UpstreamEvents(const UpstreamExchange *exchange)
+{
+    if(exchange == NULL || exchange->fd < 0)
+        return 0;
+
+    if(exchange->transport == UpstreamTransport_Plaintext)
+        return POLLIN;
+
+#if defined(PROFILE_ENCRYPTED)
+    if(exchange->pool == NULL || exchange->tlsSlot >= CFG_TLS_SLOTS)
+        return 0;
+
+    const UpstreamTlsSlot *slot = &exchange->pool->tlsSlots[exchange->tlsSlot];
+    if(slot->state == DotState_Connect)
+        return POLLOUT;
+
+    return TlsChannelEvents(&slot->channel);
+#else
+    return 0;
+#endif
+}
+
+#if defined(PROFILE_ENCRYPTED)
+static bool EqualHeader(const uint8_t *data, size_t len, const char *expected)
+{
+    if(strlen(expected) != len)
+        return false;
+
+    for(size_t i = 0; i < len; i++)
+    {
+        unsigned char left  = data[i];
+        unsigned char right = (unsigned char)expected[i];
+        if(left >= 'A' && left <= 'Z')
+            left = (unsigned char)(left + ('a' - 'A'));
+        if(right >= 'A' && right <= 'Z')
+            right = (unsigned char)(right + ('a' - 'A'));
+        if(left != right)
+            return false;
+    }
+
+    return true;
+}
+
+static size_t FindCrlf(const uint8_t *data, size_t from, size_t len)
+{
+    for(size_t i = from; i + 1 < len; i++)
+    {
+        if(data[i] == '\r' && data[i + 1] == '\n')
+            return i;
+    }
+
+    return SIZE_MAX;
+}
+
+static bool ParseDecimal(const uint8_t *data, size_t len, size_t *out)
+{
+    if(len == 0)
+        return false;
+
+    size_t value = 0;
+    for(size_t i = 0; i < len; i++)
+    {
+        size_t digit = (size_t)(data[i] - '0');
+        if(data[i] < '0' || data[i] > '9'
+           || value > (SIZE_MAX - digit) / 10)
+            return false;
+        value = value * 10 + digit;
+    }
+
+    *out = value;
+    return true;
+}
+
+static bool ParseDohHeaders(UpstreamTlsSlot *slot, size_t headerEnd, size_t cap)
+{
+    size_t lineEnd = FindCrlf(slot->response, 0, headerEnd);
+    if(lineEnd == SIZE_MAX || lineEnd < 12
+       || memcmp(slot->response, "HTTP/1.1 200", 12) != 0
+       || (lineEnd > 12 && slot->response[12] != ' '))
+        return false;
+
+    bool   bContentLength = false;
+    bool   bContentType   = false;
+    size_t contentLength  = 0;
+    size_t at = lineEnd + 2;
+
+    while(at + 2 < headerEnd)
+    {
+        lineEnd = FindCrlf(slot->response, at, headerEnd);
+        if(lineEnd == SIZE_MAX || lineEnd == at)
+            return false;
+
+        size_t colon = at;
+        while(colon < lineEnd && slot->response[colon] != ':')
+            colon++;
+        if(colon == at || colon == lineEnd)
+            return false;
+
+        size_t valueAt = colon + 1;
+        while(valueAt < lineEnd
+              && (slot->response[valueAt] == ' '
+                  || slot->response[valueAt] == '\t'))
+            valueAt++;
+        size_t valueEnd = lineEnd;
+        while(valueEnd > valueAt
+              && (slot->response[valueEnd - 1] == ' '
+                  || slot->response[valueEnd - 1] == '\t'))
+            valueEnd--;
+
+        if(EqualHeader(slot->response + at, colon - at, "content-length"))
+        {
+            if(bContentLength
+               || !ParseDecimal(slot->response + valueAt,
+                                valueEnd - valueAt, &contentLength))
+                return false;
+            bContentLength = true;
+        }
+        else if(EqualHeader(slot->response + at, colon - at, "content-type"))
+        {
+            static const char type[] = "application/dns-message";
+            size_t valueLen = valueEnd - valueAt;
+            if(bContentType || valueLen < sizeof type - 1
+               || !EqualHeader(slot->response + valueAt, sizeof type - 1, type)
+               || (valueLen > sizeof type - 1
+                   && slot->response[valueAt + sizeof type - 1] != ';'))
+                return false;
+            bContentType = true;
+        }
+        else if(EqualHeader(slot->response + at, colon - at,
+                            "transfer-encoding"))
+        {
+            return false;
+        }
+
+        at = lineEnd + 2;
+    }
+
+    if(!bContentLength || !bContentType
+       || contentLength < WIRE_HEADER_BYTES
+       || contentLength > CFG_TCP_MSG_BYTES || contentLength > cap)
+        return false;
+
+    size_t bodyBytes = slot->got - headerEnd;
+    if(bodyBytes > contentLength)
+        return false;
+
+    memmove(slot->response, slot->response + headerEnd, bodyBytes);
+    slot->got         = bodyBytes;
+    slot->responseLen = contentLength;
+    slot->state       = DohState_ReadBody;
+    return true;
+}
+
+static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
+                                size_t cap, size_t *outLen)
+{
+    if(exchange->pool == NULL || exchange->tlsSlot >= CFG_TLS_SLOTS)
+        return UpstreamRead_Failed;
+
+    UpstreamTlsSlot *slot = &exchange->pool->tlsSlots[exchange->tlsSlot];
+
+    if(slot->state == DotState_Connect)
+    {
+        int error = 0;
+        socklen_t errorLen = sizeof error;
+        if(getsockopt(exchange->fd, SOL_SOCKET, SO_ERROR, &error, &errorLen) != 0
+           || error != 0)
+            return UpstreamRead_Failed;
+
+        slot->state = DotState_Handshake;
+    }
+
+    if(slot->state == DotState_Handshake)
+    {
+        TlsIo result = TlsChannelHandshake(&slot->channel);
+        if(result == TlsIo_WantRead || result == TlsIo_WantWrite)
+            return UpstreamRead_Again;
+        if(result != TlsIo_Ok)
+            return UpstreamRead_Failed;
+
+        slot->state = DotState_Write;
+        slot->channel.want = TlsIo_WantWrite;
+    }
+
+    if(slot->state == DotState_Write)
+    {
+        ssize_t wrote = TlsChannelWrite(&slot->channel, slot->query + slot->sent,
+                                         slot->requestLen - slot->sent);
+        if(wrote == TlsIo_WantRead || wrote == TlsIo_WantWrite)
+            return UpstreamRead_Again;
+        if(wrote <= 0)
+            return UpstreamRead_Failed;
+
+        slot->sent += (size_t)wrote;
+        if(slot->sent < slot->requestLen)
+        {
+            slot->channel.want = TlsIo_WantWrite;
+            return UpstreamRead_Again;
+        }
+
+        slot->state = (exchange->transport == UpstreamTransport_Dot)
+                    ? DotState_ReadLength : DohState_ReadHeaders;
+        slot->got   = 0;
+        slot->channel.want = TlsIo_WantRead;
+    }
+
+    if(slot->state == DotState_ReadLength)
+    {
+        ssize_t got = TlsChannelRead(&slot->channel, slot->response + slot->got,
+                                     2 - slot->got);
+        if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
+            return UpstreamRead_Again;
+        if(got <= 0)
+            return UpstreamRead_Failed;
+
+        slot->got += (size_t)got;
+        if(slot->got < 2)
+            return UpstreamRead_Again;
+
+        slot->responseLen = ((size_t)slot->response[0] << 8) | slot->response[1];
+        if(slot->responseLen < WIRE_HEADER_BYTES
+           || slot->responseLen > CFG_TCP_MSG_BYTES
+           || slot->responseLen > cap)
+            return UpstreamRead_Failed;
+
+        slot->state = DotState_ReadBody;
+    }
+
+    if(slot->state == DotState_ReadBody)
+    {
+        size_t have = slot->got - 2;
+        ssize_t got = TlsChannelRead(&slot->channel, slot->response + slot->got,
+                                     slot->responseLen - have);
+        if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
+            return UpstreamRead_Again;
+        if(got <= 0)
+            return UpstreamRead_Failed;
+
+        slot->got += (size_t)got;
+        if(slot->got - 2 < slot->responseLen)
+            return UpstreamRead_Again;
+
+        memcpy(out, slot->response + 2, slot->responseLen);
+        *outLen = slot->responseLen;
+        return UpstreamRead_Answer;
+    }
+
+    if(slot->state == DohState_ReadHeaders)
+    {
+        if(slot->got >= CFG_DOH_HEADER_BYTES)
+            return UpstreamRead_Failed;
+
+        ssize_t got = TlsChannelRead(&slot->channel,
+                                     slot->response + slot->got,
+                                     CFG_DOH_HEADER_BYTES - slot->got);
+        if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
+            return UpstreamRead_Again;
+        if(got <= 0)
+            return UpstreamRead_Failed;
+
+        slot->got += (size_t)got;
+        size_t headerEnd = SIZE_MAX;
+        for(size_t i = 0; i + 3 < slot->got; i++)
+        {
+            if(memcmp(slot->response + i, "\r\n\r\n", 4) == 0)
+            {
+                headerEnd = i + 4;
+                break;
+            }
+        }
+
+        if(headerEnd == SIZE_MAX)
+            return (slot->got < CFG_DOH_HEADER_BYTES)
+                 ? UpstreamRead_Again : UpstreamRead_Failed;
+        if(!ParseDohHeaders(slot, headerEnd, cap))
+            return UpstreamRead_Failed;
+    }
+
+    if(slot->state == DohState_ReadBody)
+    {
+        if(slot->got < slot->responseLen)
+        {
+            ssize_t got = TlsChannelRead(&slot->channel,
+                                         slot->response + slot->got,
+                                         slot->responseLen - slot->got);
+            if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
+                return UpstreamRead_Again;
+            if(got <= 0)
+                return UpstreamRead_Failed;
+            slot->got += (size_t)got;
+        }
+
+        if(slot->got < slot->responseLen)
+            return UpstreamRead_Again;
+
+        slot->state = DohState_ExpectClose;
+    }
+
+    if(slot->state == DohState_ExpectClose)
+    {
+        uint8_t extra;
+        ssize_t got = TlsChannelRead(&slot->channel, &extra, sizeof extra);
+        if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
+            return UpstreamRead_Again;
+        if(got != TlsIo_Closed)
+            return UpstreamRead_Failed;
+
+        memcpy(out, slot->response, slot->responseLen);
+        *outLen = slot->responseLen;
+        return UpstreamRead_Answer;
+    }
+
+    return UpstreamRead_Failed;
+}
+#endif
+
+UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
                               uint32_t nowMs, uint8_t *out, size_t cap,
                               size_t *outLen)
 {
-    ssize_t got = recv(exchange->fd, out, cap, MSG_DONTWAIT);
+    ssize_t got = -1;
 
-    if(got < 0)
-        return UpstreamRead_Empty;
+    if(exchange->transport == UpstreamTransport_Plaintext)
+    {
+        got = recv(exchange->fd, out, cap, MSG_DONTWAIT);
+
+        if(got < 0)
+            return UpstreamRead_Empty;
+
+        *outLen = (size_t)got;
+    }
+#if defined(PROFILE_ENCRYPTED)
+    else if(exchange->transport == UpstreamTransport_Dot
+            || exchange->transport == UpstreamTransport_Doh)
+    {
+        UpstreamRead result = TlsProgress(exchange, out, cap, outLen);
+        if(result != UpstreamRead_Answer)
+            return result;
+        got = (ssize_t)*outLen;
+    }
+#endif
+    else
+    {
+        return UpstreamRead_Failed;
+    }
 
     if(exchange->index >= pool->count)
-        return UpstreamRead_Again;
+        return UpstreamRead_Failed;
 
     Upstream *member = &pool->members[exchange->index];
 
     if(got < (ssize_t)WIRE_HEADER_BYTES)
-        return UpstreamRead_Again;
+        return (exchange->transport == UpstreamTransport_Plaintext)
+             ? UpstreamRead_Again : UpstreamRead_Failed;
 
     if(MsgId(out, (size_t)got) != exchange->id)
     {
         member->mismatches++;
-        return UpstreamRead_Again;
+        return (exchange->transport == UpstreamTransport_Plaintext)
+             ? UpstreamRead_Again : UpstreamRead_Failed;
     }
 
     VerifyResult verdict = VerifyAnswer(&exchange->asked, out, (size_t)got);
@@ -358,7 +929,8 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, const UpstreamExchange *exchan
     {
         member->rejected++;
         member->lastReject = verdict;
-        return UpstreamRead_Again;
+        return (exchange->transport == UpstreamTransport_Plaintext)
+             ? UpstreamRead_Again : UpstreamRead_Failed;
     }
 
     /* Every check has passed, so this is the daemon's own query coming back and
@@ -371,8 +943,26 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, const UpstreamExchange *exchan
 
 void UpstreamEnd(UpstreamExchange *exchange)
 {
-    if(exchange->fd >= 0)
+    if((exchange->transport == UpstreamTransport_Dot
+        || exchange->transport == UpstreamTransport_Doh)
+       && exchange->pool != NULL)
+    {
+#if defined(PROFILE_ENCRYPTED)
+        if(exchange->tlsSlot < CFG_TLS_SLOTS)
+        {
+            UpstreamTlsSlot *slot = &exchange->pool->tlsSlots[exchange->tlsSlot];
+            TlsChannelClose(&slot->channel);
+            memset(slot, 0, sizeof *slot);
+            slot->channel.fd = -1;
+        }
+#endif
+    }
+    else if(exchange->fd >= 0)
+    {
         close(exchange->fd);
+    }
 
-    exchange->fd = -1;
+    exchange->fd      = -1;
+    exchange->tlsSlot = UPSTREAM_NONE;
+    exchange->pool    = NULL;
 }

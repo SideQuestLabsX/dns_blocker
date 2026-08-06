@@ -193,6 +193,12 @@ void ServerClose(Server *server)
             TxRelease(&server->transactions[i]);
     }
 
+    if(server->upstreams != NULL && server->upstreams->bProbing)
+    {
+        UpstreamEnd(&server->upstreams->probe);
+        server->upstreams->bProbing = false;
+    }
+
     if(server->conns == NULL)
         return;
 
@@ -276,25 +282,28 @@ static Transaction *TxAcquire(Server *server)
     return oldest;
 }
 
-/* avoid names the upstream that has just failed this query, so a retry lands
-   on a different resolver. */
-static bool TxSend(Transaction *tx, size_t avoid)
+static UpstreamStart TxSend(Transaction *tx)
 {
     uint32_t nowMs = ServerNowMilliseconds();
     if(tx->pool == NULL)
-        return false;
+        return UpstreamStart_Failed;
 
-    size_t index = UpstreamPoolSelect(tx->pool, nowMs, avoid);
+    size_t index = UpstreamPoolSelectExcept(tx->pool, nowMs,
+                                            tx->attemptedMask);
 
     if(index == UPSTREAM_NONE)
-        return false;
+        return UpstreamStart_Failed;
 
-    if(!UpstreamBegin(tx->pool, index, tx->query, tx->queryLen, nowMs,
-                      &tx->exchange))
-        return false;
+    if(index < 32)
+        tx->attemptedMask |= UINT32_C(1) << index;
+
+    UpstreamStart result = UpstreamBegin(tx->pool, index, tx->query,
+                                         tx->queryLen, nowMs, &tx->exchange);
+    if(result != UpstreamStart_Started)
+        return result;
 
     tx->deadlineMs = nowMs + CFG_UPSTREAM_TIMEOUT_MS;
-    return true;
+    return UpstreamStart_Started;
 }
 
 static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
@@ -307,16 +316,31 @@ static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
     Transaction *tx = TxAcquire(server);
 
     memcpy(tx->query, query, queryLen);
-    tx->pool       = pool;
-    tx->queryLen   = (uint16_t)queryLen;
-    tx->client     = *client;
-    tx->clientId   = clientId;
-    tx->advertised = advertised;
-    tx->attempts   = 1;
-    tx->bActive    = true;
+    tx->pool          = pool;
+    tx->queryLen      = (uint16_t)queryLen;
+    tx->client        = *client;
+    tx->clientId      = clientId;
+    tx->advertised    = advertised;
+    tx->attemptedMask = 0;
+    tx->attempts      = 1;
+    tx->bActive       = true;
 
-    if(!TxSend(tx, UPSTREAM_NONE))
+    UpstreamStart result = TxSend(tx);
+    while(result == UpstreamStart_Failed
+          && tx->attempts <= CFG_UPSTREAM_RETRIES)
     {
+        UpstreamPoolFail(tx->pool, tx->exchange.index,
+                         ServerNowMilliseconds());
+        tx->attempts++;
+        server->retries++;
+        result = TxSend(tx);
+    }
+
+    if(result != UpstreamStart_Started)
+    {
+        if(result == UpstreamStart_Failed)
+            UpstreamPoolFail(tx->pool, tx->exchange.index,
+                             ServerNowMilliseconds());
         tx->bActive = false;
         return false;
     }
@@ -351,6 +375,29 @@ static void TxFinish(Server *server, Transaction *tx,
     TxRelease(tx);
 }
 
+static bool TxRetry(Server *server, Transaction *tx, uint32_t nowMs)
+{
+    UpstreamPoolFail(tx->pool, tx->exchange.index, nowMs);
+
+    while(tx->attempts <= CFG_UPSTREAM_RETRIES)
+    {
+        UpstreamEnd(&tx->exchange);
+        tx->attempts++;
+        server->retries++;
+
+        UpstreamStart result = TxSend(tx);
+        if(result == UpstreamStart_Started)
+            return true;
+        if(result == UpstreamStart_Failed)
+            UpstreamPoolFail(tx->pool, tx->exchange.index, nowMs);
+        else
+            break;
+    }
+
+    Fail(server, tx, MSG_RCODE_SERVFAIL);
+    return false;
+}
+
 static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
 {
     uint8_t reply[CFG_TCP_MSG_BYTES];
@@ -359,8 +406,12 @@ static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
     UpstreamRead got = UpstreamComplete(tx->pool, &tx->exchange, nowMs,
                                         reply, sizeof reply, &replyLen);
 
-    /* Again means the datagram failed a check while the exchange stays open,
-       so a forged packet loses the race instead of ending it. */
+    if(got == UpstreamRead_Failed)
+    {
+        (void)TxRetry(server, tx, nowMs);
+        return;
+    }
+
     if(got != UpstreamRead_Answer)
         return;
 
@@ -376,22 +427,7 @@ static void TxSweep(Server *server, uint32_t nowMs)
         if(!tx->bActive || !Elapsed(nowMs, tx->deadlineMs))
             continue;
 
-        size_t failed = tx->exchange.index;
-        UpstreamPoolFail(tx->pool, failed, nowMs);
-
-        if(tx->attempts <= CFG_UPSTREAM_RETRIES)
-        {
-            /* A retry gets a new socket, so it also gets a new source port and
-               a new transaction ID. */
-            UpstreamEnd(&tx->exchange);
-            tx->attempts++;
-            server->retries++;
-
-            if(TxSend(tx, failed))
-                continue;
-        }
-
-        Fail(server, tx, MSG_RCODE_SERVFAIL);
+        (void)TxRetry(server, tx, nowMs);
     }
 }
 
@@ -834,7 +870,7 @@ int ServerPoll(Server *server, int timeoutMs)
 
         txIndex[txCount] = i;
         waiting[count].fd      = tx->exchange.fd;
-        waiting[count].events  = POLLIN;
+        waiting[count].events  = UpstreamEvents(&tx->exchange);
         waiting[count].revents = 0;
         count++;
         txCount++;
@@ -845,7 +881,7 @@ int ServerPoll(Server *server, int timeoutMs)
     if(bProbing)
     {
         waiting[count].fd      = server->upstreams->probe.fd;
-        waiting[count].events  = POLLIN;
+        waiting[count].events  = UpstreamEvents(&server->upstreams->probe);
         waiting[count].revents = 0;
         count++;
     }

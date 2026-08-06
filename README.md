@@ -7,7 +7,7 @@ encrypted profile.
 
 The daemon resolves names and filters them. It listens on UDP and TCP, parses
 RFC 1035 messages, caches responses, blocks names from a compiled list and
-forwards the rest to a plaintext upstream resolver.
+forwards the rest through plaintext DNS, DNS-over-HTTPS or DNS-over-TLS.
 
 ## Setup
 
@@ -36,16 +36,13 @@ Raspberry Pi Zero W and the Zero 2 W.
 |---|---|
 | Listeners | UDP and TCP on port 53, IPv4 and IPv6, with EDNS0 support |
 | Caching | Keeps each TTL and decrements it by the time that passed, negative caching to RFC 2308, CLOCK eviction |
-| Upstream | Plaintext forwarding, asynchronous, so a slow resolver delays only the client that asked |
+| Upstream | Plaintext DNS in the minimal profile, DNS-over-HTTPS by default in the encrypted profile |
 | Upstream choice | Each query goes to the fastest configured resolver, timed by the answers it gives and by an occasional probe to the others |
 | Filtering | A reverse-label trie with exact and suffix matches, so one entry covers a whole subtree |
 | Local names | A static host map serves `A`, `AAAA` and `PTR` for the LAN, before everything else |
 | Local reverse | Unknown IPv4 `PTR` names in the configured LAN prefix go to the router, and other private reverse names get `NXDOMAIN` |
 | Blocked answers | `NXDOMAIN`, given before the cache and before the upstream |
 | Hardening | Random transaction IDs, random source ports, 0x20 case in the question, and a bailiwick check on every answer |
-
-These parts are not built yet: DNS-over-TLS, DNS-over-HTTPS, query logging and
-the shared memory status segment.
 
 The daemon passes HTTPS and SVCB records through without change, so Encrypted
 Client Hello continues to operate.
@@ -65,10 +62,12 @@ payload size gets the `TC` bit, and the client sends the query again over TCP.
 | Profile | Contents |
 |---|---|
 | `minimal` | The core engine and plaintext upstream forwarding |
-| `encrypted` | Adds mbedTLS, DoH and DoT upstream, and blocklist release sync |
+| `encrypted` | Adds mbedTLS, DoH and DoT upstream |
 
-The default is `encrypted`, and it is the shipped image. mbedTLS is the only
-external dependency, and only the `encrypted` profile needs it.
+The default is `encrypted`, and it is the shipped image. The build downloads
+the pinned mbedTLS 3.6.7 release, verifies its SHA-256 digest and compiles it
+with the fixed-buffer allocator enabled. It needs `curl`, `python3` and
+`sha256sum`.
 
 ## Blocklists
 
@@ -85,6 +84,25 @@ covers `ad.doubleclick.net`. The generator reloads its own output through the
 daemon's lookup and fails if anything it inserted does not match.
 
 Point `CFG_BLOCKLIST_PATH` at the result.
+
+The weekly workflow publishes dated blocklist releases. Each release contains
+the trie, `dns_blocker-blocklist.trie.sha256` and a manifest with each source URL,
+size, accepted-name count and SHA-256 digest.
+
+Download all three files into a staging directory on the same tmpfs as
+`CFG_BLOCKLIST_PATH`, then verify and install them:
+
+```sh
+(cd /run/dns_blocker/update && sha256sum -c dns_blocker-blocklist.trie.sha256)
+mv /run/dns_blocker/update/dns_blocker-blocklist.trie \
+  /run/dns_blocker/blocklist.trie
+```
+
+Rename the trie to `CFG_BLOCKLIST_PATH` only after verification. The rename
+keeps a complete old file in place until the new file is ready. The daemon uses
+the embedded list when the mapped file is absent or its header is invalid. It
+bounds every lookup inside a mapped body, but checksum verification is what
+rejects body corruption.
 
 The binary also carries a list of its own. `EMBED_LIST` names the source and
 defaults to `blocklists/embedded.txt`. The build compiles it with
@@ -127,6 +145,28 @@ measurement arrives.
 A resolver that stops answering is passed over for `CFG_UPSTREAM_DOWN_MS` and a
 query that timed out is retried against a different one. If all of them are
 failing the daemon keeps forwarding to the best of them anyway.
+
+The encrypted profile also needs one TLS authentication name for each address:
+
+```c
+#define CFG_UPSTREAM_ADDRS    { "1.1.1.1", "9.9.9.9" }
+#define CFG_UPSTREAM_TLS_NAMES { "cloudflare-dns.com", "dns.quad9.net" }
+#define CFG_UPSTREAM_DOH_PATHS { "/dns-query", "/dns-query" }
+```
+
+The encrypted transport setting is:
+
+| Setting | Transport |
+|---|---|
+| `CFG_ENCRYPTED_USE_DOH=1` | DoH on `CFG_DOH_PORT`, the default |
+| `CFG_ENCRYPTED_USE_DOH=0` | DoT on `CFG_DOT_PORT` |
+
+`CFG_TLS_CA_DER_PATH` names a DER trust bundle that validates the configured
+resolvers. Concatenate multiple DER certificates in that file when the
+resolvers use different roots. The file is mapped read-only at startup and must
+stay within `CFG_TLS_CA_MAX_BYTES`. DoH sends HTTP/1.1 POST requests with a
+bounded response header. Three encrypted exchanges can run at once. Another
+query gets `SERVFAIL` when those fixed slots are busy.
 
 ## Local names
 
@@ -191,15 +231,16 @@ make test
 
 This runs the unit tests and the end-to-end tests with AddressSanitizer and
 UndefinedBehaviorSanitizer, then a short fuzz run. `make fuzz` builds the
-libFuzzer target and needs clang. `make test-static` builds the same tests
-without sanitizers, so they cross-compile and run under emulation on the target
-instruction set.
+libFuzzer target and needs clang. `make test-static` builds sanitizer-free wire,
+cache, message, verification, blocklist and host-map tests. These tests can run
+under emulation on the target instruction set. The encrypted profile also runs
+the DoH/DoT state tests and the real mbedTLS backend test this way.
 
-CI runs the host tests, links the encrypted profile and fuzzes against a corpus
-that stays between runs. It then builds each target in an Alpine container on
-that target's instruction set and runs the tests there. An x86 test cannot find
-an unaligned access fault on ARM1176. `ci/build.sh` runs the same containers
-locally, and needs docker with qemu binfmt handlers.
+CI runs the host and encrypted tests, links both profiles and fuzzes against a
+corpus that stays between runs. It then builds each target in an Alpine
+container on that target's instruction set and runs the tests there. An x86
+test cannot find an unaligned access fault on ARM1176. `ci/build.sh` runs the
+same containers locally and needs docker with qemu binfmt handlers.
 
 ## Health probe
 
@@ -212,7 +253,8 @@ an exec probe can use it.
 ## Scope
 
 This daemon prevents DNS-layer interference, such as a hijacked or poisoned
-resolver. DoH upstream prevents it for the whole network.
+resolver. Authenticated DoH or DoT protects traffic between this daemon and the
+upstream resolver.
 
 This daemon cannot prevent SNI-layer blocking, because no traffic other than
 DNS reaches the device. If `dig @1.1.1.1 <site>` gives the correct address and

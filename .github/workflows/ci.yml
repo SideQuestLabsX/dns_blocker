@@ -55,20 +55,20 @@ jobs:
           if [ -n "$bad" ]; then echo "$bad"; exit 1; fi
 
   encrypted:
-    name: encrypted profile links
+    name: encrypted profile tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install mbedTLS
+      - name: Install mbedTLS build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y libmbedtls-dev
+          sudo apt-get install -y python3
 
-      # Proves -lmbedtls -lmbedx509 -lmbedcrypto actually resolve. The arena
-      # allocator wiring is not exercised until the TLS shim exists.
       - name: Build
-        run: make PROFILE=encrypted
+        run: |
+          make test PROFILE=encrypted
+          make PROFILE=encrypted
 
   fuzz:
     name: guided fuzzing
@@ -144,10 +144,12 @@ jobs:
         run: |
           cat > /tmp/build.sh <<'SH'
           set -e
-          apk add --no-cache build-base
+          apk add --no-cache build-base curl python3
           make ARCH="$ARCH" PROFILE=minimal
           make ARCH="$ARCH" PROFILE=minimal check
           make ARCH="$ARCH" PROFILE=minimal test-static-run
+          make ARCH="$ARCH" PROFILE=encrypted
+          make ARCH="$ARCH" PROFILE=encrypted test-static-run
           SH
           docker run --rm --platform "${{ matrix.platform }}" \
             -e ARCH -v "$PWD:/w" -v /tmp/build.sh:/build.sh -w /w \
@@ -156,4 +158,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dns_blocker-${{ matrix.arch }}
-          path: build/${{ matrix.arch }}-minimal/dns_blocker
+          path: |
+            build/${{ matrix.arch }}-minimal/dns_blocker
+            build/${{ matrix.arch }}-encrypted/dns_blocker

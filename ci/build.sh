@@ -12,10 +12,12 @@ armv6:linux/arm/v6:arm32v6/alpine:3.20"
 script=$(mktemp)
 cat > "$script" <<'INNER'
 set -e
-apk add --no-cache build-base
+apk add --no-cache build-base curl python3
 make ARCH="$ARCH" PROFILE=minimal
 make ARCH="$ARCH" PROFILE=minimal check
 make ARCH="$ARCH" PROFILE=minimal test-static-run
+make ARCH="$ARCH" PROFILE=encrypted
+make ARCH="$ARCH" PROFILE=encrypted test-static-run
 INNER
 
 built=0

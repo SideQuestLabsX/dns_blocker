@@ -1,0 +1,44 @@
+name: Blocklist release
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: blocklist-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Compile and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build compiler
+        run: make tools PROFILE=minimal
+
+      - name: Compile release blocklist
+        run: sh tools/build-blocklist-release.sh
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="blocklist-$(date -u +%Y-%m-%d)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          title="Blocklist $(date -u +%Y-%m-%d)"
+          notes="Compiled from blocklists/sources.txt at ${GITHUB_SHA}."
+          assets=(
+            build/blocklist-release/dns_blocker-blocklist.trie
+            build/blocklist-release/dns_blocker-blocklist.trie.sha256
+            build/blocklist-release/dns_blocker-blocklist.sources
+          )
+
+          gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" \
+            --title "$title" --notes "$notes" --draft
+          gh release edit "$tag" --draft=false --latest=false

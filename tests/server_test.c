@@ -253,18 +253,25 @@ typedef struct
     Server       server;
     FakeUpstream fake;
     pthread_t    thread;
+    bool         bThread;
+    bool         bArenaReady;
+    bool         bServerReady;
 
     /* Only the failover test needs a second resolver, and only then is it in
        the pool. */
     FakeUpstream fake2;
     pthread_t    thread2;
-    bool         bPaired;
+    bool         bThread2;
 } Fixture;
+
+static void FixtureDown(Fixture *fix);
 
 static bool FixtureStart(Fixture *fix, uint32_t ttl, int padding, bool bSilent,
                          bool bPtrRoute)
 {
     memset(fix, 0, sizeof *fix);
+    fix->fake.fd  = -1;
+    fix->fake2.fd = -1;
 
     fix->fake.fd        = OpenLoopbackUdp(UPSTREAM_PORT);
     fix->fake.answerTtl = ttl;
@@ -272,31 +279,45 @@ static bool FixtureStart(Fixture *fix, uint32_t ttl, int padding, bool bSilent,
     fix->fake.bSilent   = bSilent;
 
     if(fix->fake.fd < 0)
-        return false;
+        goto fail;
 
     if(pthread_create(&fix->thread, NULL, FakeUpstreamMain, &fix->fake) != 0)
-        return false;
+        goto fail;
+    fix->bThread = true;
 
     UpstreamPoolInit(&fix->upstreams, ServerNowMilliseconds());
 
     if(bPtrRoute)
         UpstreamPoolInit(&fix->ptrRouter, ServerNowMilliseconds());
 
-    return ArenaInit(&fix->arena, 2048u * 1024u)
-        && CacheInit(&fix->cache, &fix->arena)
-        && ArenaCarve(&fix->arena, &fix->connArena, ARENA_CONN_BYTES)
-        && ArenaCarve(&fix->arena, &fix->txArena, ARENA_TXTABLE_BYTES)
-        && ArenaCarve(&fix->arena, &fix->hostsArena, ARENA_HOSTS_BYTES)
-        && HostsLoad(&fix->hosts, &fix->hostsArena, NULL)
-        && UpstreamPoolAdd(&fix->upstreams, "127.0.0.1", UPSTREAM_PORT)
-        && (!bPtrRoute
-            || UpstreamPoolAdd(&fix->ptrRouter, "127.0.0.1", UPSTREAM_PORT))
-        && ServerOpen(&fix->server, &fix->cache, &fix->upstreams,
-                      &fix->blocklist, &fix->hosts,
-                      bPtrRoute ? &fix->ptrRouter : NULL,
-                      bPtrRoute ? G_PTR_PREFIX : NULL,
-                      bPtrRoute ? 24 : 0,
-                      &fix->connArena, &fix->txArena, SERVER_PORT);
+    if(!ArenaInit(&fix->arena, 2048u * 1024u))
+        goto fail;
+    fix->bArenaReady = true;
+
+    if(!CacheInit(&fix->cache, &fix->arena)
+       || !ArenaCarve(&fix->arena, &fix->connArena, ARENA_CONN_BYTES)
+       || !ArenaCarve(&fix->arena, &fix->txArena, ARENA_TXTABLE_BYTES)
+       || !ArenaCarve(&fix->arena, &fix->hostsArena, ARENA_HOSTS_BYTES)
+       || !HostsLoad(&fix->hosts, &fix->hostsArena, NULL)
+       || !UpstreamPoolAdd(&fix->upstreams, "127.0.0.1", UPSTREAM_PORT)
+       || (bPtrRoute
+           && !UpstreamPoolAdd(&fix->ptrRouter, "127.0.0.1", UPSTREAM_PORT)))
+        goto fail;
+
+    if(!ServerOpen(&fix->server, &fix->cache, &fix->upstreams,
+                   &fix->blocklist, &fix->hosts,
+                   bPtrRoute ? &fix->ptrRouter : NULL,
+                   bPtrRoute ? G_PTR_PREFIX : NULL,
+                   bPtrRoute ? 24 : 0,
+                   &fix->connArena, &fix->txArena, SERVER_PORT))
+        goto fail;
+
+    fix->bServerReady = true;
+    return true;
+
+fail:
+    FixtureDown(fix);
+    return false;
 }
 
 static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
@@ -320,13 +341,25 @@ static bool FixturePairUp(Fixture *fix, uint32_t ttl)
     fix->fake2.answerTtl = ttl;
 
     if(fix->fake2.fd < 0)
+    {
+        FixtureDown(fix);
         return false;
+    }
 
     if(pthread_create(&fix->thread2, NULL, FakeUpstreamMain, &fix->fake2) != 0)
+    {
+        FixtureDown(fix);
         return false;
+    }
 
-    fix->bPaired = true;
-    return UpstreamPoolAdd(&fix->upstreams, "127.0.0.1", UPSTREAM_PORT2);
+    fix->bThread2 = true;
+    if(!UpstreamPoolAdd(&fix->upstreams, "127.0.0.1", UPSTREAM_PORT2))
+    {
+        FixtureDown(fix);
+        return false;
+    }
+
+    return true;
 }
 
 /* The thread is parked in recvfrom, so it only sees bStop after a datagram. */
@@ -355,13 +388,41 @@ static void StopFake(FakeUpstream *fake, pthread_t thread, uint16_t port)
 
 static void FixtureDown(Fixture *fix)
 {
-    StopFake(&fix->fake, fix->thread, UPSTREAM_PORT);
+    if(fix->bThread)
+    {
+        StopFake(&fix->fake, fix->thread, UPSTREAM_PORT);
+        fix->bThread = false;
+        fix->fake.fd = -1;
+    }
+    else if(fix->fake.fd >= 0)
+    {
+        close(fix->fake.fd);
+        fix->fake.fd = -1;
+    }
 
-    if(fix->bPaired)
+    if(fix->bThread2)
+    {
         StopFake(&fix->fake2, fix->thread2, UPSTREAM_PORT2);
+        fix->bThread2 = false;
+        fix->fake2.fd = -1;
+    }
+    else if(fix->fake2.fd >= 0)
+    {
+        close(fix->fake2.fd);
+        fix->fake2.fd = -1;
+    }
 
-    ServerClose(&fix->server);
-    ArenaRelease(&fix->arena);
+    if(fix->bServerReady)
+    {
+        ServerClose(&fix->server);
+        fix->bServerReady = false;
+    }
+
+    if(fix->bArenaReady)
+    {
+        ArenaRelease(&fix->arena);
+        fix->bArenaReady = false;
+    }
 }
 
 static void Pump(Server *server, int times)
@@ -584,7 +645,6 @@ static void TestRetryMovesToTheSecondUpstream(void)
     if(!FixturePairUp(&fix, 300))
     {
         printf("SKIP failover: cannot bind test ports\n");
-        FixtureDown(&fix);
         return;
     }
 
@@ -623,6 +683,37 @@ static void TestRetryMovesToTheSecondUpstream(void)
     FixtureDown(&fix);
 }
 
+static void TestStartFailureMovesToTheSecondUpstream(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixturePairUp(&fix, 300))
+    {
+        printf("SKIP start failover: cannot bind test ports\n");
+        return;
+    }
+
+    fix.upstreams.members[0].addrLen = 0;
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0x4545,
+                                 "a.example.com", WIRE_TYPE_A);
+    CHECK(send(client, query, queryLen, 0) == (ssize_t)queryLen);
+    Pump(&fix.server, 6);
+
+    CHECK(recv(client, reply, sizeof reply, MSG_DONTWAIT)
+          > (ssize_t)WIRE_HEADER_BYTES);
+    CHECK(fix.server.retries == 1);
+    CHECK(fix.upstreams.members[0].failures == 1);
+    CHECK(fix.fake2.served >= 1);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
 /* The probe is the only reason an upstream nobody is using ever gets a
    reading. It has to complete through the poll loop and leave a measurement,
    without going near a client query. */
@@ -633,7 +724,6 @@ static void TestProbeMeasuresAnUnselectedUpstream(void)
     if(!FixturePairUp(&fix, 300))
     {
         printf("SKIP probe: cannot bind test ports\n");
-        FixtureDown(&fix);
         return;
     }
 
@@ -1104,6 +1194,33 @@ static void TestBlockedNameIsRefusedLocally(void)
     FixtureDown(&fix);
 }
 
+static void TestCloseCancelsActiveProbe(void)
+{
+    int fds[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    UpstreamPool pool;
+    UpstreamPoolInit(&pool, 0);
+    pool.bProbing = true;
+    pool.probe.fd = fds[0];
+    pool.probe.transport = UpstreamTransport_Plaintext;
+
+    Server server;
+    memset(&server, 0, sizeof server);
+    server.fdUdp4    = -1;
+    server.fdUdp6    = -1;
+    server.fdTcp4    = -1;
+    server.fdTcp6    = -1;
+    server.upstreams = &pool;
+
+    ServerClose(&server);
+
+    CHECK(!pool.bProbing);
+    CHECK(pool.probe.fd == -1);
+    CHECK(close(fds[0]) < 0);
+    close(fds[1]);
+}
+
 int main(void)
 {
     TestUdpQueryIsForwardedAndAnswered();
@@ -1112,6 +1229,7 @@ int main(void)
     TestOversizedUdpAnswerSetsTruncated();
     TestUpstreamSilenceBecomesServfail();
     TestRetryMovesToTheSecondUpstream();
+    TestStartFailureMovesToTheSecondUpstream();
     TestProbeMeasuresAnUnselectedUpstream();
     TestResponseSentToListenerIsIgnored();
     TestOneStalledQueryDoesNotBlockOthers();
@@ -1120,6 +1238,7 @@ int main(void)
     TestBlockedNameIsRefusedLocally();
     TestLocalNamesAreAnsweredHere();
     TestUnknownLocalPtrGoesToRouter();
+    TestCloseCancelsActiveProbe();
 
     if(G_FAILURES != 0)
     {

@@ -1,16 +1,23 @@
+#define _GNU_SOURCE
+
 #include "arena.h"
 #include "blocklist.h"
 #include "cache.h"
 #include "config.h"
 #include "hosts.h"
 #include "server.h"
+#include "tls.h"
 #include "upstream.h"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 _Static_assert(ARENA_CACHE_BYTES + ARENA_TXTABLE_BYTES + ARENA_CONN_BYTES +
                ARENA_HOSTS_BYTES + ARENA_TLS_BYTES + ARENA_SPARE_BYTES
@@ -49,6 +56,60 @@ static bool MemoryInit(Memory *mem)
 
 static const char *const G_UPSTREAM_ADDRS[] = CFG_UPSTREAM_ADDRS;
 
+#if defined(PROFILE_ENCRYPTED)
+static const char *const G_UPSTREAM_TLS_NAMES[] = CFG_UPSTREAM_TLS_NAMES;
+static const char *const G_UPSTREAM_DOH_PATHS[] = CFG_UPSTREAM_DOH_PATHS;
+
+_Static_assert(sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS
+               == sizeof G_UPSTREAM_TLS_NAMES / sizeof *G_UPSTREAM_TLS_NAMES,
+               "each encrypted upstream needs a TLS hostname");
+_Static_assert(sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS
+               == sizeof G_UPSTREAM_DOH_PATHS / sizeof *G_UPSTREAM_DOH_PATHS,
+               "each encrypted upstream needs a DoH path");
+
+typedef struct
+{
+    const uint8_t *base;
+    size_t         size;
+} TrustMap;
+
+static bool TrustLoad(TrustMap *trust)
+{
+    memset(trust, 0, sizeof *trust);
+
+    int fd = open(CFG_TLS_CA_DER_PATH, O_RDONLY | O_CLOEXEC);
+    if(fd < 0)
+        return false;
+
+    struct stat info;
+    if(fstat(fd, &info) != 0 || info.st_size <= 0
+       || info.st_size > (off_t)CFG_TLS_CA_MAX_BYTES)
+    {
+        close(fd);
+        return false;
+    }
+
+    void *base = mmap(NULL, (size_t)info.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+
+    if(base == MAP_FAILED)
+        return false;
+
+    trust->base = base;
+    trust->size = (size_t)info.st_size;
+    return true;
+}
+
+static void TrustUnload(TrustMap *trust)
+{
+    if(trust->base != NULL)
+        munmap((void *)trust->base, trust->size);
+
+    trust->base = NULL;
+    trust->size = 0;
+}
+#endif
+
 static bool ConfigurePtrRoute(UpstreamPool *router, uint8_t prefix[4])
 {
     UpstreamPoolInit(router, ServerNowMilliseconds());
@@ -81,7 +142,7 @@ static bool ConfigurePtrRoute(UpstreamPool *router, uint8_t prefix[4])
 }
 
 static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
-                   const HostMap *hosts)
+                   const HostMap *hosts, const UpstreamPool *upstreams)
 {
     printf("arena     %zu bytes\n", mem->root.size);
     printf("cache     %zu (%zu entries)\n", mem->cache.size,
@@ -93,8 +154,25 @@ static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
     printf("spare     %zu\n", ArenaRemaining(&mem->root));
     printf("blocklist %zu (%s)\n", list->size, BlocklistSourceName(list->source));
     printf("upstream ");
-    for(size_t i = 0; i < sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS; i++)
-        printf(" %s:%d", G_UPSTREAM_ADDRS[i], CFG_UPSTREAM_PORT);
+    for(size_t i = 0; i < upstreams->count; i++)
+    {
+        const Upstream *member = &upstreams->members[i];
+        const void     *raw;
+        if(member->addr.ss_family == AF_INET)
+            raw = &((const struct sockaddr_in *)&member->addr)->sin_addr;
+        else
+            raw = &((const struct sockaddr_in6 *)&member->addr)->sin6_addr;
+
+        char address[INET6_ADDRSTRLEN];
+        const char *display = inet_ntop(member->addr.ss_family, raw, address,
+                                       sizeof address);
+        const char *transport = "udp";
+        if(member->transport == UpstreamTransport_Dot)
+            transport = "dot";
+        else if(member->transport == UpstreamTransport_Doh)
+            transport = "doh";
+        printf(" %s:%s", display != NULL ? display : "?", transport);
+    }
     printf("\n");
 }
 
@@ -109,6 +187,11 @@ int main(void)
     Server       server;
     uint8_t      ptrPrefix[4];
     bool         bPtrRoute;
+
+#if defined(PROFILE_ENCRYPTED)
+    TlsBackend tls;
+    TrustMap   trust;
+#endif
 
     signal(SIGTERM, OnSignal);
     signal(SIGINT, OnSignal);
@@ -128,13 +211,53 @@ int main(void)
 
     UpstreamPoolInit(&upstreams, ServerNowMilliseconds());
 
+#if defined(PROFILE_ENCRYPTED)
+    if(!TrustLoad(&trust))
+    {
+        fprintf(stderr, "dns_blocker: cannot map TLS trust anchor %s\n",
+                CFG_TLS_CA_DER_PATH);
+        ArenaRelease(&mem.root);
+        return EXIT_FAILURE;
+    }
+
+    if(!TlsBackendInit(&tls, &mem.tls, trust.base, trust.size))
+    {
+        fputs("dns_blocker: TLS initialization failed\n", stderr);
+        TrustUnload(&trust);
+        ArenaRelease(&mem.root);
+        return EXIT_FAILURE;
+    }
+
+    UpstreamPoolSetTlsBackend(&upstreams, &tls);
+#endif
+
     bPtrRoute = ConfigurePtrRoute(&ptrRouter, ptrPrefix);
     if(CFG_PTR_ROUTER_ADDR != NULL && !bPtrRoute)
+    {
+#if defined(PROFILE_ENCRYPTED)
+        TlsBackendFree(&tls);
+        TrustUnload(&trust);
+#endif
+        ArenaRelease(&mem.root);
         return EXIT_FAILURE;
+    }
 
     for(size_t i = 0; i < sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS; i++)
     {
-        if(!UpstreamPoolAdd(&upstreams, G_UPSTREAM_ADDRS[i], CFG_UPSTREAM_PORT))
+#if defined(PROFILE_ENCRYPTED)
+#if CFG_ENCRYPTED_USE_DOH
+        bool bAdded = UpstreamPoolAddDoh(&upstreams, G_UPSTREAM_ADDRS[i],
+                                         CFG_DOH_PORT, G_UPSTREAM_TLS_NAMES[i],
+                                         G_UPSTREAM_DOH_PATHS[i]);
+#else
+        bool bAdded = UpstreamPoolAddDot(&upstreams, G_UPSTREAM_ADDRS[i],
+                                         CFG_DOT_PORT, G_UPSTREAM_TLS_NAMES[i]);
+#endif
+#else
+        bool bAdded = UpstreamPoolAdd(&upstreams, G_UPSTREAM_ADDRS[i],
+                                      CFG_UPSTREAM_PORT);
+#endif
+        if(!bAdded)
             fprintf(stderr, "dns_blocker: upstream %s refused, not a literal IP\n",
                     G_UPSTREAM_ADDRS[i]);
     }
@@ -142,6 +265,11 @@ int main(void)
     if(upstreams.count == 0)
     {
         fputs("dns_blocker: no usable upstream address\n", stderr);
+#if defined(PROFILE_ENCRYPTED)
+        TlsBackendFree(&tls);
+        TrustUnload(&trust);
+#endif
+        ArenaRelease(&mem.root);
         return EXIT_FAILURE;
     }
 
@@ -151,10 +279,16 @@ int main(void)
     if(!HostsLoad(&hosts, &mem.hosts, CFG_HOSTS_PATH))
     {
         fputs("dns_blocker: hosts slice too small\n", stderr);
+        BlocklistUnload(&list);
+#if defined(PROFILE_ENCRYPTED)
+        TlsBackendFree(&tls);
+        TrustUnload(&trust);
+#endif
+        ArenaRelease(&mem.root);
         return EXIT_FAILURE;
     }
 
-    Report(&mem, &list, &cache, &hosts);
+    Report(&mem, &list, &cache, &hosts, &upstreams);
 
     if(!ServerOpen(&server, &cache, &upstreams, &list, &hosts,
                    bPtrRoute ? &ptrRouter : NULL,
@@ -163,6 +297,10 @@ int main(void)
     {
         fprintf(stderr, "dns_blocker: cannot bind port %d\n", CFG_DNS_PORT);
         BlocklistUnload(&list);
+#if defined(PROFILE_ENCRYPTED)
+        TlsBackendFree(&tls);
+        TrustUnload(&trust);
+#endif
         ArenaRelease(&mem.root);
         return EXIT_FAILURE;
     }
@@ -196,6 +334,10 @@ int main(void)
 
     ServerClose(&server);
     BlocklistUnload(&list);
+#if defined(PROFILE_ENCRYPTED)
+    TlsBackendFree(&tls);
+    TrustUnload(&trust);
+#endif
     ArenaRelease(&mem.root);
     return EXIT_SUCCESS;
 }

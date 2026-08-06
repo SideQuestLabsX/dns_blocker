@@ -170,6 +170,19 @@ static void TestRetryMovesToAnotherUpstream(void)
     CHECK(UpstreamPoolSelect(&pool, NOW, 1) == 0);
 }
 
+static void TestRetryMaskMovesAcrossThePool(void)
+{
+    UpstreamPool pool;
+
+    CHECK(PoolOf(&pool, 3));
+    UpstreamPoolSample(&pool, 0, 10);
+    UpstreamPoolSample(&pool, 1, 20);
+    UpstreamPoolSample(&pool, 2, 30);
+
+    CHECK(UpstreamPoolSelectExcept(&pool, NOW, UINT32_C(0x3)) == 2);
+    CHECK(UpstreamPoolSelectExcept(&pool, NOW, UINT32_C(0x7)) == 0);
+}
+
 /* One upstream and a retry: there is nowhere else to go and refusing to send
    would fail the query that a resend might still answer. */
 static void TestAvoidCannotEmptyASinglePool(void)
@@ -203,6 +216,40 @@ static void TestAddRefusesWhatIsNotAnAddress(void)
         UpstreamPoolAdd(&pool, "127.0.0.1", 53);
 
     CHECK(pool.count == CFG_MAX_UPSTREAMS);
+}
+
+static void TestDotCarriesItsAuthenticationName(void)
+{
+    UpstreamPool pool;
+
+    UpstreamPoolInit(&pool, NOW);
+    CHECK(UpstreamPoolAddDot(&pool, "1.1.1.1", 853, "cloudflare-dns.com"));
+    CHECK(pool.count == 1);
+    CHECK(pool.members[0].transport == UpstreamTransport_Dot);
+    CHECK(strcmp(pool.members[0].hostname, "cloudflare-dns.com") == 0);
+
+    CHECK(!UpstreamPoolAddDot(&pool, "9.9.9.9", 853, NULL));
+    CHECK(!UpstreamPoolAddDot(&pool, "9.9.9.9", 853, ""));
+    CHECK(pool.count == 1);
+}
+
+static void TestDohCarriesItsPath(void)
+{
+    UpstreamPool pool;
+
+    UpstreamPoolInit(&pool, NOW);
+    CHECK(UpstreamPoolAddDoh(&pool, "1.1.1.1", 443,
+                             "cloudflare-dns.com", "/dns-query"));
+    CHECK(pool.count == 1);
+    CHECK(pool.members[0].transport == UpstreamTransport_Doh);
+    CHECK(strcmp(pool.members[0].hostname, "cloudflare-dns.com") == 0);
+    CHECK(strcmp(pool.members[0].path, "/dns-query") == 0);
+
+    CHECK(!UpstreamPoolAddDoh(&pool, "9.9.9.9", 443,
+                              "dns.quad9.net", "dns-query"));
+    CHECK(!UpstreamPoolAddDoh(&pool, "9.9.9.9", 443,
+                              "dns.quad9.net", "/dns query"));
+    CHECK(pool.count == 1);
 }
 
 /* Clears an open probe without counting it against its target, which is what
@@ -313,9 +360,12 @@ int main(void)
     TestAnAnswerClearsTheFailureRun();
     TestEveryUpstreamDownStillForwards();
     TestRetryMovesToAnotherUpstream();
+    TestRetryMaskMovesAcrossThePool();
     TestAvoidCannotEmptyASinglePool();
     TestAnEmptyPoolSelectsNothing();
     TestAddRefusesWhatIsNotAnAddress();
+    TestDotCarriesItsAuthenticationName();
+    TestDohCarriesItsPath();
     TestProbeSkipsTheSelectedUpstreamAndRotates();
     TestProbeWaitsForItsInterval();
     TestASingleUpstreamIsNeverProbed();

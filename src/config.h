@@ -75,7 +75,9 @@
 /* Listeners. TCP carries whatever exceeded the UDP payload size, so its buffer
    is sized well above CFG_EDNS_PAYLOAD_BYTES rather than at it. TCP DNS is rare
    on a LAN, so slots are few and the cap is generous instead of the reverse. */
-#define CFG_DNS_PORT            53
+#ifndef CFG_DNS_PORT
+  #define CFG_DNS_PORT          53
+#endif
 
 /* In-flight upstream queries. Each slot keeps the query, so a retry can resend
    it and a failure can echo its question back. At capacity the oldest slot is
@@ -123,6 +125,31 @@
    down is not correlated with the other. */
 #define CFG_UPSTREAM_ADDRS      { "1.1.1.1", "9.9.9.9" }
 #define CFG_UPSTREAM_PORT       53
+
+#if defined(PROFILE_ENCRYPTED)
+  /* Authentication names follow CFG_UPSTREAM_ADDRS in the same order */
+  #ifndef CFG_UPSTREAM_TLS_NAMES
+    #define CFG_UPSTREAM_TLS_NAMES { "cloudflare-dns.com", "dns.quad9.net" }
+  #endif
+  #ifndef CFG_DOT_PORT
+    #define CFG_DOT_PORT            853
+  #endif
+  #ifndef CFG_DOH_PORT
+    #define CFG_DOH_PORT            443
+  #endif
+  #ifndef CFG_ENCRYPTED_USE_DOH
+    #define CFG_ENCRYPTED_USE_DOH   1
+  #endif
+  #ifndef CFG_UPSTREAM_DOH_PATHS
+    #define CFG_UPSTREAM_DOH_PATHS  { "/dns-query", "/dns-query" }
+  #endif
+  #ifndef CFG_TLS_CA_DER_PATH
+    #define CFG_TLS_CA_DER_PATH     "/etc/dns_blocker/ca.der"
+  #endif
+  #ifndef CFG_TLS_CA_MAX_BYTES
+    #define CFG_TLS_CA_MAX_BYTES    KIB(16)
+  #endif
+#endif
 /* Guarded so a test can shrink the wait. Without the guard a -D override is
    silently discarded and the test still waits the shipped six seconds. */
 #ifndef CFG_UPSTREAM_TIMEOUT_MS
@@ -132,6 +159,13 @@
   #define CFG_UPSTREAM_RETRIES    2
 #endif
 #define CFG_MAX_UPSTREAMS       4
+
+/* Three TLS channels keep their record buffers within ARENA_TLS_BYTES */
+#define CFG_TLS_SLOTS           3
+#define CFG_TLS_HOSTNAME_BYTES  128
+#define CFG_DOH_PATH_BYTES      64
+#define CFG_DOH_HEADER_BYTES    1024
+#define CFG_DOH_REQUEST_BYTES   512
 
 /* Latency probing. A real answer times the selected upstream for free, so a
    probe only has to measure the others. One probe goes to one upstream on this

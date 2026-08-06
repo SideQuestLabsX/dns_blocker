@@ -45,6 +45,7 @@ typedef struct
     UpstreamPool    *pool;
     ClientRef        client;
     uint32_t         deadlineMs;
+    uint32_t         attemptedMask;
     uint16_t         clientId;
     uint16_t         advertised;
     uint8_t          attempts;

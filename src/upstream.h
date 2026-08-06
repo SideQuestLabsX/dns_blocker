@@ -2,6 +2,7 @@
 #define DNS_BLOCKER_UPSTREAM_H
 
 #include "config.h"
+#include "tls.h"
 #include "verify.h"
 #include "wire.h"
 
@@ -15,10 +16,20 @@
 #define UPSTREAM_RTT_NONE   UINT32_MAX
 #define UPSTREAM_NONE       SIZE_MAX
 
+typedef enum
+{
+    UpstreamTransport_Plaintext,
+    UpstreamTransport_Dot,
+    UpstreamTransport_Doh
+} UpstreamTransport;
+
 typedef struct
 {
     struct sockaddr_storage addr;
     socklen_t               addrLen;
+    UpstreamTransport       transport;
+    char                    hostname[CFG_TLS_HOSTNAME_BYTES];
+    char                    path[CFG_DOH_PATH_BYTES];
 
     uint32_t srttMs;
     uint32_t downUntilMs;
@@ -34,6 +45,35 @@ typedef struct
     VerifyResult lastReject;
 } Upstream;
 
+#if defined(PROFILE_ENCRYPTED)
+typedef enum
+{
+    DotState_Connect,
+    DotState_Handshake,
+    DotState_Write,
+    DotState_ReadLength,
+    DotState_ReadBody,
+    DohState_ReadHeaders,
+    DohState_ReadBody,
+    DohState_ExpectClose
+} DotState;
+
+typedef struct
+{
+    TlsChannel channel;
+    DotState   state;
+    size_t     sent;
+    size_t     got;
+    size_t     requestLen;
+    size_t     responseLen;
+    bool       bUsed;
+    uint8_t    query[CFG_DOH_REQUEST_BYTES + CFG_TX_QUERY_BYTES];
+    uint8_t    response[CFG_DOH_HEADER_BYTES + CFG_TCP_MSG_BYTES];
+} UpstreamTlsSlot;
+#endif
+
+struct UpstreamPool;
+
 /* One outstanding query. The socket stays open until the answer arrives or the
    caller gives up, and the kernel keeps the ephemeral source port bound to it,
    so an off-path attacker has to guess the port as well as the ID.
@@ -45,17 +85,25 @@ typedef struct
     int          fd;
     uint16_t     id;
     size_t       index;
+    size_t       tlsSlot;
     uint32_t     sentMs;
+    UpstreamTransport transport;
+    struct UpstreamPool *pool;
     WireQuestion asked;
 } UpstreamExchange;
 
 /* The configured resolvers and their measured latency. A query goes to one of
    them, so no resolver sees the whole stream. Ranking comes from real answers
    for the selected upstream and from a rotating probe for the rest. */
-typedef struct
+typedef struct UpstreamPool
 {
     Upstream members[CFG_MAX_UPSTREAMS];
     size_t   count;
+    TlsBackend *tls;
+
+#if defined(PROFILE_ENCRYPTED)
+    UpstreamTlsSlot tlsSlots[CFG_TLS_SLOTS];
+#endif
 
     WireName         probeName;
     UpstreamExchange probe;
@@ -74,6 +122,11 @@ void UpstreamPoolInit(UpstreamPool *pool, uint32_t nowMs);
 /* Accepts a literal IPv4 or IPv6 address only. Resolving a name here would
    need the resolver this daemon is trying to be. */
 bool UpstreamPoolAdd(UpstreamPool *pool, const char *address, uint16_t port);
+bool UpstreamPoolAddDot(UpstreamPool *pool, const char *address, uint16_t port,
+                        const char *hostname);
+bool UpstreamPoolAddDoh(UpstreamPool *pool, const char *address, uint16_t port,
+                        const char *hostname, const char *path);
+void UpstreamPoolSetTlsBackend(UpstreamPool *pool, TlsBackend *backend);
 
 /* Lowest measured round trip among the upstreams still in service, with the
    configured order breaking a tie. Pass the index of an upstream that has just
@@ -83,6 +136,8 @@ bool UpstreamPoolAdd(UpstreamPool *pool, const char *address, uint16_t port);
    the pool has a member: a resolver that fails closed takes the network down.
    UPSTREAM_NONE comes back only from an empty pool. */
 size_t UpstreamPoolSelect(const UpstreamPool *pool, uint32_t nowMs, size_t avoid);
+size_t UpstreamPoolSelectExcept(const UpstreamPool *pool, uint32_t nowMs,
+                                uint32_t excludedMask);
 
 /* Folds one round trip measurement in and returns the upstream to service. */
 void UpstreamPoolSample(UpstreamPool *pool, size_t index, uint32_t rttMs);
@@ -99,32 +154,37 @@ bool UpstreamPoolProbeDue(const UpstreamPool *pool, uint32_t nowMs);
    target. False when nothing was sent, and the interval restarts either way. */
 bool UpstreamPoolProbeBegin(UpstreamPool *pool, uint32_t nowMs);
 
-/* Reads the probe answer. Same checks as a client answer, so a forged datagram
-   cannot rank an upstream. */
 void UpstreamPoolProbeReadable(UpstreamPool *pool, uint32_t nowMs);
 
 /* Gives up on an unanswered probe, which counts as a failure for its target. */
 void UpstreamPoolProbeSweep(UpstreamPool *pool, uint32_t nowMs);
 
-/* Opens a socket, applies a fresh transaction ID and 0x20 case, and sends. The
-   caller polls exchange->fd for readability and then calls UpstreamComplete. */
-bool UpstreamBegin(UpstreamPool *pool, size_t index, const uint8_t *query,
-                   size_t queryLen, uint32_t nowMs, UpstreamExchange *exchange);
+typedef enum
+{
+    UpstreamStart_Started,
+    UpstreamStart_Busy,
+    UpstreamStart_Failed
+} UpstreamStart;
+
+/* Starts an exchange, caller polls UpstreamEvents before UpstreamComplete */
+UpstreamStart UpstreamBegin(UpstreamPool *pool, size_t index,
+                            const uint8_t *query, size_t queryLen,
+                            uint32_t nowMs, UpstreamExchange *exchange);
+
+short UpstreamEvents(const UpstreamExchange *exchange);
 
 typedef enum
 {
     UpstreamRead_Answer,
     UpstreamRead_Again,
-    UpstreamRead_Empty
+    UpstreamRead_Empty,
+    UpstreamRead_Failed
 } UpstreamRead;
 
-/* Reads one datagram and checks it. UpstreamRead_Again means the datagram was
-   not a usable answer and the exchange is still open, which is what lets a
-   forged packet lose the race instead of ending it. An accepted answer is also
-   the round trip sample for the upstream that sent it. */
-UpstreamRead UpstreamComplete(UpstreamPool *pool, const UpstreamExchange *exchange,
-                              uint32_t nowMs, uint8_t *out, size_t cap,
-                              size_t *outLen);
+/* UpstreamRead_Again keeps the exchange open for another poll event */
+UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
+                               uint32_t nowMs, uint8_t *out, size_t cap,
+                               size_t *outLen);
 
 void UpstreamEnd(UpstreamExchange *exchange);
 
