@@ -42,6 +42,7 @@ typedef struct
 typedef struct
 {
     UpstreamExchange exchange;
+    UpstreamPool    *pool;
     ClientRef        client;
     uint32_t         deadlineMs;
     uint16_t         clientId;
@@ -56,10 +57,15 @@ typedef struct
 {
     Cache           *cache;
     UpstreamPool    *upstreams;
+    UpstreamPool    *ptrRouter;
     const Blocklist *blocklist;
     const HostMap   *hosts;
     Connection  *conns;
     Transaction *transactions;
+
+    uint8_t ptrPrefix[4];
+    uint8_t ptrPrefixBits;
+    bool    bPtrRoute;
 
     int fdUdp4;
     int fdUdp6;
@@ -91,6 +97,8 @@ typedef struct
    resolver over IPv6 bypasses this daemon. */
 bool ServerOpen(Server *server, Cache *cache, UpstreamPool *upstreams,
                 const Blocklist *blocklist, const HostMap *hosts,
+                UpstreamPool *ptrRouter, const uint8_t *ptrPrefix,
+                uint8_t ptrPrefixBits,
                 Arena *connArena, Arena *txArena, uint16_t port);
 
 void ServerClose(Server *server);

@@ -93,12 +93,15 @@ static int OpenSocket(int family, int type, uint16_t port)
 
 bool ServerOpen(Server *server, Cache *cache, UpstreamPool *upstreams,
                 const Blocklist *blocklist, const HostMap *hosts,
+                UpstreamPool *ptrRouter, const uint8_t *ptrPrefix,
+                uint8_t ptrPrefixBits,
                 Arena *connArena, Arena *txArena, uint16_t port)
 {
     memset(server, 0, sizeof *server);
 
     server->cache          = cache;
     server->upstreams      = upstreams;
+    server->ptrRouter      = ptrRouter;
     server->blocklist      = blocklist;
     server->hosts          = hosts;
     server->nextGeneration = 1;
@@ -106,6 +109,16 @@ bool ServerOpen(Server *server, Cache *cache, UpstreamPool *upstreams,
     server->fdUdp6         = -1;
     server->fdTcp4         = -1;
     server->fdTcp6         = -1;
+
+    if(ptrRouter != NULL && ptrRouter->count != 0)
+    {
+        if(ptrPrefix == NULL || ptrPrefixBits > 32)
+            return false;
+
+        memcpy(server->ptrPrefix, ptrPrefix, sizeof server->ptrPrefix);
+        server->ptrPrefixBits = ptrPrefixBits;
+        server->bPtrRoute     = true;
+    }
 
     server->conns = ARENA_ARRAY(connArena, Connection, CFG_TCP_SLOTS);
     if(server->conns == NULL)
@@ -157,6 +170,7 @@ static void CloseConnection(Connection *conn)
 static void TxRelease(Transaction *tx)
 {
     UpstreamEnd(&tx->exchange);
+    tx->pool   = NULL;
     tx->bActive = false;
 }
 
@@ -264,15 +278,18 @@ static Transaction *TxAcquire(Server *server)
 
 /* avoid names the upstream that has just failed this query, so a retry lands
    on a different resolver. */
-static bool TxSend(Server *server, Transaction *tx, size_t avoid)
+static bool TxSend(Transaction *tx, size_t avoid)
 {
     uint32_t nowMs = ServerNowMilliseconds();
-    size_t   index = UpstreamPoolSelect(server->upstreams, nowMs, avoid);
+    if(tx->pool == NULL)
+        return false;
+
+    size_t index = UpstreamPoolSelect(tx->pool, nowMs, avoid);
 
     if(index == UPSTREAM_NONE)
         return false;
 
-    if(!UpstreamBegin(server->upstreams, index, tx->query, tx->queryLen, nowMs,
+    if(!UpstreamBegin(tx->pool, index, tx->query, tx->queryLen, nowMs,
                       &tx->exchange))
         return false;
 
@@ -280,9 +297,9 @@ static bool TxSend(Server *server, Transaction *tx, size_t avoid)
     return true;
 }
 
-static bool TxStart(Server *server, const uint8_t *query, size_t queryLen,
-                    const ClientRef *client, uint16_t clientId,
-                    uint16_t advertised)
+static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
+                    size_t queryLen, const ClientRef *client,
+                    uint16_t clientId, uint16_t advertised)
 {
     if(queryLen > CFG_TX_QUERY_BYTES)
         return false;
@@ -290,6 +307,7 @@ static bool TxStart(Server *server, const uint8_t *query, size_t queryLen,
     Transaction *tx = TxAcquire(server);
 
     memcpy(tx->query, query, queryLen);
+    tx->pool       = pool;
     tx->queryLen   = (uint16_t)queryLen;
     tx->client     = *client;
     tx->clientId   = clientId;
@@ -297,7 +315,7 @@ static bool TxStart(Server *server, const uint8_t *query, size_t queryLen,
     tx->attempts   = 1;
     tx->bActive    = true;
 
-    if(!TxSend(server, tx, UPSTREAM_NONE))
+    if(!TxSend(tx, UPSTREAM_NONE))
     {
         tx->bActive = false;
         return false;
@@ -338,7 +356,7 @@ static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
     uint8_t reply[CFG_TCP_MSG_BYTES];
     size_t  replyLen = 0;
 
-    UpstreamRead got = UpstreamComplete(server->upstreams, &tx->exchange, nowMs,
+    UpstreamRead got = UpstreamComplete(tx->pool, &tx->exchange, nowMs,
                                         reply, sizeof reply, &replyLen);
 
     /* Again means the datagram failed a check while the exchange stays open,
@@ -359,7 +377,7 @@ static void TxSweep(Server *server, uint32_t nowMs)
             continue;
 
         size_t failed = tx->exchange.index;
-        UpstreamPoolFail(server->upstreams, failed, nowMs);
+        UpstreamPoolFail(tx->pool, failed, nowMs);
 
         if(tx->attempts <= CFG_UPSTREAM_RETRIES)
         {
@@ -369,7 +387,7 @@ static void TxSweep(Server *server, uint32_t nowMs)
             tx->attempts++;
             server->retries++;
 
-            if(TxSend(server, tx, failed))
+            if(TxSend(tx, failed))
                 continue;
         }
 
@@ -409,6 +427,21 @@ static Handled LocalReply(Server *server, const uint8_t *query, size_t queryLen,
     return Handled_Drop;
 }
 
+static bool ShouldForwardPtr(const Server *server, const WireQuestion *question)
+{
+    uint8_t addr[16];
+    uint8_t addrLen = 0;
+
+    if(!server->bPtrRoute || server->ptrRouter == NULL
+       || question->type != WIRE_TYPE_PTR
+       || question->klass != WIRE_CLASS_IN
+       || !HostsReverseAddress(&question->name, addr, &addrLen))
+        return false;
+
+    return HostsAddressInPrefix(addr, addrLen, server->ptrPrefix,
+                                server->ptrPrefixBits);
+}
+
 /* The map is the operator's own statement about their network, so it is
    consulted before the blocklist and before the cache. A local answer costs no
    upstream query and takes no cache slot. */
@@ -444,7 +477,8 @@ static Handled AnswerLocal(Server *server, const uint8_t *query, size_t queryLen
         }
 
 #if CFG_PRIVATE_PTR_LOCAL
-        if(HostsAddressIsPrivate(addr, addrLen))
+        if(HostsAddressIsPrivate(addr, addrLen)
+           && !ShouldForwardPtr(server, question))
         {
             return LocalReply(server, query, queryLen, out, cap, outLen,
                               MSG_RCODE_NXDOMAIN, NULL, 0);
@@ -557,7 +591,21 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
         return Handled_Reply;
     }
 
-    if(TxStart(server, query, queryLen, client, clientId, advertised))
+    if(ShouldForwardPtr(server, &question))
+    {
+        if(TxStart(server, server->ptrRouter, query, queryLen, client, clientId,
+                   advertised))
+            return Handled_Deferred;
+
+        server->failures++;
+        if(MsgBuildReply(out, cap, query, queryLen, MSG_RCODE_SERVFAIL, outLen))
+            return Handled_Reply;
+
+        return Handled_Drop;
+    }
+
+    if(TxStart(server, server->upstreams, query, queryLen, client, clientId,
+               advertised))
         return Handled_Deferred;
 
     server->failures++;

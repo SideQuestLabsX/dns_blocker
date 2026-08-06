@@ -275,6 +275,24 @@ static void TestPrivateRanges(void)
     CHECK(!HostsAddressIsPrivate(global, 16));
 }
 
+static void TestAddressPrefixes(void)
+{
+    static const uint8_t prefix[4] = { 192, 168, 1, 0 };
+    static const uint8_t same[4]   = { 192, 168, 1, 47 };
+    static const uint8_t next[4]   = { 192, 168, 2, 1 };
+    static const uint8_t lower[4]  = { 192, 168, 1, 127 };
+    static const uint8_t upper[4]  = { 192, 168, 1, 128 };
+
+    CHECK(HostsAddressInPrefix(same, 4, prefix, 24));
+    CHECK(!HostsAddressInPrefix(next, 4, prefix, 24));
+    CHECK(HostsAddressInPrefix(lower, 4, prefix, 25));
+    CHECK(!HostsAddressInPrefix(upper, 4, prefix, 25));
+    CHECK(HostsAddressInPrefix(next, 4, prefix, 0));
+    CHECK(HostsAddressInPrefix(prefix, 4, prefix, 32));
+    CHECK(!HostsAddressInPrefix(same, 16, prefix, 24));
+    CHECK(!HostsAddressInPrefix(same, 4, prefix, 33));
+}
+
 /* At capacity the map keeps what it has and counts the rest, rather than
    growing or refusing to start. */
 static void TestCapacity(void)
@@ -339,6 +357,7 @@ int main(void)
     TestReverseLookup();
     TestReverseRejectsMalformed();
     TestPrivateRanges();
+    TestAddressPrefixes();
     TestCapacity();
     TestMissingFileIsNotAnError();
     TestSliceTooSmall();

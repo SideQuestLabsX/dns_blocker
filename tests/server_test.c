@@ -34,6 +34,8 @@ static int G_FAILURES;
 #define UPSTREAM_PORT  15354
 #define UPSTREAM_PORT2 15355
 
+static const uint8_t G_PTR_PREFIX[4] = { 192, 168, 1, 0 };
+
 /* A stand-in resolver. It echoes the question and answers with one A record,
    keeping whatever transaction ID the daemon chose, which is what lets the
    test prove the daemon rewrites it before replying to the client. */
@@ -247,6 +249,7 @@ typedef struct
     Blocklist    blocklist;
     HostMap      hosts;
     UpstreamPool upstreams;
+    UpstreamPool ptrRouter;
     Server       server;
     FakeUpstream fake;
     pthread_t    thread;
@@ -258,7 +261,8 @@ typedef struct
     bool         bPaired;
 } Fixture;
 
-static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
+static bool FixtureStart(Fixture *fix, uint32_t ttl, int padding, bool bSilent,
+                         bool bPtrRoute)
 {
     memset(fix, 0, sizeof *fix);
 
@@ -275,6 +279,9 @@ static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
 
     UpstreamPoolInit(&fix->upstreams, ServerNowMilliseconds());
 
+    if(bPtrRoute)
+        UpstreamPoolInit(&fix->ptrRouter, ServerNowMilliseconds());
+
     return ArenaInit(&fix->arena, 2048u * 1024u)
         && CacheInit(&fix->cache, &fix->arena)
         && ArenaCarve(&fix->arena, &fix->connArena, ARENA_CONN_BYTES)
@@ -282,9 +289,24 @@ static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
         && ArenaCarve(&fix->arena, &fix->hostsArena, ARENA_HOSTS_BYTES)
         && HostsLoad(&fix->hosts, &fix->hostsArena, NULL)
         && UpstreamPoolAdd(&fix->upstreams, "127.0.0.1", UPSTREAM_PORT)
+        && (!bPtrRoute
+            || UpstreamPoolAdd(&fix->ptrRouter, "127.0.0.1", UPSTREAM_PORT))
         && ServerOpen(&fix->server, &fix->cache, &fix->upstreams,
-                      &fix->blocklist, &fix->hosts, &fix->connArena,
-                      &fix->txArena, SERVER_PORT);
+                      &fix->blocklist, &fix->hosts,
+                      bPtrRoute ? &fix->ptrRouter : NULL,
+                      bPtrRoute ? G_PTR_PREFIX : NULL,
+                      bPtrRoute ? 24 : 0,
+                      &fix->connArena, &fix->txArena, SERVER_PORT);
+}
+
+static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
+{
+    return FixtureStart(fix, ttl, padding, bSilent, false);
+}
+
+static bool FixturePtrRouteUp(Fixture *fix, uint32_t ttl)
+{
+    return FixtureStart(fix, ttl, 0, false, true);
 }
 
 /* A second resolver that always answers, behind a first one that never does,
@@ -955,6 +977,77 @@ static void TestLocalNamesAreAnsweredHere(void)
     FixtureDown(&fix);
 }
 
+static void TestUnknownLocalPtrGoesToRouter(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+    static const uint8_t phone[4] = { 192, 168, 1, 47 };
+
+    if(!FixturePtrRouteUp(&fix, 300))
+    {
+        printf("SKIP conditional PTR: cannot bind test ports\n");
+        FixtureDown(&fix);
+        return;
+    }
+
+    AddHost(&fix.hosts, "iphone.lan", phone, 4);
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t len = BuildQuery(query, sizeof query, 0x7171,
+                            "47.1.168.192.in-addr.arpa", WIRE_TYPE_PTR);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+    CHECK(recv(client, reply, sizeof reply, MSG_DONTWAIT) > 0);
+    CHECK(fix.server.local == 1);
+    CHECK(fix.server.forwarded == 0);
+    CHECK(fix.ptrRouter.members[0].queries == 0);
+
+    len = BuildQuery(query, sizeof query, 0x7272,
+                     "99.1.168.192.in-addr.arpa", WIRE_TYPE_PTR);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 6);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NOERROR);
+
+    CHECK(fix.server.local == 1);
+    CHECK(fix.server.forwarded == 1);
+    CHECK(fix.ptrRouter.members[0].queries == 1);
+    CHECK(fix.upstreams.members[0].queries == 0);
+
+    len = BuildQuery(query, sizeof query, 0x7273,
+                     "99.1.168.192.in-addr.arpa", WIRE_TYPE_PTR);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+    CHECK(recv(client, reply, sizeof reply, MSG_DONTWAIT) > 0);
+    CHECK(fix.server.hits == 1);
+    CHECK(fix.ptrRouter.members[0].queries == 1);
+    CHECK(fix.upstreams.members[0].queries == 0);
+
+    /* A private reverse name outside the configured LAN prefix stays local */
+    len = BuildQuery(query, sizeof query, 0x7373,
+                     "99.2.168.192.in-addr.arpa", WIRE_TYPE_PTR);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+
+    got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NXDOMAIN);
+
+    CHECK(fix.server.local == 2);
+    CHECK(fix.ptrRouter.members[0].queries == 1);
+    CHECK(fix.upstreams.members[0].queries == 0);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
 static void TestBlockedNameIsRefusedLocally(void)
 {
     Fixture fix;
@@ -1026,6 +1119,7 @@ int main(void)
     TestTcpClientVanishingMidQuery();
     TestBlockedNameIsRefusedLocally();
     TestLocalNamesAreAnsweredHere();
+    TestUnknownLocalPtrGoesToRouter();
 
     if(G_FAILURES != 0)
     {

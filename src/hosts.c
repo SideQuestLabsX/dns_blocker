@@ -387,3 +387,22 @@ bool HostsAddressIsPrivate(const uint8_t *addr, uint8_t addrLen)
 
     return false;
 }
+
+bool HostsAddressInPrefix(const uint8_t *addr, uint8_t addrLen,
+                          const uint8_t *prefix, uint8_t prefixBits)
+{
+    if(addrLen != 4 || prefix == NULL || prefixBits > 32)
+        return false;
+
+    size_t wholeBytes = prefixBits / 8u;
+    uint8_t remaining = (uint8_t)(prefixBits % 8u);
+
+    if(wholeBytes != 0 && memcmp(addr, prefix, wholeBytes) != 0)
+        return false;
+
+    if(remaining == 0)
+        return true;
+
+    uint8_t mask = (uint8_t)(0xFFu << (8u - remaining));
+    return (addr[wholeBytes] & mask) == (prefix[wholeBytes] & mask);
+}

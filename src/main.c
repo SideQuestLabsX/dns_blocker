@@ -6,9 +6,11 @@
 #include "server.h"
 #include "upstream.h"
 
+#include <arpa/inet.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 _Static_assert(ARENA_CACHE_BYTES + ARENA_TXTABLE_BYTES + ARENA_CONN_BYTES +
                ARENA_HOSTS_BYTES + ARENA_TLS_BYTES + ARENA_SPARE_BYTES
@@ -47,6 +49,37 @@ static bool MemoryInit(Memory *mem)
 
 static const char *const G_UPSTREAM_ADDRS[] = CFG_UPSTREAM_ADDRS;
 
+static bool ConfigurePtrRoute(UpstreamPool *router, uint8_t prefix[4])
+{
+    UpstreamPoolInit(router, ServerNowMilliseconds());
+
+    if(CFG_PTR_ROUTER_ADDR == NULL)
+        return false;
+
+    if(CFG_PTR_LOCAL_PREFIX_BITS > 32)
+    {
+        fputs("dns_blocker: conditional PTR prefix is wider than IPv4\n", stderr);
+        return false;
+    }
+
+    struct in_addr network;
+    if(inet_pton(AF_INET, CFG_PTR_LOCAL_PREFIX_ADDR, &network) != 1)
+    {
+        fputs("dns_blocker: conditional PTR prefix is not an IPv4 address\n",
+              stderr);
+        return false;
+    }
+
+    if(!UpstreamPoolAdd(router, CFG_PTR_ROUTER_ADDR, CFG_PTR_ROUTER_PORT))
+    {
+        fputs("dns_blocker: PTR router refused, not a literal IP\n", stderr);
+        return false;
+    }
+
+    memcpy(prefix, &network.s_addr, sizeof network.s_addr);
+    return true;
+}
+
 static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
                    const HostMap *hosts)
 {
@@ -72,7 +105,10 @@ int main(void)
     HostMap   hosts;
     Cache        cache;
     UpstreamPool upstreams;
+    UpstreamPool ptrRouter;
     Server       server;
+    uint8_t      ptrPrefix[4];
+    bool         bPtrRoute;
 
     signal(SIGTERM, OnSignal);
     signal(SIGINT, OnSignal);
@@ -91,6 +127,10 @@ int main(void)
     }
 
     UpstreamPoolInit(&upstreams, ServerNowMilliseconds());
+
+    bPtrRoute = ConfigurePtrRoute(&ptrRouter, ptrPrefix);
+    if(CFG_PTR_ROUTER_ADDR != NULL && !bPtrRoute)
+        return EXIT_FAILURE;
 
     for(size_t i = 0; i < sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS; i++)
     {
@@ -116,8 +156,10 @@ int main(void)
 
     Report(&mem, &list, &cache, &hosts);
 
-    if(!ServerOpen(&server, &cache, &upstreams, &list, &hosts, &mem.conn,
-                   &mem.txTable, CFG_DNS_PORT))
+    if(!ServerOpen(&server, &cache, &upstreams, &list, &hosts,
+                   bPtrRoute ? &ptrRouter : NULL,
+                   bPtrRoute ? ptrPrefix : NULL, CFG_PTR_LOCAL_PREFIX_BITS,
+                   &mem.conn, &mem.txTable, CFG_DNS_PORT))
     {
         fprintf(stderr, "dns_blocker: cannot bind port %d\n", CFG_DNS_PORT);
         BlocklistUnload(&list);

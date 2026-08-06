@@ -56,6 +56,22 @@
    locally for the same reason. */
 #define CFG_PRIVATE_PTR_LOCAL   1
 
+/* Unknown IPv4 PTR names in this prefix go to the router that knows the DHCP
+   leases. Set CFG_PTR_ROUTER_ADDR to NULL to keep unknown private PTR names
+   local */
+#ifndef CFG_PTR_ROUTER_ADDR
+  #define CFG_PTR_ROUTER_ADDR       "192.168.1.1"
+#endif
+#ifndef CFG_PTR_ROUTER_PORT
+  #define CFG_PTR_ROUTER_PORT       53
+#endif
+#ifndef CFG_PTR_LOCAL_PREFIX_ADDR
+  #define CFG_PTR_LOCAL_PREFIX_ADDR  "192.168.1.0"
+#endif
+#ifndef CFG_PTR_LOCAL_PREFIX_BITS
+  #define CFG_PTR_LOCAL_PREFIX_BITS 24
+#endif
+
 /* Listeners. TCP carries whatever exceeded the UDP payload size, so its buffer
    is sized well above CFG_EDNS_PAYLOAD_BYTES rather than at it. TCP DNS is rare
    on a LAN, so slots are few and the cap is generous instead of the reverse. */

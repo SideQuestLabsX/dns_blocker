@@ -40,6 +40,7 @@ Raspberry Pi Zero W and the Zero 2 W.
 | Upstream choice | Each query goes to the fastest configured resolver, timed by the answers it gives and by an occasional probe to the others |
 | Filtering | A reverse-label trie with exact and suffix matches, so one entry covers a whole subtree |
 | Local names | A static host map serves `A`, `AAAA` and `PTR` for the LAN, before everything else |
+| Local reverse | Unknown IPv4 `PTR` names in the configured LAN prefix go to the router, and other private reverse names get `NXDOMAIN` |
 | Blocked answers | `NXDOMAIN`, given before the cache and before the upstream |
 | Hardening | Random transaction IDs, random source ports, 0x20 case in the question, and a bailiwick check on every answer |
 
@@ -145,9 +146,22 @@ the blocklist and before the cache.
 
 Names in the local domain stay on the device. A name under `CFG_LOCAL_DOMAIN`
 that the file does not list gets `NXDOMAIN` from the daemon rather than a query
-to your upstream resolver, and so does a reverse lookup for any private address.
-Sending those out tells the resolver what is on your network and returns
-`NXDOMAIN` regardless.
+to your upstream resolver. A known private reverse name is answered from the map.
+An unknown IPv4 reverse name in `CFG_PTR_LOCAL_PREFIX_ADDR` with
+`CFG_PTR_LOCAL_PREFIX_BITS` is sent to `CFG_PTR_ROUTER_ADDR`, which knows the
+router's DHCP leases. Other private reverse names get `NXDOMAIN` here. Public
+reverse names use the normal upstream route.
+
+The conditional route is configured at build time:
+
+```c
+#define CFG_PTR_ROUTER_ADDR       "192.168.1.1"
+#define CFG_PTR_ROUTER_PORT       53
+#define CFG_PTR_LOCAL_PREFIX_ADDR "192.168.1.0"
+#define CFG_PTR_LOCAL_PREFIX_BITS 24
+```
+
+Set `CFG_PTR_ROUTER_ADDR` to `NULL` to disable it.
 
 ## Build
 
