@@ -45,6 +45,11 @@ bool MsgBuildAnswer(uint8_t *out, size_t cap, const uint8_t *query,
                     size_t queryLen, uint16_t type, uint32_t ttl,
                     const uint8_t *rdata, size_t rdataLen, size_t *outLen);
 
+/* Query carrying one question. The daemon builds one only for the latency
+   probe, because every other query it sends is a client's own bytes. */
+bool MsgBuildQuery(uint8_t *out, size_t cap, const WireName *name,
+                   uint16_t type, uint16_t id, size_t *outLen);
+
 /* Header and question with TC set, so a conforming client retries over TCP. */
 bool MsgBuildTruncated(uint8_t *out, size_t cap, const uint8_t *query,
                        size_t queryLen, size_t *outLen);

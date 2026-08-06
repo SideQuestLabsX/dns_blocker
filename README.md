@@ -36,7 +36,8 @@ Raspberry Pi Zero W and the Zero 2 W.
 |---|---|
 | Listeners | UDP and TCP on port 53, IPv4 and IPv6, with EDNS0 support |
 | Caching | Keeps each TTL and decrements it by the time that passed, negative caching to RFC 2308, CLOCK eviction |
-| Upstream | Plaintext forwarding to one resolver, asynchronous, so a slow resolver delays only the client that asked |
+| Upstream | Plaintext forwarding, asynchronous, so a slow resolver delays only the client that asked |
+| Upstream choice | Each query goes to the fastest configured resolver, timed by the answers it gives and by an occasional probe to the others |
 | Filtering | A reverse-label trie with exact and suffix matches, so one entry covers a whole subtree |
 | Local names | A static host map serves `A`, `AAAA` and `PTR` for the LAN, before everything else |
 | Blocked answers | `NXDOMAIN`, given before the cache and before the upstream |
@@ -105,6 +106,26 @@ An empty `EMBED_LIST` ships without an embedded list. If the mapped file is
 missing or unreadable and there is no embedded list either, the daemon says so
 and forwards without filtering, because a resolver that fails closed takes the
 network down with it.
+
+## Upstream resolvers
+
+`CFG_UPSTREAM_ADDRS` lists them, up to `CFG_MAX_UPSTREAMS`, as literal addresses
+in preference order.
+
+```c
+#define CFG_UPSTREAM_ADDRS { "1.1.1.1", "9.9.9.9" }
+```
+
+A query goes to one of them, the one answering fastest, so no resolver receives
+everything you look up. The daemon times a resolver from the answers it gives,
+and sends one small probe every `CFG_UPSTREAM_PROBE_MS` to one of the others, so
+a resolver it is not using still gets measured. It sends no probe while nothing
+is querying it. The first address in the list serves until the first
+measurement arrives.
+
+A resolver that stops answering is passed over for `CFG_UPSTREAM_DOWN_MS` and a
+query that timed out is retried against a different one. If all of them are
+failing the daemon keeps forwarding to the best of them anyway.
 
 ## Local names
 

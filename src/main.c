@@ -45,6 +45,8 @@ static bool MemoryInit(Memory *mem)
         && ArenaCarve(&mem->root, &mem->tls,     ARENA_TLS_BYTES);
 }
 
+static const char *const G_UPSTREAM_ADDRS[] = CFG_UPSTREAM_ADDRS;
+
 static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
                    const HostMap *hosts)
 {
@@ -57,7 +59,10 @@ static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
     printf("tls       %zu\n", mem->tls.size);
     printf("spare     %zu\n", ArenaRemaining(&mem->root));
     printf("blocklist %zu (%s)\n", list->size, BlocklistSourceName(list->source));
-    printf("upstream  %s:%d\n", CFG_UPSTREAM_ADDR, CFG_UPSTREAM_PORT);
+    printf("upstream ");
+    for(size_t i = 0; i < sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS; i++)
+        printf(" %s:%d", G_UPSTREAM_ADDRS[i], CFG_UPSTREAM_PORT);
+    printf("\n");
 }
 
 int main(void)
@@ -65,9 +70,9 @@ int main(void)
     Memory    mem;
     Blocklist list;
     HostMap   hosts;
-    Cache     cache;
-    Upstream  upstream;
-    Server    server;
+    Cache        cache;
+    UpstreamPool upstreams;
+    Server       server;
 
     signal(SIGTERM, OnSignal);
     signal(SIGINT, OnSignal);
@@ -85,9 +90,18 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    if(!UpstreamInit(&upstream, CFG_UPSTREAM_ADDR, CFG_UPSTREAM_PORT))
+    UpstreamPoolInit(&upstreams, ServerNowMilliseconds());
+
+    for(size_t i = 0; i < sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS; i++)
     {
-        fputs("dns_blocker: upstream address is not a literal IP\n", stderr);
+        if(!UpstreamPoolAdd(&upstreams, G_UPSTREAM_ADDRS[i], CFG_UPSTREAM_PORT))
+            fprintf(stderr, "dns_blocker: upstream %s refused, not a literal IP\n",
+                    G_UPSTREAM_ADDRS[i]);
+    }
+
+    if(upstreams.count == 0)
+    {
+        fputs("dns_blocker: no usable upstream address\n", stderr);
         return EXIT_FAILURE;
     }
 
@@ -102,7 +116,7 @@ int main(void)
 
     Report(&mem, &list, &cache, &hosts);
 
-    if(!ServerOpen(&server, &cache, &upstream, &list, &hosts, &mem.conn,
+    if(!ServerOpen(&server, &cache, &upstreams, &list, &hosts, &mem.conn,
                    &mem.txTable, CFG_DNS_PORT))
     {
         fprintf(stderr, "dns_blocker: cannot bind port %d\n", CFG_DNS_PORT);
@@ -123,6 +137,10 @@ int main(void)
         }
     }
 
+    uint64_t rejected = 0;
+    for(size_t i = 0; i < upstreams.count; i++)
+        rejected += upstreams.members[i].rejected;
+
     fprintf(stderr,
             "dns_blocker: stopping. queries %llu, hits %llu, blocked %llu, "
             "local %llu, forwarded %llu, failed %llu, rejected %llu\n",
@@ -132,7 +150,7 @@ int main(void)
             (unsigned long long)server.local,
             (unsigned long long)server.forwarded,
             (unsigned long long)server.failures,
-            (unsigned long long)upstream.rejected);
+            (unsigned long long)rejected);
 
     ServerClose(&server);
     BlocklistUnload(&list);

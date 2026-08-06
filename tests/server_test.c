@@ -30,8 +30,9 @@ static int G_FAILURES;
         }                                                                  \
     } while(0)
 
-#define SERVER_PORT   15353
-#define UPSTREAM_PORT 15354
+#define SERVER_PORT    15353
+#define UPSTREAM_PORT  15354
+#define UPSTREAM_PORT2 15355
 
 /* A stand-in resolver. It echoes the question and answers with one A record,
    keeping whatever transaction ID the daemon chose, which is what lets the
@@ -245,10 +246,16 @@ typedef struct
     Cache        cache;
     Blocklist    blocklist;
     HostMap      hosts;
-    Upstream     upstream;
+    UpstreamPool upstreams;
     Server       server;
     FakeUpstream fake;
     pthread_t    thread;
+
+    /* Only the failover test needs a second resolver, and only then is it in
+       the pool. */
+    FakeUpstream fake2;
+    pthread_t    thread2;
+    bool         bPaired;
 } Fixture;
 
 static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
@@ -266,28 +273,51 @@ static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
     if(pthread_create(&fix->thread, NULL, FakeUpstreamMain, &fix->fake) != 0)
         return false;
 
+    UpstreamPoolInit(&fix->upstreams, ServerNowMilliseconds());
+
     return ArenaInit(&fix->arena, 2048u * 1024u)
         && CacheInit(&fix->cache, &fix->arena)
         && ArenaCarve(&fix->arena, &fix->connArena, ARENA_CONN_BYTES)
         && ArenaCarve(&fix->arena, &fix->txArena, ARENA_TXTABLE_BYTES)
         && ArenaCarve(&fix->arena, &fix->hostsArena, ARENA_HOSTS_BYTES)
         && HostsLoad(&fix->hosts, &fix->hostsArena, NULL)
-        && UpstreamInit(&fix->upstream, "127.0.0.1", UPSTREAM_PORT)
-        && ServerOpen(&fix->server, &fix->cache, &fix->upstream,
+        && UpstreamPoolAdd(&fix->upstreams, "127.0.0.1", UPSTREAM_PORT)
+        && ServerOpen(&fix->server, &fix->cache, &fix->upstreams,
                       &fix->blocklist, &fix->hosts, &fix->connArena,
                       &fix->txArena, SERVER_PORT);
 }
 
-static void FixtureDown(Fixture *fix)
+/* A second resolver that always answers, behind a first one that never does,
+   so a retry has somewhere to go. */
+static bool FixturePairUp(Fixture *fix, uint32_t ttl)
+{
+    if(!FixtureUp(fix, ttl, 0, true))
+        return false;
+
+    fix->fake2.fd        = OpenLoopbackUdp(UPSTREAM_PORT2);
+    fix->fake2.answerTtl = ttl;
+
+    if(fix->fake2.fd < 0)
+        return false;
+
+    if(pthread_create(&fix->thread2, NULL, FakeUpstreamMain, &fix->fake2) != 0)
+        return false;
+
+    fix->bPaired = true;
+    return UpstreamPoolAdd(&fix->upstreams, "127.0.0.1", UPSTREAM_PORT2);
+}
+
+/* The thread is parked in recvfrom, so it only sees bStop after a datagram. */
+static void StopFake(FakeUpstream *fake, pthread_t thread, uint16_t port)
 {
     uint8_t poke = 0;
     struct sockaddr_in addr;
 
-    fix->fake.bStop = true;
+    fake->bStop = true;
 
     memset(&addr, 0, sizeof addr);
     addr.sin_family      = AF_INET;
-    addr.sin_port        = htons(UPSTREAM_PORT);
+    addr.sin_port        = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     int poker = socket(AF_INET, SOCK_DGRAM, 0);
@@ -297,8 +327,17 @@ static void FixtureDown(Fixture *fix)
         close(poker);
     }
 
-    pthread_join(fix->thread, NULL);
-    close(fix->fake.fd);
+    pthread_join(thread, NULL);
+    close(fake->fd);
+}
+
+static void FixtureDown(Fixture *fix)
+{
+    StopFake(&fix->fake, fix->thread, UPSTREAM_PORT);
+
+    if(fix->bPaired)
+        StopFake(&fix->fake2, fix->thread2, UPSTREAM_PORT2);
+
     ServerClose(&fix->server);
     ArenaRelease(&fix->arena);
 }
@@ -508,6 +547,93 @@ static void TestUpstreamSilenceBecomesServfail(void)
     }
 
     close(client);
+    FixtureDown(&fix);
+}
+
+/* A silent resolver must not become the client's problem while another one is
+   configured. The retry has to change resolver, not repeat the question to the
+   one that already ignored it. */
+static void TestRetryMovesToTheSecondUpstream(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixturePairUp(&fix, 300))
+    {
+        printf("SKIP failover: cannot bind test ports\n");
+        FixtureDown(&fix);
+        return;
+    }
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0x5151,
+                                 "a.example.com", WIRE_TYPE_A);
+    send(client, query, queryLen, 0);
+
+    Pump(&fix.server, 6);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+
+    if(got > 0)
+    {
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NOERROR);
+        CHECK(MsgId(reply, (size_t)got) == 0x5151);
+    }
+
+    CHECK(fix.server.failures == 0);
+    CHECK(fix.server.retries >= 1);
+    CHECK(fix.fake.served >= 1);
+    CHECK(fix.fake2.served >= 1);
+
+    /* The failure is recorded against the resolver that earned it. */
+    CHECK(fix.upstreams.members[0].failures >= 1);
+    CHECK(fix.upstreams.members[1].failures == 0);
+
+    /* And the answer is a measurement of the one that sent it. */
+    CHECK(fix.upstreams.members[1].srttMs != UPSTREAM_RTT_NONE);
+    CHECK(fix.upstreams.members[0].srttMs == UPSTREAM_RTT_NONE);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
+/* The probe is the only reason an upstream nobody is using ever gets a
+   reading. It has to complete through the poll loop and leave a measurement,
+   without going near a client query. */
+static void TestProbeMeasuresAnUnselectedUpstream(void)
+{
+    Fixture fix;
+
+    if(!FixturePairUp(&fix, 300))
+    {
+        printf("SKIP probe: cannot bind test ports\n");
+        FixtureDown(&fix);
+        return;
+    }
+
+    fix.upstreams.probeDeadlineMs = ServerNowMilliseconds();
+    CHECK(UpstreamPoolProbeBegin(&fix.upstreams, ServerNowMilliseconds()));
+
+    /* Nothing is measured yet, so the first address is selected and the probe
+       goes to the other one. */
+    CHECK(fix.upstreams.bProbing);
+    CHECK(fix.upstreams.probe.index == 1);
+
+    PumpBriefly(&fix.server, 8);
+
+    CHECK(!fix.upstreams.bProbing);
+    CHECK(fix.upstreams.probeFailures == 0);
+    CHECK(fix.upstreams.members[1].srttMs != UPSTREAM_RTT_NONE);
+    CHECK(fix.fake2.served >= 1);
+
+    /* No client asked for any of this. */
+    CHECK(fix.server.queries == 0);
+    CHECK(fix.server.forwarded == 0);
+
     FixtureDown(&fix);
 }
 
@@ -892,6 +1018,8 @@ int main(void)
     TestTcpQuery();
     TestOversizedUdpAnswerSetsTruncated();
     TestUpstreamSilenceBecomesServfail();
+    TestRetryMovesToTheSecondUpstream();
+    TestProbeMeasuresAnUnselectedUpstream();
     TestResponseSentToListenerIsIgnored();
     TestOneStalledQueryDoesNotBlockOthers();
     TestTableFullEvictsOldest();

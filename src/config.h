@@ -99,7 +99,13 @@
    a response must guess the case of every letter as well as the transaction ID
    and the source port. */
 #define CFG_UPSTREAM_0X20       1
-#define CFG_UPSTREAM_ADDR       "1.1.1.1"
+
+/* Literal addresses only, in preference order. Each query goes to one of them,
+   the one with the lowest measured round trip, so no resolver receives the
+   whole query stream. The order decides the boot choice and breaks a tie,
+   because no measurement exists yet. Two independent operators, so one going
+   down is not correlated with the other. */
+#define CFG_UPSTREAM_ADDRS      { "1.1.1.1", "9.9.9.9" }
 #define CFG_UPSTREAM_PORT       53
 /* Guarded so a test can shrink the wait. Without the guard a -D override is
    silently discarded and the test still waits the shipped six seconds. */
@@ -110,6 +116,27 @@
   #define CFG_UPSTREAM_RETRIES    2
 #endif
 #define CFG_MAX_UPSTREAMS       4
+
+/* Latency probing. A real answer times the selected upstream for free, so a
+   probe only has to measure the others. One probe goes to one upstream on this
+   interval and the target rotates, which keeps an unselected resolver seeing a
+   trickle rather than traffic. The daemon does not probe while it is idle, so a
+   device nobody is querying stays silent. */
+#ifndef CFG_UPSTREAM_PROBE_MS
+  #define CFG_UPSTREAM_PROBE_MS   30000
+#endif
+#define CFG_UPSTREAM_PROBE_NAME "example.com"
+
+/* Health. A run of failures takes an upstream out of selection until the hold
+   expires. Selection never refuses to forward: with every upstream held down
+   the best of them is used anyway, because a resolver that fails closed takes
+   the network down. */
+#ifndef CFG_UPSTREAM_DOWN_FAILURES
+  #define CFG_UPSTREAM_DOWN_FAILURES 3
+#endif
+#ifndef CFG_UPSTREAM_DOWN_MS
+  #define CFG_UPSTREAM_DOWN_MS    60000
+#endif
 
 /* Answer given for a blocked name. NXDOMAIN fails at once and the client moves
    on. A null address makes the client open a connection and wait for a timeout

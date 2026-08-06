@@ -21,7 +21,7 @@ uint32_t ServerNowSeconds(void)
     return (uint32_t)now.tv_sec;
 }
 
-static uint32_t NowMilliseconds(void)
+uint32_t ServerNowMilliseconds(void)
 {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -91,14 +91,14 @@ static int OpenSocket(int family, int type, uint16_t port)
     return fd;
 }
 
-bool ServerOpen(Server *server, Cache *cache, Upstream *upstream,
+bool ServerOpen(Server *server, Cache *cache, UpstreamPool *upstreams,
                 const Blocklist *blocklist, const HostMap *hosts,
                 Arena *connArena, Arena *txArena, uint16_t port)
 {
     memset(server, 0, sizeof *server);
 
     server->cache          = cache;
-    server->upstream       = upstream;
+    server->upstreams      = upstreams;
     server->blocklist      = blocklist;
     server->hosts          = hosts;
     server->nextGeneration = 1;
@@ -262,12 +262,21 @@ static Transaction *TxAcquire(Server *server)
     return oldest;
 }
 
-static bool TxSend(Server *server, Transaction *tx)
+/* avoid names the upstream that has just failed this query, so a retry lands
+   on a different resolver. */
+static bool TxSend(Server *server, Transaction *tx, size_t avoid)
 {
-    if(!UpstreamBegin(server->upstream, tx->query, tx->queryLen, &tx->exchange))
+    uint32_t nowMs = ServerNowMilliseconds();
+    size_t   index = UpstreamPoolSelect(server->upstreams, nowMs, avoid);
+
+    if(index == UPSTREAM_NONE)
         return false;
 
-    tx->deadlineMs = NowMilliseconds() + CFG_UPSTREAM_TIMEOUT_MS;
+    if(!UpstreamBegin(server->upstreams, index, tx->query, tx->queryLen, nowMs,
+                      &tx->exchange))
+        return false;
+
+    tx->deadlineMs = nowMs + CFG_UPSTREAM_TIMEOUT_MS;
     return true;
 }
 
@@ -288,7 +297,7 @@ static bool TxStart(Server *server, const uint8_t *query, size_t queryLen,
     tx->attempts   = 1;
     tx->bActive    = true;
 
-    if(!TxSend(server, tx))
+    if(!TxSend(server, tx, UPSTREAM_NONE))
     {
         tx->bActive = false;
         return false;
@@ -324,12 +333,12 @@ static void TxFinish(Server *server, Transaction *tx,
     TxRelease(tx);
 }
 
-static void TxReadable(Server *server, Transaction *tx)
+static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
 {
     uint8_t reply[CFG_TCP_MSG_BYTES];
     size_t  replyLen = 0;
 
-    UpstreamRead got = UpstreamComplete(server->upstream, &tx->exchange,
+    UpstreamRead got = UpstreamComplete(server->upstreams, &tx->exchange, nowMs,
                                         reply, sizeof reply, &replyLen);
 
     /* Again means the datagram failed a check while the exchange stays open,
@@ -349,7 +358,8 @@ static void TxSweep(Server *server, uint32_t nowMs)
         if(!tx->bActive || !Elapsed(nowMs, tx->deadlineMs))
             continue;
 
-        server->upstream->timeouts++;
+        size_t failed = tx->exchange.index;
+        UpstreamPoolFail(server->upstreams, failed, nowMs);
 
         if(tx->attempts <= CFG_UPSTREAM_RETRIES)
         {
@@ -359,11 +369,10 @@ static void TxSweep(Server *server, uint32_t nowMs)
             tx->attempts++;
             server->retries++;
 
-            if(TxSend(server, tx))
+            if(TxSend(server, tx, failed))
                 continue;
         }
 
-        server->upstream->failures++;
         Fail(server, tx, MSG_RCODE_SERVFAIL);
     }
 }
@@ -607,7 +616,7 @@ static void AcceptConnection(Server *server, int listener)
         conn->replyLen       = 0;
         conn->bWriting       = false;
         conn->bAwaiting      = false;
-        conn->idleDeadlineMs = NowMilliseconds() + CFG_TCP_IDLE_MS;
+        conn->idleDeadlineMs = ServerNowMilliseconds() + CFG_TCP_IDLE_MS;
         return;
     }
 
@@ -619,7 +628,7 @@ static void AcceptConnection(Server *server, int listener)
 
 static void ServiceConnection(Server *server, Connection *conn, size_t index)
 {
-    conn->idleDeadlineMs = NowMilliseconds() + CFG_TCP_IDLE_MS;
+    conn->idleDeadlineMs = ServerNowMilliseconds() + CFG_TCP_IDLE_MS;
 
     if(conn->bWriting)
     {
@@ -709,9 +718,22 @@ static void ServiceConnection(Server *server, Connection *conn, size_t index)
     Deliver(server, &client, reply, replyLen);
 }
 
+/* One probe measures one unselected upstream. It only goes out when clients
+   have been asking, so an idle device is silent. */
+static void ProbeTick(Server *server, uint32_t nowMs)
+{
+    UpstreamPoolProbeSweep(server->upstreams, nowMs);
+
+    if(server->queries == server->queriesAtLastProbe)
+        return;
+
+    if(UpstreamPoolProbeBegin(server->upstreams, nowMs))
+        server->queriesAtLastProbe = server->queries;
+}
+
 int ServerPoll(Server *server, int timeoutMs)
 {
-    struct pollfd waiting[4 + CFG_TCP_SLOTS + CFG_TX_SLOTS];
+    struct pollfd waiting[5 + CFG_TCP_SLOTS + CFG_TX_SLOTS];
     int           listeners[4] = { server->fdUdp4, server->fdUdp6,
                                    server->fdTcp4, server->fdTcp6 };
     size_t        connIndex[CFG_TCP_SLOTS];
@@ -770,17 +792,27 @@ int ServerPoll(Server *server, int timeoutMs)
         txCount++;
     }
 
+    bool bProbing = server->upstreams->bProbing;
+
+    if(bProbing)
+    {
+        waiting[count].fd      = server->upstreams->probe.fd;
+        waiting[count].events  = POLLIN;
+        waiting[count].revents = 0;
+        count++;
+    }
+
     /* Never sleep past the nearest deadline, or a timeout is only noticed when
        the next packet happens to arrive. */
     int wait = timeoutMs;
-    if(txCount > 0 && (wait < 0 || wait > CFG_UPSTREAM_TIMEOUT_MS))
+    if((txCount > 0 || bProbing) && (wait < 0 || wait > CFG_UPSTREAM_TIMEOUT_MS))
         wait = CFG_UPSTREAM_TIMEOUT_MS;
 
     int ready = poll(waiting, count, wait);
     if(ready < 0)
         return (errno == EINTR) ? 0 : -1;
 
-    uint32_t nowMs = NowMilliseconds();
+    uint32_t nowMs = ServerNowMilliseconds();
 
     for(nfds_t i = 0; i < count; i++)
     {
@@ -821,12 +853,23 @@ int ServerPoll(Server *server, int timeoutMs)
             continue;
         }
 
-        Transaction *tx = &server->transactions[txIndex[i - listenCount - connCount]];
-        if(tx->bActive)
-            TxReadable(server, tx);
+        size_t after = i - listenCount - connCount;
+
+        if(after < txCount)
+        {
+            Transaction *tx = &server->transactions[txIndex[after]];
+
+            if(tx->bActive)
+                TxReadable(server, tx, nowMs);
+
+            continue;
+        }
+
+        UpstreamPoolProbeReadable(server->upstreams, nowMs);
     }
 
     TxSweep(server, nowMs);
+    ProbeTick(server, nowMs);
 
     for(size_t i = 0; i < CFG_TCP_SLOTS; i++)
     {

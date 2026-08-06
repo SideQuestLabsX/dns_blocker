@@ -46,6 +46,33 @@ size_t MsgQuestionEnd(const uint8_t *msg, size_t len)
     return reader.pos;
 }
 
+bool MsgBuildQuery(uint8_t *out, size_t cap, const WireName *name,
+                   uint16_t type, uint16_t id, size_t *outLen)
+{
+    size_t len = WIRE_HEADER_BYTES + name->len + 4;
+
+    if(name->len == 0 || len > cap)
+        return false;
+
+    memset(out, 0, WIRE_HEADER_BYTES);
+    out[0] = (uint8_t)(id >> 8);
+    out[1] = (uint8_t)id;
+    out[2] = (uint8_t)(MSG_FLAG_RD >> 8);
+    out[3] = (uint8_t)MSG_FLAG_RD;
+    out[5] = 1;
+
+    memcpy(out + WIRE_HEADER_BYTES, name->wire, name->len);
+
+    size_t at = WIRE_HEADER_BYTES + name->len;
+    out[at]     = (uint8_t)(type >> 8);
+    out[at + 1] = (uint8_t)type;
+    out[at + 2] = (uint8_t)(WIRE_CLASS_IN >> 8);
+    out[at + 3] = (uint8_t)WIRE_CLASS_IN;
+
+    *outLen = len;
+    return true;
+}
+
 static bool BuildFromQuestion(uint8_t *out, size_t cap, const uint8_t *query,
                               size_t queryLen, uint16_t flags, uint16_t rcode,
                               size_t *outLen)

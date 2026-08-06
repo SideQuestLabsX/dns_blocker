@@ -55,7 +55,7 @@ typedef struct
 typedef struct
 {
     Cache           *cache;
-    Upstream        *upstream;
+    UpstreamPool    *upstreams;
     const Blocklist *blocklist;
     const HostMap   *hosts;
     Connection  *conns;
@@ -67,6 +67,10 @@ typedef struct
     int fdTcp6;
 
     uint32_t nextGeneration;
+
+    /* Probing is skipped while this equals queries, so a device nobody is
+       using sends nothing. */
+    uint64_t queriesAtLastProbe;
 
     uint64_t queries;
     uint64_t hits;
@@ -85,7 +89,7 @@ typedef struct
    daemon reports a failed IPv6 bind and continues, so it still starts on an
    IPv4-only host. The report matters, because a client that reaches an ISP
    resolver over IPv6 bypasses this daemon. */
-bool ServerOpen(Server *server, Cache *cache, Upstream *upstream,
+bool ServerOpen(Server *server, Cache *cache, UpstreamPool *upstreams,
                 const Blocklist *blocklist, const HostMap *hosts,
                 Arena *connArena, Arena *txArena, uint16_t port);
 
@@ -97,5 +101,6 @@ void ServerClose(Server *server);
 int ServerPoll(Server *server, int timeoutMs);
 
 uint32_t ServerNowSeconds(void);
+uint32_t ServerNowMilliseconds(void);
 
 #endif

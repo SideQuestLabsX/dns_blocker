@@ -145,7 +145,7 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
 	-Isrc
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/server_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/server_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -153,6 +153,7 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/blocklist_test
 	@$(BUILD)/listline_test
 	@$(BUILD)/hosts_test
+	@$(BUILD)/upstream_test
 	@$(BUILD)/server_test
 	@$(BUILD)/fuzz_quick 50000
 
@@ -177,6 +178,11 @@ $(BUILD)/listline_test: tests/listline_test.c tools/listline.h | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -Itools $< -o $@
 
 $(BUILD)/hosts_test: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+# Selection, ranking and health. No sockets, so the policy is tested apart from
+# the transport that carries it
+$(BUILD)/upstream_test: tests/upstream_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # Binds loopback sockets and drives a real query through the whole path

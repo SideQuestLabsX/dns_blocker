@@ -335,6 +335,51 @@ bool WireNameEqualExact(const WireName *a, const WireName *b)
     return a->len == b->len && memcmp(a->wire, b->wire, a->len) == 0;
 }
 
+bool WireEncodeName(const char *dotted, WireName *out)
+{
+    size_t len = strlen(dotted);
+
+    if(len == 0)
+        return false;
+
+    if(dotted[len - 1] == '.')
+        len--;
+
+    size_t at    = 0;
+    size_t start = 0;
+
+    for(size_t i = 0; i <= len; i++)
+    {
+        if(i != len && dotted[i] != '.')
+            continue;
+
+        size_t labelLen = i - start;
+        if(labelLen == 0 || labelLen > CFG_MAX_LABEL_BYTES)
+            return false;
+        if(at + 1 + labelLen + 1 > sizeof out->wire)
+            return false;
+
+        out->wire[at] = (uint8_t)labelLen;
+        for(size_t k = 0; k < labelLen; k++)
+        {
+            char c = dotted[start + k];
+            if(c >= 'A' && c <= 'Z')
+                c = (char)(c + 32);
+            out->wire[at + 1 + k] = (uint8_t)c;
+        }
+
+        at += 1 + labelLen;
+        start = i + 1;
+    }
+
+    if(at + 1 > sizeof out->wire)
+        return false;
+
+    out->wire[at] = 0;
+    out->len      = at + 1;
+    return true;
+}
+
 bool WireNameEqual(const WireName *a, const WireName *b)
 {
     if(a->len != b->len)

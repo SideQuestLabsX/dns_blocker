@@ -17,52 +17,6 @@ static bool IsSpace(char c)
     return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-/* Presentation name to wire form, exactly as given. */
-static bool EncodeNameRaw(const char *dotted, WireName *out)
-{
-    size_t len = strlen(dotted);
-
-    if(len == 0)
-        return false;
-
-    if(dotted[len - 1] == '.')
-        len--;
-
-    size_t at = 0;
-    size_t start = 0;
-
-    for(size_t i = 0; i <= len; i++)
-    {
-        if(i != len && dotted[i] != '.')
-            continue;
-
-        size_t labelLen = i - start;
-        if(labelLen == 0 || labelLen > CFG_MAX_LABEL_BYTES)
-            return false;
-        if(at + 1 + labelLen + 1 > sizeof out->wire)
-            return false;
-
-        out->wire[at] = (uint8_t)labelLen;
-        for(size_t k = 0; k < labelLen; k++)
-        {
-            char c = dotted[start + k];
-            if(c >= 'A' && c <= 'Z')
-                c = (char)(c + 32);
-            out->wire[at + 1 + k] = (uint8_t)c;
-        }
-
-        at += 1 + labelLen;
-        start = i + 1;
-    }
-
-    if(at + 1 > sizeof out->wire)
-        return false;
-
-    out->wire[at] = 0;
-    out->len = at + 1;
-    return true;
-}
-
 /* The local domain is appended to a name with no dot in it, which is what makes
    `iPhone` in the file answer as `iphone.lan`. */
 static bool EncodeName(const char *dotted, WireName *out)
@@ -79,7 +33,7 @@ static bool EncodeName(const char *dotted, WireName *out)
         dotted = joined;
     }
 
-    return EncodeNameRaw(dotted, out);
+    return WireEncodeName(dotted, out);
 }
 
 size_t HostsParseLine(char *line, uint8_t *addr, uint8_t *addrLen,
@@ -220,7 +174,7 @@ bool HostsLoad(HostMap *map, Arena *arena, const char *path)
 
     map->capacity = CFG_HOSTS_MAX;
     map->bHasDomain = CFG_LOCAL_DOMAIN[0] != '\0'
-                   && EncodeNameRaw(CFG_LOCAL_DOMAIN, &map->domain);
+                   && WireEncodeName(CFG_LOCAL_DOMAIN, &map->domain);
 
     if(path == NULL)
         return true;
