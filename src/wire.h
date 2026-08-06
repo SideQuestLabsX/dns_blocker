@@ -15,6 +15,7 @@
 #define WIRE_TYPE_A         1
 #define WIRE_TYPE_CNAME     5
 #define WIRE_TYPE_SOA       6
+#define WIRE_TYPE_PTR       12
 #define WIRE_TYPE_AAAA      28
 #define WIRE_TYPE_DNAME     39
 #define WIRE_TYPE_OPT       41

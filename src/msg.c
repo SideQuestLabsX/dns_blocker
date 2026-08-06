@@ -86,6 +86,49 @@ bool MsgBuildReply(uint8_t *out, size_t cap, const uint8_t *query,
     return BuildFromQuestion(out, cap, query, queryLen, 0, rcode, outLen);
 }
 
+bool MsgBuildAnswer(uint8_t *out, size_t cap, const uint8_t *query,
+                    size_t queryLen, uint16_t type, uint32_t ttl,
+                    const uint8_t *rdata, size_t rdataLen, size_t *outLen)
+{
+    size_t at = 0;
+
+    if(rdataLen > 0xFFFFu)
+        return false;
+
+    if(!BuildFromQuestion(out, cap, query, queryLen, 0, MSG_RCODE_NOERROR, &at))
+        return false;
+
+    if(at + 12 + rdataLen > cap)
+        return false;
+
+    /* The question name starts right after the header, so every answer here
+       points at offset 12 instead of repeating it. */
+    out[at++] = 0xC0;
+    out[at++] = 0x0C;
+
+    out[at++] = (uint8_t)(type >> 8);
+    out[at++] = (uint8_t)type;
+    out[at++] = (uint8_t)(WIRE_CLASS_IN >> 8);
+    out[at++] = (uint8_t)WIRE_CLASS_IN;
+
+    out[at++] = (uint8_t)(ttl >> 24);
+    out[at++] = (uint8_t)(ttl >> 16);
+    out[at++] = (uint8_t)(ttl >> 8);
+    out[at++] = (uint8_t)ttl;
+
+    out[at++] = (uint8_t)(rdataLen >> 8);
+    out[at++] = (uint8_t)rdataLen;
+
+    memcpy(out + at, rdata, rdataLen);
+    at += rdataLen;
+
+    out[6] = 0;
+    out[7] = 1;
+
+    *outLen = at;
+    return true;
+}
+
 bool MsgBuildTruncated(uint8_t *out, size_t cap, const uint8_t *query,
                        size_t queryLen, size_t *outLen)
 {

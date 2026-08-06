@@ -145,13 +145,14 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
 	-Isrc
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/server_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/server_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
 	@$(BUILD)/verify_test
 	@$(BUILD)/blocklist_test
 	@$(BUILD)/listline_test
+	@$(BUILD)/hosts_test
 	@$(BUILD)/server_test
 	@$(BUILD)/fuzz_quick 50000
 
@@ -175,14 +176,17 @@ $(BUILD)/blocklist_test: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMB
 $(BUILD)/listline_test: tests/listline_test.c tools/listline.h | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -Itools $< -o $@
 
+$(BUILD)/hosts_test: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
 # Binds loopback sockets and drives a real query through the whole path
-$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
+$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is
 # the only way the byte-wise field reads get exercised on real ARM
-XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native
+XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native
 
 test-static: $(XTEST)
 
@@ -202,6 +206,9 @@ $(BUILD)/verify_test_native: tests/verify_test.c src/verify.c src/wire.c $(HDR) 
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/hosts_test_native: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 # Coverage-blind driver for the same entry point, so the fuzz target is

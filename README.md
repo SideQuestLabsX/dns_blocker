@@ -38,11 +38,12 @@ Raspberry Pi Zero W and the Zero 2 W.
 | Caching | Keeps each TTL and decrements it by the time that passed, negative caching to RFC 2308, CLOCK eviction |
 | Upstream | Plaintext forwarding to one resolver, asynchronous, so a slow resolver delays only the client that asked |
 | Filtering | A reverse-label trie with exact and suffix matches, so one entry covers a whole subtree |
+| Local names | A static host map serves `A`, `AAAA` and `PTR` for the LAN, before everything else |
 | Blocked answers | `NXDOMAIN`, given before the cache and before the upstream |
 | Hardening | Random transaction IDs, random source ports, 0x20 case in the question, and a bailiwick check on every answer |
 
-These parts are not built yet: DNS-over-TLS, DNS-over-HTTPS, the local host map,
-query logging and the shared memory status segment.
+These parts are not built yet: DNS-over-TLS, DNS-over-HTTPS, query logging and
+the shared memory status segment.
 
 The daemon passes HTTPS and SVCB records through without change, so Encrypted
 Client Hello continues to operate.
@@ -104,6 +105,28 @@ An empty `EMBED_LIST` ships without an embedded list. If the mapped file is
 missing or unreadable and there is no embedded list either, the daemon says so
 and forwards without filtering, because a resolver that fails closed takes the
 network down with it.
+
+## Local names
+
+The router hands out the leases, so this daemon never sees one. Give it the
+names you care about instead, in the format `/etc/hosts` uses, at the path
+`CFG_HOSTS_PATH` names:
+
+```text
+192.168.1.47   iPhone
+192.168.1.10   nas printer
+fd00::1        router
+```
+
+A name with no dot in it gets `CFG_LOCAL_DOMAIN` appended, so `iPhone` answers
+as `iphone.lan`. The daemon serves `A`, `AAAA` and `PTR` from this file, before
+the blocklist and before the cache.
+
+Names in the local domain stay on the device. A name under `CFG_LOCAL_DOMAIN`
+that the file does not list gets `NXDOMAIN` from the daemon rather than a query
+to your upstream resolver, and so does a reverse lookup for any private address.
+Sending those out tells the resolver what is on your network and returns
+`NXDOMAIN` regardless.
 
 ## Build
 

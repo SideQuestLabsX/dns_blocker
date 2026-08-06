@@ -118,6 +118,96 @@ static void TestTruncatedSetsTc(void)
     CHECK(MsgId(reply, replyLen) == 0x9999);
 }
 
+/* The record name is a compression pointer at the question, so a parser has to
+   follow it back rather than find the name repeated. */
+static void TestBuildAnswerCarriesOneRecord(void)
+{
+    uint8_t query[512];
+    uint8_t out[512];
+    size_t  outLen = 0;
+    static const uint8_t addr[4] = { 192, 168, 1, 47 };
+
+    size_t len = BuildQuery(query, sizeof query, 0x0F0F, "iphone.lan",
+                            WIRE_TYPE_A);
+
+    CHECK(MsgBuildAnswer(out, sizeof out, query, len, WIRE_TYPE_A, 60,
+                         addr, sizeof addr, &outLen));
+
+    Reader       reader;
+    WireHeader   header;
+    WireQuestion question;
+    WireRecord   record;
+
+    ReaderInit(&reader, out, outLen);
+    CHECK(WireParseHeader(&reader, &header));
+    CHECK(header.id == 0x0F0F);
+    CHECK(header.qdCount == 1);
+    CHECK(header.anCount == 1);
+    CHECK(header.nsCount == 0 && header.arCount == 0);
+    CHECK((header.flags & MSG_FLAG_QR) != 0);
+    CHECK(WireRcode(&header) == MSG_RCODE_NOERROR);
+
+    CHECK(WireParseQuestion(&reader, &question));
+    CHECK(WireReadRecord(&reader, &record));
+    CHECK(record.type == WIRE_TYPE_A);
+    CHECK(record.klass == WIRE_CLASS_IN);
+    CHECK(record.ttl == 60);
+    CHECK(record.rdLength == 4);
+    CHECK(memcmp(out + record.rdOffset, addr, 4) == 0);
+
+    /* The pointer resolves to the question name. */
+    CHECK(WireNameEqual(&record.name, &question.name));
+    CHECK(ReaderRemaining(&reader) == 0);
+}
+
+static void TestBuildAnswerCarriesAName(void)
+{
+    uint8_t  query[512];
+    uint8_t  out[512];
+    size_t   outLen = 0;
+    WireName ptr;
+
+    CHECK(NameOf("iphone.lan", &ptr));
+
+    size_t len = BuildQuery(query, sizeof query, 0x1010,
+                            "47.1.168.192.in-addr.arpa", WIRE_TYPE_PTR);
+
+    CHECK(MsgBuildAnswer(out, sizeof out, query, len, WIRE_TYPE_PTR, 60,
+                         ptr.wire, ptr.len, &outLen));
+
+    Reader       reader;
+    WireHeader   header;
+    WireQuestion question;
+    WireRecord   record;
+
+    ReaderInit(&reader, out, outLen);
+    CHECK(WireParseHeader(&reader, &header));
+    CHECK(WireParseQuestion(&reader, &question));
+    CHECK(WireReadRecord(&reader, &record));
+    CHECK(record.type == WIRE_TYPE_PTR);
+    CHECK(record.rdLength == ptr.len);
+    CHECK(memcmp(out + record.rdOffset, ptr.wire, ptr.len) == 0);
+}
+
+static void TestBuildAnswerRefusesTinyBuffers(void)
+{
+    uint8_t query[512];
+    uint8_t out[512];
+    size_t  outLen = 0;
+    static const uint8_t addr[4] = { 10, 0, 0, 1 };
+
+    size_t len = BuildQuery(query, sizeof query, 0x2020, "host.lan",
+                            WIRE_TYPE_A);
+
+    /* Room for the question but not for the record. */
+    for(size_t cap = 0; cap < len + 12 + sizeof addr; cap++)
+        CHECK(!MsgBuildAnswer(out, cap, query, len, WIRE_TYPE_A, 60,
+                              addr, sizeof addr, &outLen));
+
+    CHECK(MsgBuildAnswer(out, len + 12 + sizeof addr, query, len, WIRE_TYPE_A,
+                         60, addr, sizeof addr, &outLen));
+}
+
 static void TestRefusesMalformedAndTinyBuffers(void)
 {
     uint8_t query[512];
@@ -142,6 +232,9 @@ int main(void)
     TestBuildReplyEchoesTheQuestion();
     TestCountsFromTheQueryAreNotInherited();
     TestTruncatedSetsTc();
+    TestBuildAnswerCarriesOneRecord();
+    TestBuildAnswerCarriesAName();
+    TestBuildAnswerRefusesTinyBuffers();
     TestRefusesMalformedAndTinyBuffers();
 
     if(G_FAILURES != 0)

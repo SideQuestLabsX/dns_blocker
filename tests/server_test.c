@@ -241,8 +241,10 @@ typedef struct
     Arena        arena;
     Arena        connArena;
     Arena        txArena;
+    Arena        hostsArena;
     Cache        cache;
     Blocklist    blocklist;
+    HostMap      hosts;
     Upstream     upstream;
     Server       server;
     FakeUpstream fake;
@@ -268,10 +270,12 @@ static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
         && CacheInit(&fix->cache, &fix->arena)
         && ArenaCarve(&fix->arena, &fix->connArena, ARENA_CONN_BYTES)
         && ArenaCarve(&fix->arena, &fix->txArena, ARENA_TXTABLE_BYTES)
+        && ArenaCarve(&fix->arena, &fix->hostsArena, ARENA_HOSTS_BYTES)
+        && HostsLoad(&fix->hosts, &fix->hostsArena, NULL)
         && UpstreamInit(&fix->upstream, "127.0.0.1", UPSTREAM_PORT)
         && ServerOpen(&fix->server, &fix->cache, &fix->upstream,
-                      &fix->blocklist, &fix->connArena, &fix->txArena,
-                      SERVER_PORT);
+                      &fix->blocklist, &fix->hosts, &fix->connArena,
+                      &fix->txArena, SERVER_PORT);
 }
 
 static void FixtureDown(Fixture *fix)
@@ -705,6 +709,126 @@ static void TestTcpClientVanishingMidQuery(void)
 
 /* A blocked name is answered here. It must never reach the upstream, and it
    must never take a cache slot. */
+static void AddHost(HostMap *map, const char *dotted, const uint8_t *addr,
+                    uint8_t addrLen)
+{
+    WireName name;
+
+    if(!NameOf(dotted, &name) || map->count == map->capacity)
+        return;
+
+    map->entries[map->count].name    = name;
+    map->entries[map->count].addrLen = addrLen;
+    memcpy(map->entries[map->count].addr, addr, addrLen);
+    map->count++;
+}
+
+/* The map answers before the blocklist, before the cache and without the
+   upstream, in both directions. */
+static void TestLocalNamesAreAnsweredHere(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+    static const uint8_t phone[4] = { 192, 168, 1, 47 };
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP local: cannot bind test ports\n");
+        return;
+    }
+
+    AddHost(&fix.hosts, "iphone.lan", phone, 4);
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t len = BuildQuery(query, sizeof query, 0x6161, "iphone.lan",
+                            WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+
+    if(got > 0)
+    {
+        CHECK(MsgId(reply, (size_t)got) == 0x6161);
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NOERROR);
+
+        /* One answer, and the address the file gave. */
+        CHECK(reply[7] == 1);
+        CHECK(memcmp(reply + (size_t)got - 4, phone, 4) == 0);
+    }
+
+    /* The name exists without an AAAA, which is NODATA rather than NXDOMAIN. */
+    len = BuildQuery(query, sizeof query, 0x6262, "iphone.lan", WIRE_TYPE_AAAA);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+
+    got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NOERROR);
+        CHECK(reply[7] == 0);
+    }
+
+    len = BuildQuery(query, sizeof query, 0x6363, "47.1.168.192.in-addr.arpa",
+                     WIRE_TYPE_PTR);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+
+    got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NOERROR);
+        CHECK(reply[7] == 1);
+    }
+
+    /* An address on the LAN that nothing claims is answered here as well, so
+       the internal addressing never reaches the upstream. */
+    len = BuildQuery(query, sizeof query, 0x6464, "99.1.168.192.in-addr.arpa",
+                     WIRE_TYPE_PTR);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+
+    got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NXDOMAIN);
+
+    CHECK(fix.server.local == 4);
+    CHECK(fix.server.forwarded == 0);
+    CHECK(fix.fake.served == 0);
+
+    /* A name in the local domain that the map does not have stops here too,
+       rather than handing a device name to a public resolver. */
+    len = BuildQuery(query, sizeof query, 0x6666, "unknown.lan", WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+
+    got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NXDOMAIN);
+
+    CHECK(fix.server.local == 5);
+    CHECK(fix.server.forwarded == 0);
+
+    /* A public reverse name is none of our business and goes upstream. */
+    len = BuildQuery(query, sizeof query, 0x6565, "9.113.0.203.in-addr.arpa",
+                     WIRE_TYPE_PTR);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 6);
+    CHECK(fix.server.local == 5);
+    CHECK(fix.server.forwarded == 1);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
 static void TestBlockedNameIsRefusedLocally(void)
 {
     Fixture fix;
@@ -773,6 +897,7 @@ int main(void)
     TestTableFullEvictsOldest();
     TestTcpClientVanishingMidQuery();
     TestBlockedNameIsRefusedLocally();
+    TestLocalNamesAreAnsweredHere();
 
     if(G_FAILURES != 0)
     {

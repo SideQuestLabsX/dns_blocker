@@ -36,6 +36,15 @@ size_t MsgQuestionEnd(const uint8_t *msg, size_t len);
 bool MsgBuildReply(uint8_t *out, size_t cap, const uint8_t *query,
                    size_t queryLen, uint16_t rcode, size_t *outLen);
 
+/* Reply carrying one answer record for the question that was asked. The record
+   name is a compression pointer at the question, which is why the caller passes
+   rdata rather than a name: an A record takes four bytes, a PTR takes a name in
+   wire form. Used for the local host map, which is the only thing this daemon
+   answers from its own data. */
+bool MsgBuildAnswer(uint8_t *out, size_t cap, const uint8_t *query,
+                    size_t queryLen, uint16_t type, uint32_t ttl,
+                    const uint8_t *rdata, size_t rdataLen, size_t *outLen);
+
 /* Header and question with TC set, so a conforming client retries over TCP. */
 bool MsgBuildTruncated(uint8_t *out, size_t cap, const uint8_t *query,
                        size_t queryLen, size_t *outLen);

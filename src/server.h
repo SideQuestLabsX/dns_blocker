@@ -5,6 +5,7 @@
 #include "blocklist.h"
 #include "cache.h"
 #include "config.h"
+#include "hosts.h"
 #include "upstream.h"
 
 #include <stdbool.h>
@@ -56,6 +57,7 @@ typedef struct
     Cache           *cache;
     Upstream        *upstream;
     const Blocklist *blocklist;
+    const HostMap   *hosts;
     Connection  *conns;
     Transaction *transactions;
 
@@ -76,6 +78,7 @@ typedef struct
     uint64_t evictedTransactions;
     uint64_t retries;
     uint64_t blocked;
+    uint64_t local;
 } Server;
 
 /* Binds UDP and TCP on the port, for IPv4 and IPv6. IPv4 is required. The
@@ -83,8 +86,8 @@ typedef struct
    IPv4-only host. The report matters, because a client that reaches an ISP
    resolver over IPv6 bypasses this daemon. */
 bool ServerOpen(Server *server, Cache *cache, Upstream *upstream,
-                const Blocklist *blocklist, Arena *connArena, Arena *txArena,
-                uint16_t port);
+                const Blocklist *blocklist, const HostMap *hosts,
+                Arena *connArena, Arena *txArena, uint16_t port);
 
 void ServerClose(Server *server);
 

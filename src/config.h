@@ -13,10 +13,11 @@
    The blocklist has its own mapping, because a compiled list gives its size at
    boot. See blocklist.h. The supervisor owns output routing, so the daemon
    writes lines and keeps no log buffer. */
-#define ARENA_TOTAL_BYTES       KIB(2048)
+#define ARENA_TOTAL_BYTES       KIB(2080)
 #define ARENA_CACHE_BYTES       KIB(1536)
 #define ARENA_TXTABLE_BYTES     KIB(128)
 #define ARENA_CONN_BYTES        KIB(192)
+#define ARENA_HOSTS_BYTES       KIB(32)
 
 #if defined(PROFILE_ENCRYPTED)
   /* Backs MBEDTLS_MEMORY_BUFFER_ALLOC_C so the TLS stack never reaches libc. */
@@ -36,6 +37,24 @@
    and by nothing else. */
 #define CFG_BLOCKLIST_PATH      "/run/dns_blocker/blocklist.trie"
 #define CFG_BLOCKLIST_MAX_BYTES MIB(16)
+
+/* Local names. The router is the DHCP authority and this daemon never sees a
+   lease, so the map is static: an address followed by the names it answers to,
+   in the format /etc/hosts uses. A name without a dot gets CFG_LOCAL_DOMAIN
+   appended. NULL for the path serves no local names at all.
+
+   The TTL is short because the map is a statement about a LAN, where an address
+   changes without anything being able to tell a client in advance. */
+#define CFG_HOSTS_PATH          "/etc/dns_blocker/hosts"
+#define CFG_LOCAL_DOMAIN        "lan"
+#define CFG_HOSTS_MAX           96
+#define CFG_LOCAL_TTL_SEC       60
+
+/* A reverse query for a private address is answered here rather than forwarded.
+   The upstream cannot know a LAN, so forwarding leaks the internal addressing
+   and gets NXDOMAIN back anyway. RFC 6303 asks resolvers to serve these zones
+   locally for the same reason. */
+#define CFG_PRIVATE_PTR_LOCAL   1
 
 /* Listeners. TCP carries whatever exceeded the UDP payload size, so its buffer
    is sized well above CFG_EDNS_PAYLOAD_BYTES rather than at it. TCP DNS is rare

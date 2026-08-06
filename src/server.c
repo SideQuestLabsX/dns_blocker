@@ -92,14 +92,15 @@ static int OpenSocket(int family, int type, uint16_t port)
 }
 
 bool ServerOpen(Server *server, Cache *cache, Upstream *upstream,
-                const Blocklist *blocklist, Arena *connArena, Arena *txArena,
-                uint16_t port)
+                const Blocklist *blocklist, const HostMap *hosts,
+                Arena *connArena, Arena *txArena, uint16_t port)
 {
     memset(server, 0, sizeof *server);
 
     server->cache          = cache;
     server->upstream       = upstream;
     server->blocklist      = blocklist;
+    server->hosts          = hosts;
     server->nextGeneration = 1;
     server->fdUdp4         = -1;
     server->fdUdp6         = -1;
@@ -374,6 +375,104 @@ typedef enum
     Handled_Drop
 } Handled;
 
+/* Nothing in the map matched, so the query carries on down the normal path. */
+#define LOCAL_NOT_OURS ((Handled)-1)
+
+static Handled LocalReply(Server *server, const uint8_t *query, size_t queryLen,
+                          uint8_t *out, size_t cap, size_t *outLen,
+                          uint16_t type, const uint8_t *rdata, size_t rdataLen)
+{
+    server->local++;
+
+    if(rdata == NULL)
+    {
+        /* NODATA and NXDOMAIN both answer with the question and no records. */
+        if(MsgBuildReply(out, cap, query, queryLen, type, outLen))
+            return Handled_Reply;
+
+        return Handled_Drop;
+    }
+
+    if(MsgBuildAnswer(out, cap, query, queryLen, type, CFG_LOCAL_TTL_SEC,
+                      rdata, rdataLen, outLen))
+        return Handled_Reply;
+
+    return Handled_Drop;
+}
+
+/* The map is the operator's own statement about their network, so it is
+   consulted before the blocklist and before the cache. A local answer costs no
+   upstream query and takes no cache slot. */
+static Handled AnswerLocal(Server *server, const uint8_t *query, size_t queryLen,
+                           const WireQuestion *question, uint8_t *out,
+                           size_t cap, size_t *outLen)
+{
+    const HostMap *map = server->hosts;
+    uint8_t        addr[16];
+    uint8_t        addrLen = 0;
+
+    if(map == NULL)
+        return LOCAL_NOT_OURS;
+
+    if(question->klass != WIRE_CLASS_IN)
+        return LOCAL_NOT_OURS;
+
+    if(HostsReverseAddress(&question->name, addr, &addrLen))
+    {
+        const HostEntry *entry = HostsByAddress(map, addr, addrLen);
+
+        if(entry != NULL)
+        {
+            if(question->type == WIRE_TYPE_PTR)
+            {
+                return LocalReply(server, query, queryLen, out, cap, outLen,
+                                  WIRE_TYPE_PTR, entry->name.wire,
+                                  entry->name.len);
+            }
+
+            return LocalReply(server, query, queryLen, out, cap, outLen,
+                              MSG_RCODE_NOERROR, NULL, 0);
+        }
+
+#if CFG_PRIVATE_PTR_LOCAL
+        if(HostsAddressIsPrivate(addr, addrLen))
+        {
+            return LocalReply(server, query, queryLen, out, cap, outLen,
+                              MSG_RCODE_NXDOMAIN, NULL, 0);
+        }
+#endif
+
+        return LOCAL_NOT_OURS;
+    }
+
+    const HostEntry *entry = NULL;
+    bool             bNameExists = false;
+
+    if(HostsLookup(map, &question->name, question->type, &entry, &bNameExists))
+    {
+        return LocalReply(server, query, queryLen, out, cap, outLen,
+                          question->type, entry->addr, entry->addrLen);
+    }
+
+    /* The name is ours but carries no record of that type, which is NODATA. */
+    if(bNameExists)
+    {
+        return LocalReply(server, query, queryLen, out, cap, outLen,
+                          MSG_RCODE_NOERROR, NULL, 0);
+    }
+
+    /* A name in the local domain that the map does not have is answered here
+       too. Forwarding it hands a public resolver the names of devices on this
+       network, and the answer comes back NXDOMAIN regardless. */
+    if(HostsNameIsLocal(map, &question->name))
+    {
+        return LocalReply(server, query, queryLen, out, cap, outLen,
+                          MSG_RCODE_NXDOMAIN, NULL, 0);
+    }
+
+    return LOCAL_NOT_OURS;
+}
+
 static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen,
                            uint8_t *out, size_t cap, size_t *outLen,
                            const ClientRef *client)
@@ -410,6 +509,11 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
 
     uint16_t clientId   = MsgId(query, queryLen);
     uint16_t advertised = 512;
+
+    Handled local = AnswerLocal(server, query, queryLen, &question, out, cap,
+                                outLen);
+    if(local != LOCAL_NOT_OURS)
+        return local;
 
     /* Answered here, so a blocked name never reaches the upstream and never
        takes a cache slot. */
