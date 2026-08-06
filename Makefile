@@ -145,7 +145,7 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
 	-Isrc
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/server_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -155,6 +155,7 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/hosts_test
 	@$(BUILD)/upstream_test
 	@$(BUILD)/server_test
+	@$(BUILD)/tls_test
 	@$(BUILD)/fuzz_quick 50000
 
 $(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
@@ -188,6 +189,9 @@ $(BUILD)/upstream_test: tests/upstream_test.c src/upstream.c src/msg.c src/verif
 # Binds loopback sockets and drives a real query through the whole path
 $(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
+
+$(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is
