@@ -13,8 +13,8 @@
    The blocklist has its own mapping, because a compiled list gives its size at
    boot. See blocklist.h. The supervisor owns output routing, so the daemon
    writes lines and keeps no log buffer. */
-#define ARENA_TOTAL_BYTES       KIB(1280)
-#define ARENA_CACHE_BYTES       KIB(768)
+#define ARENA_TOTAL_BYTES       KIB(2048)
+#define ARENA_CACHE_BYTES       KIB(1536)
 #define ARENA_TXTABLE_BYTES     KIB(128)
 #define ARENA_CONN_BYTES        KIB(192)
 
