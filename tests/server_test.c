@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include "arena.h"
+#include "blocklist.h"
 #include "cache.h"
 #include "msg.h"
 #include "server.h"
@@ -176,12 +177,72 @@ static int ConnectLoopback(uint16_t port, int type)
     return fd;
 }
 
+/* A trie holding one name, so the server fixture can exercise the blocked
+   path. Built by hand in the on-disk layout, the same as blocklist_test. */
+static uint8_t G_TRIE[256];
+
+static void TriePut32(uint8_t *at, uint32_t v)
+{
+    at[0] = (uint8_t)v;
+    at[1] = (uint8_t)(v >> 8);
+    at[2] = (uint8_t)(v >> 16);
+    at[3] = (uint8_t)(v >> 24);
+}
+
+/* com -> example -> blocked(terminal) */
+static void TrieBuild(Blocklist *list)
+{
+    static const char *labels[] = { "com", "example", "blocked" };
+
+    uint8_t *nodes = G_TRIE + BLOCKLIST_HEADER_BYTES;
+    uint32_t offsets[3];
+    uint32_t at = 0;
+
+    for(size_t i = 0; i < 3; i++)
+    {
+        offsets[i] = at;
+        TriePut32(nodes + at, 1);
+        at += 4 + BLOCKLIST_CHILD_BYTES;
+    }
+
+    uint32_t poolAt   = 0;
+    uint8_t *poolStart = nodes + at;
+
+    for(size_t i = 0; i < 3; i++)
+    {
+        uint8_t *entry = nodes + offsets[i] + 4;
+        size_t   len   = strlen(labels[i]);
+        bool     bLast = (i == 2);
+
+        memcpy(poolStart + poolAt, labels[i], len);
+        TriePut32(entry, poolAt);
+        TriePut32(entry + 4, bLast ? 0u : offsets[i + 1]);
+        entry[8]  = (uint8_t)len;
+        entry[9]  = bLast ? BLOCKLIST_FLAG_TERMINAL : 0u;
+        entry[10] = 0;
+        entry[11] = 0;
+        poolAt += (uint32_t)len;
+    }
+
+    memcpy(G_TRIE, BLOCKLIST_MAGIC, 4);
+    TriePut32(G_TRIE + 4, at);
+    TriePut32(G_TRIE + 8, poolAt);
+    TriePut32(G_TRIE + 12, 0);
+
+    memset(list, 0, sizeof *list);
+    list->base   = G_TRIE;
+    list->size   = BLOCKLIST_HEADER_BYTES + at + poolAt;
+    list->source = BlocklistSource_Mapped;
+    BlocklistParseHeader(list, list->base, list->size);
+}
+
 typedef struct
 {
     Arena        arena;
     Arena        connArena;
     Arena        txArena;
     Cache        cache;
+    Blocklist    blocklist;
     Upstream     upstream;
     Server       server;
     FakeUpstream fake;
@@ -209,7 +270,8 @@ static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
         && ArenaCarve(&fix->arena, &fix->txArena, ARENA_TXTABLE_BYTES)
         && UpstreamInit(&fix->upstream, "127.0.0.1", UPSTREAM_PORT)
         && ServerOpen(&fix->server, &fix->cache, &fix->upstream,
-                      &fix->connArena, &fix->txArena, SERVER_PORT);
+                      &fix->blocklist, &fix->connArena, &fix->txArena,
+                      SERVER_PORT);
 }
 
 static void FixtureDown(Fixture *fix)
@@ -640,6 +702,65 @@ static void TestTcpClientVanishingMidQuery(void)
     FixtureDown(&fix);
 }
 
+
+/* A blocked name is answered here. It must never reach the upstream, and it
+   must never take a cache slot. */
+static void TestBlockedNameIsRefusedLocally(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP blocked: cannot bind test ports\n");
+        return;
+    }
+
+    TrieBuild(&fix.blocklist);
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t len = BuildQuery(query, sizeof query, 0x5151,
+                            "blocked.example.com", WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+
+    if(got > 0)
+    {
+        CHECK(MsgId(reply, (size_t)got) == 0x5151);
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_NXDOMAIN);
+    }
+
+    CHECK(fix.server.blocked == 1);
+    CHECK(fix.server.forwarded == 0);
+    CHECK(fix.fake.served == 0);
+
+    /* A subdomain of a blocked name goes the same way. */
+    len = BuildQuery(query, sizeof query, 0x5252,
+                     "ads.blocked.example.com", WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 4);
+    CHECK(recv(client, reply, sizeof reply, MSG_DONTWAIT) > 0);
+    CHECK(fix.server.blocked == 2);
+    CHECK(fix.server.forwarded == 0);
+
+    /* A name outside the list is still forwarded. */
+    len = BuildQuery(query, sizeof query, 0x5353, "a.example.com", WIRE_TYPE_A);
+    send(client, query, len, 0);
+    Pump(&fix.server, 6);
+    CHECK(recv(client, reply, sizeof reply, MSG_DONTWAIT) > 0);
+    CHECK(fix.server.blocked == 2);
+    CHECK(fix.server.forwarded == 1);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
 int main(void)
 {
     TestUdpQueryIsForwardedAndAnswered();
@@ -651,6 +772,7 @@ int main(void)
     TestOneStalledQueryDoesNotBlockOthers();
     TestTableFullEvictsOldest();
     TestTcpClientVanishingMidQuery();
+    TestBlockedNameIsRefusedLocally();
 
     if(G_FAILURES != 0)
     {

@@ -85,7 +85,7 @@ define assert_static
 	fi
 endef
 
-.PHONY: all check clean test test-static test-static-run fuzz fuzz-quick
+.PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
@@ -93,6 +93,12 @@ $(TARGET): $(OBJ)
 	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LIBS)
 	$(call assert_static,$@)
 	@echo "built $@"
+
+# Compiles domain lists into the trie the daemon maps. Host tool, so it is not
+# built with the shipped flags
+tools: $(BUILD)/mkblocklist
+$(BUILD)/mkblocklist: tools/mkblocklist.c src/blocklist.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Isrc $(filter %.c,$^) -o $@
 
 # Health probe binary run by a supervisor. Keep it tiny
 check: $(BUILD)/dns_blocker.check
@@ -115,11 +121,12 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 # longer there
 HDR := $(wildcard src/*.h)
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/server_test $(BUILD)/fuzz_quick
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/server_test $(BUILD)/fuzz_quick
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
 	@$(BUILD)/verify_test
+	@$(BUILD)/blocklist_test
 	@$(BUILD)/server_test
 	@$(BUILD)/fuzz_quick 50000
 
@@ -135,14 +142,17 @@ $(BUILD)/msg_test: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD)
 $(BUILD)/verify_test: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
+$(BUILD)/blocklist_test: tests/blocklist_test.c src/blocklist.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
 # Binds loopback sockets and drives a real query through the whole path
-$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is
 # the only way the byte-wise field reads get exercised on real ARM
-XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native
+XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native
 
 test-static: $(XTEST)
 
@@ -159,6 +169,9 @@ $(BUILD)/msg_test_native: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/verify_test_native: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 # Coverage-blind driver for the same entry point, so the fuzz target is

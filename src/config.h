@@ -88,7 +88,9 @@
 #endif
 #define CFG_MAX_UPSTREAMS       4
 
-/* Blocked response: 0 = NXDOMAIN, 1 = NODATA, 2 = null address. */
-#define CFG_BLOCK_POLICY        0
+/* Answer given for a blocked name. NXDOMAIN fails at once and the client moves
+   on. A null address makes the client open a connection and wait for a timeout
+   instead, which shows up as a stalled page. */
+#define CFG_BLOCKED_RCODE       MSG_RCODE_NXDOMAIN
 
 #endif

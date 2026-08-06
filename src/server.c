@@ -92,12 +92,14 @@ static int OpenSocket(int family, int type, uint16_t port)
 }
 
 bool ServerOpen(Server *server, Cache *cache, Upstream *upstream,
-                Arena *connArena, Arena *txArena, uint16_t port)
+                const Blocklist *blocklist, Arena *connArena, Arena *txArena,
+                uint16_t port)
 {
     memset(server, 0, sizeof *server);
 
     server->cache          = cache;
     server->upstream       = upstream;
+    server->blocklist      = blocklist;
     server->nextGeneration = 1;
     server->fdUdp4         = -1;
     server->fdUdp6         = -1;
@@ -408,6 +410,19 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
 
     uint16_t clientId   = MsgId(query, queryLen);
     uint16_t advertised = 512;
+
+    /* Answered here, so a blocked name never reaches the upstream and never
+       takes a cache slot. */
+    if(server->blocklist != NULL
+       && BlocklistContains(server->blocklist, &question.name))
+    {
+        server->blocked++;
+
+        if(MsgBuildReply(out, cap, query, queryLen, CFG_BLOCKED_RCODE, outLen))
+            return Handled_Reply;
+
+        return Handled_Drop;
+    }
 
     if(WireFindEdns(query, queryLen, &edns) && edns.bPresent)
         advertised = (edns.payloadSize < 512) ? 512 : edns.payloadSize;

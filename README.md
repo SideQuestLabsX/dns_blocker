@@ -5,9 +5,9 @@ one memory arena at start-up and does no other allocation. It uses no database
 engine and no scripting runtime. It links static musl, and mbedTLS for the
 encrypted profile.
 
-The daemon resolves names. It listens on UDP and TCP, parses RFC 1035
-messages, caches responses and forwards to a plaintext upstream resolver.
-Filtering is not built yet, so this is a caching forwarder.
+The daemon resolves names and filters them. It listens on UDP and TCP, parses
+RFC 1035 messages, caches responses, blocks names from a compiled list and
+forwards the rest to a plaintext upstream resolver.
 
 ## Setup
 
@@ -36,12 +36,13 @@ Raspberry Pi Zero W and the Zero 2 W.
 |---|---|
 | Listeners | UDP and TCP on port 53, IPv4 and IPv6, with EDNS0 support |
 | Caching | Keeps each TTL and decrements it by the time that passed, negative caching to RFC 2308, CLOCK eviction |
-| Upstream | Plaintext forwarding to one resolver |
-| Hardening | Random transaction IDs and random source ports |
+| Upstream | Plaintext forwarding to one resolver, asynchronous, so a slow resolver delays only the client that asked |
+| Filtering | A reverse-label trie with exact and suffix matches, so one entry covers a whole subtree |
+| Blocked answers | `NXDOMAIN`, given before the cache and before the upstream |
+| Hardening | Random transaction IDs, random source ports, 0x20 case in the question, and a bailiwick check on every answer |
 
-These parts are not built yet: domain filtering and the reverse-label trie,
-blocked-answer policy, bailiwick checking, DNS-over-TLS, DNS-over-HTTPS, query
-logging and the shared memory status segment.
+These parts are not built yet: DNS-over-TLS, DNS-over-HTTPS, the local host map,
+query logging and the shared memory status segment.
 
 The daemon passes HTTPS and SVCB records through without change, so Encrypted
 Client Hello continues to operate.
@@ -65,6 +66,23 @@ payload size gets the `TC` bit, and the client sends the query again over TCP.
 
 The default is `encrypted`, and it is the shipped image. mbedTLS is the only
 external dependency, and only the `encrypted` profile needs it.
+
+## Blocklists
+
+`make tools` builds `mkblocklist`, which compiles domain lists into the file the
+daemon maps. It reads one domain per line and hosts-file lines alike.
+
+```sh
+mkblocklist blocklist.trie list1.txt list2.txt
+```
+
+An entry blocks the name and every name below it, so `doubleclick.net` also
+covers `ad.doubleclick.net`. The generator reloads its own output through the
+daemon's lookup and fails if anything it inserted does not match.
+
+Point `CFG_BLOCKLIST_PATH` at the result. If the file is missing or unreadable,
+the daemon says so and forwards without filtering, because a resolver that
+fails closed takes the network down with it.
 
 ## Build
 

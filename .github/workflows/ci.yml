@@ -22,10 +22,23 @@ jobs:
       - name: Unit and integration tests under ASan and UBSan
         run: make test PROFILE=minimal
 
-      - name: Build the daemon and the probe
+      - name: Build the daemon, the probe and the generator
         run: |
           make PROFILE=minimal
           make check PROFILE=minimal
+          make tools PROFILE=minimal
+
+      # The generator reloads its own output through the daemon's lookup, so
+      # this also checks that the two agree on ordering.
+      - name: Compile a list into a trie
+        run: |
+          cat > /tmp/ci.txt <<'LIST'
+          # a comment, and a hosts-file line
+          doubleclick.net
+          googlesyndication.com
+          0.0.0.0 ads.example.com
+          LIST
+          ./build/x86_64-minimal/mkblocklist /tmp/ci.trie /tmp/ci.txt
 
       - name: Whitespace
         run: git diff --check HEAD

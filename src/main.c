@@ -89,8 +89,8 @@ int main(void)
 
     Report(&mem, &list, &cache);
 
-    if(!ServerOpen(&server, &cache, &upstream, &mem.conn, &mem.txTable,
-                   CFG_DNS_PORT))
+    if(!ServerOpen(&server, &cache, &upstream, &list, &mem.conn,
+                   &mem.txTable, CFG_DNS_PORT))
     {
         fprintf(stderr, "dns_blocker: cannot bind port %d\n", CFG_DNS_PORT);
         BlocklistUnload(&list);
@@ -110,8 +110,15 @@ int main(void)
         }
     }
 
-    fprintf(stderr, "dns_blocker: stopping after %llu queries, %llu hits\n",
-            (unsigned long long)server.queries, (unsigned long long)server.hits);
+    fprintf(stderr,
+            "dns_blocker: stopping. queries %llu, hits %llu, blocked %llu, "
+            "forwarded %llu, failed %llu, rejected %llu\n",
+            (unsigned long long)server.queries,
+            (unsigned long long)server.hits,
+            (unsigned long long)server.blocked,
+            (unsigned long long)server.forwarded,
+            (unsigned long long)server.failures,
+            (unsigned long long)upstream.rejected);
 
     ServerClose(&server);
     BlocklistUnload(&list);
