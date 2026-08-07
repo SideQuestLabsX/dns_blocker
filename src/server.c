@@ -170,8 +170,9 @@ static void CloseConnection(Connection *conn)
 static void TxRelease(Transaction *tx)
 {
     UpstreamEnd(&tx->exchange);
-    tx->pool   = NULL;
-    tx->bActive = false;
+    tx->pool      = NULL;
+    tx->bActive   = false;
+    tx->bInternal = false;
 }
 
 void ServerClose(Server *server)
@@ -246,6 +247,13 @@ static void Fail(Server *server, Transaction *tx, uint16_t rcode)
 
     server->failures++;
 
+    if(tx->bInternal)
+    {
+        server->resolveState = ServerResolve_Failed;
+        TxRelease(tx);
+        return;
+    }
+
     if(MsgBuildReply(reply, sizeof reply, tx->query, tx->queryLen,
                      rcode, &replyLen))
     {
@@ -266,7 +274,7 @@ static Transaction *TxAcquire(Server *server)
 {
     Transaction *oldest = NULL;
 
-    for(size_t i = 0; i < CFG_TX_SLOTS; i++)
+    for(size_t i = 0; i < CFG_TX_CLIENT_SLOTS; i++)
     {
         Transaction *tx = &server->transactions[i];
 
@@ -324,6 +332,7 @@ static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
     tx->attemptedMask = 0;
     tx->attempts      = 1;
     tx->bActive       = true;
+    tx->bInternal     = false;
 
     UpstreamStart result = TxSend(tx);
     while(result == UpstreamStart_Failed
@@ -349,10 +358,114 @@ static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
     return true;
 }
 
+bool ServerResolveBegin(Server *server, const char *hostname, uint16_t type)
+{
+    if(server == NULL || hostname == NULL
+       || server->resolveState == ServerResolve_Waiting)
+        return false;
+
+    Transaction *tx = &server->transactions[CFG_TX_INTERNAL_SLOT];
+    if(tx->bActive)
+        return false;
+
+    WireName name;
+    if(!WireEncodeName(hostname, &name))
+        return false;
+
+    uint8_t query[CFG_TX_QUERY_BYTES];
+    size_t  queryLen = 0;
+    if(!MsgBuildQuery(query, sizeof query, &name, type, 0, &queryLen))
+        return false;
+
+    memcpy(tx->query, query, queryLen);
+    tx->pool          = server->upstreams;
+    tx->queryLen      = (uint16_t)queryLen;
+    tx->clientId      = 0;
+    tx->advertised    = CFG_UDP_MSG_BYTES;
+    tx->attemptedMask = 0;
+    tx->attempts      = 1;
+    tx->bActive       = true;
+    tx->bInternal     = true;
+    memset(&tx->client, 0, sizeof tx->client);
+
+    server->resolveType  = type;
+    server->resolveLen   = 0;
+    server->resolveState = ServerResolve_Waiting;
+
+    UpstreamStart result = TxSend(tx);
+    while(result == UpstreamStart_Failed
+          && tx->attempts <= CFG_UPSTREAM_RETRIES)
+    {
+        UpstreamPoolFail(tx->pool, tx->exchange.index,
+                         ServerNowMilliseconds());
+        tx->attempts++;
+        result = TxSend(tx);
+    }
+
+    if(result != UpstreamStart_Started)
+    {
+        TxRelease(tx);
+        server->resolveState = ServerResolve_Idle;
+        return false;
+    }
+
+    return true;
+}
+
+ServerResolveState ServerResolveCheck(const Server *server)
+{
+    return (server != NULL) ? server->resolveState : ServerResolve_Failed;
+}
+
+bool ServerResolveTake(Server *server, uint8_t *addr, uint8_t *addrLen)
+{
+    if(server == NULL || addr == NULL || addrLen == NULL
+       || server->resolveState != ServerResolve_Ready)
+        return false;
+
+    bool bFound = MsgFirstAddress(server->resolveReply, server->resolveLen,
+                                  server->resolveType, addr, addrLen);
+
+    server->resolveState = ServerResolve_Idle;
+    server->resolveLen   = 0;
+    return bFound;
+}
+
+void ServerResolveCancel(Server *server)
+{
+    if(server == NULL)
+        return;
+
+    Transaction *tx = &server->transactions[CFG_TX_INTERNAL_SLOT];
+    if(tx->bActive && tx->bInternal)
+        TxRelease(tx);
+
+    server->resolveState = ServerResolve_Idle;
+    server->resolveLen   = 0;
+}
+
 static void TxFinish(Server *server, Transaction *tx,
                      uint8_t *reply, size_t replyLen)
 {
     (void)CacheInsert(server->cache, reply, replyLen, ServerNowSeconds());
+
+    if(tx->bInternal)
+    {
+        if(replyLen <= sizeof server->resolveReply)
+        {
+            memcpy(server->resolveReply, reply, replyLen);
+            server->resolveLen   = replyLen;
+            server->resolveState = ServerResolve_Ready;
+        }
+        else
+        {
+            server->resolveState = ServerResolve_Failed;
+        }
+
+        TxRelease(tx);
+        return;
+    }
+
     MsgSetId(reply, replyLen, tx->clientId);
 
     if(!tx->client.bOverTcp && replyLen > tx->advertised)

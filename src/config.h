@@ -85,6 +85,13 @@
    the new one. */
 #define CFG_TX_SLOTS            64
 #define CFG_TX_QUERY_BYTES      512
+
+/* The last slot belongs to the daemon's own lookups, which today means the
+   blocklist sync resolving a release host. Client traffic cannot reach it, so
+   a burst that fills the table cannot starve the sync, and the sync cannot
+   evict a client query to make room for itself. */
+#define CFG_TX_CLIENT_SLOTS     (CFG_TX_SLOTS - 1)
+#define CFG_TX_INTERNAL_SLOT    (CFG_TX_SLOTS - 1)
 #define CFG_TCP_SLOTS           16
 #define CFG_TCP_MSG_BYTES       8192
 #define CFG_TCP_IDLE_MS         5000

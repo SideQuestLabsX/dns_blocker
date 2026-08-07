@@ -50,9 +50,20 @@ typedef struct
     uint16_t         advertised;
     uint8_t          attempts;
     bool             bActive;
+    /* The daemon's own lookup rather than a client's. Its answer goes to the
+       internal buffer, and no reply is ever written to a socket. */
+    bool             bInternal;
     uint16_t         queryLen;
     uint8_t          query[CFG_TX_QUERY_BYTES];
 } Transaction;
+
+typedef enum
+{
+    ServerResolve_Idle,
+    ServerResolve_Waiting,
+    ServerResolve_Ready,
+    ServerResolve_Failed
+} ServerResolveState;
 
 typedef struct
 {
@@ -74,6 +85,12 @@ typedef struct
     int fdTcp6;
 
     uint32_t nextGeneration;
+
+    /* The reserved slot's answer lands here rather than on a socket */
+    ServerResolveState resolveState;
+    uint16_t           resolveType;
+    size_t             resolveLen;
+    uint8_t            resolveReply[CFG_UDP_MSG_BYTES];
 
     /* Probing is skipped while this equals queries, so a device nobody is
        using sends nothing. */
@@ -108,6 +125,20 @@ void ServerClose(Server *server);
    slow resolver delays only the client that asked. Returns the number of
    descriptors serviced, or -1 on a poll failure that is not an interruption. */
 int ServerPoll(Server *server, int timeoutMs);
+
+/* Starts one lookup of the daemon's own, on the slot reserved for it. Returns
+   false when that slot is busy or the pool refuses the query, which is a
+   fail-soft: the caller retries later rather than displacing client traffic to
+   make room. */
+bool ServerResolveBegin(Server *server, const char *hostname, uint16_t type);
+
+ServerResolveState ServerResolveCheck(const Server *server);
+
+/* Copies out the address the lookup found and returns the slot to idle. The
+   answer was checked by VerifyAnswer before it reached here. */
+bool ServerResolveTake(Server *server, uint8_t *addr, uint8_t *addrLen);
+
+void ServerResolveCancel(Server *server);
 
 uint32_t ServerNowSeconds(void);
 uint32_t ServerNowMilliseconds(void);

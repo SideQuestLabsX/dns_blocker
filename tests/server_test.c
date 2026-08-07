@@ -879,6 +879,142 @@ static void TestTableFullEvictsOldest(void)
     FixtureDown(&fix);
 }
 
+/* The daemon's own lookups run on a slot client traffic cannot reach, so a
+   flood cannot starve the blocklist sync and the sync cannot evict a client. */
+static void TestReservedSlotSurvivesAFlood(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    int     clients[CFG_TX_SLOTS + 8];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP reserved slot: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.silentName = "slow.example.com";
+
+    for(size_t i = 0; i < CFG_TX_SLOTS + 8; i++)
+    {
+        clients[i] = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+        size_t len = BuildQuery(query, sizeof query, (uint16_t)(0x400 + i),
+                                "slow.example.com", WIRE_TYPE_A);
+        send(clients[i], query, len, 0);
+        PumpBriefly(&fix.server, 1);
+    }
+
+    PumpBriefly(&fix.server, 3);
+
+    /* The flood filled and evicted its way through the table, and never
+       touched the slot held back for internal use */
+    CHECK(fix.server.evictedTransactions > 0);
+    CHECK(!fix.server.transactions[CFG_TX_INTERNAL_SLOT].bActive);
+
+    /* Which is the whole point: a lookup still starts under that pressure */
+    CHECK(ServerResolveCheck(&fix.server) == ServerResolve_Idle);
+    CHECK(ServerResolveBegin(&fix.server, "github.com", WIRE_TYPE_A));
+    CHECK(ServerResolveCheck(&fix.server) == ServerResolve_Waiting);
+    CHECK(fix.server.transactions[CFG_TX_INTERNAL_SLOT].bActive);
+    CHECK(fix.server.transactions[CFG_TX_INTERNAL_SLOT].bInternal);
+
+    /* One at a time. A second start would take the answer of the first */
+    CHECK(!ServerResolveBegin(&fix.server, "example.com", WIRE_TYPE_A));
+
+    ServerResolveCancel(&fix.server);
+    CHECK(ServerResolveCheck(&fix.server) == ServerResolve_Idle);
+    CHECK(!fix.server.transactions[CFG_TX_INTERNAL_SLOT].bActive);
+
+    for(size_t i = 0; i < CFG_TX_SLOTS + 8; i++)
+        close(clients[i]);
+
+    FixtureDown(&fix);
+}
+
+/* An internal answer goes to the resolve buffer. Writing it to a socket would
+   send a client an answer to a question it never asked. */
+static void TestInternalLookupAnswer(void)
+{
+    Fixture fix;
+    uint8_t addr[16];
+    uint8_t addrLen = 0;
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP internal lookup: cannot bind test ports\n");
+        return;
+    }
+
+    CHECK(ServerResolveBegin(&fix.server, "a.example.com", WIRE_TYPE_A));
+    PumpBriefly(&fix.server, 5);
+
+    CHECK(ServerResolveCheck(&fix.server) == ServerResolve_Ready);
+    CHECK(ServerResolveTake(&fix.server, addr, &addrLen));
+    CHECK(addrLen == 4);
+    CHECK(ServerResolveCheck(&fix.server) == ServerResolve_Idle);
+    CHECK(!fix.server.transactions[CFG_TX_INTERNAL_SLOT].bActive);
+
+    /* Taking twice is not a second answer */
+    CHECK(!ServerResolveTake(&fix.server, addr, &addrLen));
+
+    /* Nothing about the internal query reached a client */
+    CHECK(fix.server.failures == 0);
+
+    FixtureDown(&fix);
+}
+
+static void TestInternalLookupTimeoutFailsSoft(void)
+{
+    Fixture fix;
+    uint8_t addr[16];
+    uint8_t addrLen = 0;
+
+    if(!FixtureUp(&fix, 120, 0, false))
+    {
+        printf("SKIP internal timeout: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.silentName = "silent.example.com";
+
+    CHECK(ServerResolveBegin(&fix.server, "silent.example.com", WIRE_TYPE_A));
+    PumpBriefly(&fix.server, 40);
+
+    /* A resolver that never answers must release the slot rather than hold it
+       for the life of the process */
+    CHECK(ServerResolveCheck(&fix.server) == ServerResolve_Failed);
+    CHECK(!fix.server.transactions[CFG_TX_INTERNAL_SLOT].bActive);
+    CHECK(!ServerResolveTake(&fix.server, addr, &addrLen));
+
+    /* And the slot is reusable once the failure is acknowledged */
+    ServerResolveCancel(&fix.server);
+    CHECK(ServerResolveBegin(&fix.server, "a.example.com", WIRE_TYPE_A));
+
+    FixtureDown(&fix);
+}
+
+static void TestResolveRefusals(void)
+{
+    Fixture fix;
+    uint8_t addr[16];
+    uint8_t addrLen = 0;
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP resolve refusals: cannot bind test ports\n");
+        return;
+    }
+
+    CHECK(!ServerResolveBegin(NULL, "a.example.com", WIRE_TYPE_A));
+    CHECK(!ServerResolveBegin(&fix.server, NULL, WIRE_TYPE_A));
+    CHECK(ServerResolveCheck(NULL) == ServerResolve_Failed);
+    CHECK(!ServerResolveTake(NULL, addr, &addrLen));
+    CHECK(!ServerResolveTake(&fix.server, addr, &addrLen));
+    ServerResolveCancel(NULL);
+
+    FixtureDown(&fix);
+}
+
 /* A client that hangs up while its query is in flight must not have the answer
    written into whatever now owns that connection slot. */
 static void TestTcpClientVanishingMidQuery(void)
@@ -1234,6 +1370,10 @@ int main(void)
     TestResponseSentToListenerIsIgnored();
     TestOneStalledQueryDoesNotBlockOthers();
     TestTableFullEvictsOldest();
+    TestReservedSlotSurvivesAFlood();
+    TestInternalLookupAnswer();
+    TestInternalLookupTimeoutFailsSoft();
+    TestResolveRefusals();
     TestTcpClientVanishingMidQuery();
     TestBlockedNameIsRefusedLocally();
     TestLocalNamesAreAnsweredHere();
