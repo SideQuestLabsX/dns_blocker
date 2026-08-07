@@ -7,8 +7,8 @@
 #include <stdint.h>
 
 /* One line per answered query on stdout, and nothing else. There is no ring,
-   no buffer and no writer thread: `init` owns capture, transport and disk
-   policy (DECISIONS D-022). A supervisor that wants these lines gone routes
+   no buffer and no writer thread, because the supervisor owns capture,
+   transport and disk policy. A supervisor that wants these lines gone routes
    stdout to /dev/null, and `stderr` is never gated because that carries the
    daemon's own faults.
 

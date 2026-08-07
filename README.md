@@ -104,10 +104,11 @@ An entry blocks the name and every name below it, so `doubleclick.net` also
 covers `ad.doubleclick.net`. The generator reloads its own output through the
 daemon's lookup and fails if anything it inserted does not match.
 
-`mkblocklist -m` also reports what the same list would cost as a character
-DAFSA over the reversed names. It builds and checks that structure, prints its
-states, transitions and encoded size, and writes nothing extra. The daemon reads
-neither the flag nor the format.
+`mkblocklist -m` also reports what the same list would cost in three denser
+encodings: a LOUDS trie over the reversed names, a minimized DAFSA with explicit
+targets, and that DAFSA with single-character chains collapsed. It builds the
+DAFSA, checks that every stored name still matches, prints the sizes and writes
+nothing extra. The daemon reads neither the flag nor any of those formats.
 
 Point `CFG_BLOCKLIST_PATH` at the result.
 

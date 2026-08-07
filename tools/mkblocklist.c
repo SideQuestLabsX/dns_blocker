@@ -290,9 +290,9 @@ static size_t CountEdges(Node *node)
     return total;
 }
 
-/* Measurement only, behind -m. TODO.md P2 asks whether a character DAFSA over
-   the reversed names is small enough at real list size to be worth building
-   into the daemon. Nothing here writes a file or changes the trie. */
+/* Measurement only, behind -m. Answers whether a character DAFSA over the
+   reversed names is small enough at real list size to be worth building into
+   the daemon. Nothing here writes a file or changes the trie. */
 
 typedef struct DafsaState DafsaState;
 
@@ -309,6 +309,7 @@ struct DafsaState
     size_t      count;
     size_t      capacity;
     DafsaState *hashNext;
+    size_t      index;
     bool        bVisited;
 };
 
@@ -347,7 +348,7 @@ static void DafsaAppend(DafsaState *state, uint8_t symbol, bool bTerminal,
 }
 
 /* A state is its outgoing transitions and nothing else, because the terminal
-   mark rides on the transition rather than on the state. See D-027. */
+   mark rides on the transition rather than on the state */
 static size_t DafsaHash(const DafsaState *state)
 {
     size_t hash = 1469598103934665603u;
@@ -470,6 +471,8 @@ static void DafsaAddWord(DafsaState *root, const char *word,
     }
 }
 
+static DafsaState **g_dafsaOrder;
+
 static void DafsaCount(DafsaState *state)
 {
     if(state == NULL || state->bVisited)
@@ -481,6 +484,29 @@ static void DafsaCount(DafsaState *state)
 
     for(size_t i = 0; i < state->count; i++)
         DafsaCount(state->edges[i].target);
+}
+
+/* Second pass, once the counts are known, so the list can be an exact array */
+static void DafsaCollect(DafsaState *state, size_t *at)
+{
+    if(state == NULL || !state->bVisited)
+        return;
+
+    state->bVisited = false;
+    g_dafsaOrder[*at] = state;
+    (*at)++;
+
+    for(size_t i = 0; i < state->count; i++)
+        DafsaCollect(state->edges[i].target, at);
+}
+
+static size_t BitsFor(size_t values)
+{
+    size_t bits = 1;
+    while((size_t)1 << bits < values)
+        bits++;
+
+    return bits;
 }
 
 static int CompareString(const void *a, const void *b)
@@ -586,6 +612,35 @@ static bool DafsaAccepts(DafsaState *state, const char *word)
     return false;
 }
 
+static size_t RankBytes(size_t bits)
+{
+    return ((bits + 511) / 512) * 4 + ((bits + 63) / 64) * 2;
+}
+
+/* One encoding priced the same way: a degree bitvector with its rank index, one
+   symbol byte per character, one terminal bit per edge, and whatever an edge
+   has to carry to name its target. A tree needs no target, because the
+   bitvector position is the child. A DAG does, because a state is shared. */
+static void ReportEncoding(const char *name, size_t states, size_t edges,
+                           size_t symbolBytes, size_t edgeBits,
+                           size_t trieBytes)
+{
+    size_t bits      = states + edges;
+    size_t bitvector = (bits + 7) / 8;
+    size_t rank      = RankBytes(bits);
+    size_t terminals = (edges + 7) / 8;
+    size_t targets   = (edges * edgeBits + 7) / 8;
+    size_t total     = BLOCKLIST_HEADER_BYTES + bitvector + rank + symbolBytes
+                     + terminals + targets;
+
+    fprintf(stderr,
+            "mkblocklist: %-16s %8zu bytes, %4.1f a name, %zu states, "
+            "%zu edges  (bits %zu, rank %zu, symbols %zu, terminals %zu, "
+            "targets %zu)  trie %zu\n",
+            name, total, (double)total / (double)g_terminalCount, states, edges,
+            bitvector, rank, symbolBytes, terminals, targets, trieBytes);
+}
+
 static void MeasureDafsa(Node *root, size_t trieBytes)
 {
     char *labels[128];
@@ -623,27 +678,68 @@ static void MeasureDafsa(Node *root, size_t trieBytes)
     if(missing != 0)
         Fatal("the measured dafsa lost names, so its size means nothing");
 
-    /* The DBL2 layout planned in TODO.md P2: a LOUDS bitvector holding each
-       state's degree in unary, one symbol byte and one terminal bit per
-       transition, and a rank index over the bitvector. */
-    size_t bits        = g_dafsaStates + g_dafsaTransitions;
-    size_t louds       = (bits + 7) / 8;
-    size_t symbols     = g_dafsaTransitions;
-    size_t terminals   = (g_dafsaTransitions + 7) / 8;
-    size_t superblocks = ((bits + 511) / 512) * 4;
-    size_t blocks      = ((bits + 63) / 64) * 2;
-    size_t total       = BLOCKLIST_HEADER_BYTES + louds + symbols + terminals
-                       + superblocks + blocks;
+    /* The unminimized trie over the same reversed names. It is a tree, so LOUDS
+       positions locate a child and no transition has to name its target. */
+    size_t treeEdges = 0;
+    previous = "";
+    for(size_t i = 0; i < g_terminalCount; i++)
+    {
+        treeEdges += strlen(g_terminals[i])
+                   - DafsaCommonPrefix(g_terminals[i], previous);
+        previous = g_terminals[i];
+    }
+
+    size_t treeStates = treeEdges + 1;
+
+    /* Chains that path compression would collapse. A state on a chain has one
+       way in, one way out and no word ending on it. */
+    g_dafsaOrder = Alloc(g_dafsaStates * sizeof(DafsaState *));
+    size_t ordered = 0;
+    DafsaCollect(dafsaRoot, &ordered);
+
+    for(size_t i = 0; i < ordered; i++)
+        g_dafsaOrder[i]->index = i;
+
+    size_t *inDegree   = Alloc(ordered * sizeof(size_t));
+    bool   *bEndsThere = Alloc(ordered * sizeof(bool));
+
+    for(size_t i = 0; i < ordered; i++)
+    {
+        DafsaState *state = g_dafsaOrder[i];
+        for(size_t e = 0; e < state->count; e++)
+        {
+            DafsaState *target = state->edges[e].target;
+            if(target == NULL)
+                continue;
+
+            inDegree[target->index]++;
+            bEndsThere[target->index] = state->edges[e].bTerminal;
+        }
+    }
+
+    size_t merges = 0;
+    for(size_t i = 1; i < ordered; i++)
+    {
+        if(inDegree[i] == 1 && g_dafsaOrder[i]->count == 1 && !bEndsThere[i])
+            merges++;
+    }
+
+    size_t chainStates = g_dafsaStates - merges;
+    size_t chainEdges  = g_dafsaTransitions - merges;
 
     fprintf(stderr,
             "mkblocklist: dafsa %zu names, %zu states, %zu transitions, "
             "%zu of them also accept one more character\n",
             g_terminalCount, g_dafsaStates, g_dafsaTransitions, admitted);
-    fprintf(stderr,
-            "mkblocklist: dafsa %zu bytes (louds %zu, symbols %zu, "
-            "terminals %zu, rank %zu), %.1f a name, trie is %zu\n",
-            total, louds, symbols, terminals, superblocks + blocks,
-            (double)total / (double)g_terminalCount, trieBytes);
+
+    ReportEncoding("trie, louds", treeStates, treeEdges, treeEdges, 0,
+                   trieBytes);
+    ReportEncoding("dafsa, targets", g_dafsaStates, g_dafsaTransitions,
+                   g_dafsaTransitions, BitsFor(g_dafsaStates), trieBytes);
+    ReportEncoding("dafsa, chains", chainStates, chainEdges,
+                   g_dafsaTransitions,
+                   BitsFor(chainStates) + BitsFor(g_dafsaTransitions),
+                   trieBytes);
 }
 
 /* Every accepted name, kept so the file can be checked against the daemon's
