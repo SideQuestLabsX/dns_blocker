@@ -290,6 +290,362 @@ static size_t CountEdges(Node *node)
     return total;
 }
 
+/* Measurement only, behind -m. TODO.md P2 asks whether a character DAFSA over
+   the reversed names is small enough at real list size to be worth building
+   into the daemon. Nothing here writes a file or changes the trie. */
+
+typedef struct DafsaState DafsaState;
+
+typedef struct
+{
+    DafsaState *target;
+    uint8_t     symbol;
+    bool        bTerminal;
+} DafsaEdge;
+
+struct DafsaState
+{
+    DafsaEdge  *edges;
+    size_t      count;
+    size_t      capacity;
+    DafsaState *hashNext;
+    bool        bVisited;
+};
+
+#define DAFSA_BUCKETS (1u << 20)
+
+static DafsaState **g_dafsaRegister;
+static size_t       g_dafsaStates;
+static size_t       g_dafsaTransitions;
+
+static DafsaState *DafsaStateNew(void)
+{
+    return Alloc(sizeof(DafsaState));
+}
+
+static DafsaEdge *DafsaLastEdge(DafsaState *state)
+{
+    return (state->count == 0) ? NULL : &state->edges[state->count - 1];
+}
+
+static void DafsaAppend(DafsaState *state, uint8_t symbol, bool bTerminal,
+                        DafsaState *target)
+{
+    if(state->count == state->capacity)
+    {
+        state->capacity = (state->capacity == 0) ? 2 : state->capacity * 2;
+        state->edges = realloc(state->edges,
+                               state->capacity * sizeof(DafsaEdge));
+        if(state->edges == NULL)
+            Fatal("out of memory");
+    }
+
+    state->edges[state->count].symbol    = symbol;
+    state->edges[state->count].bTerminal = bTerminal;
+    state->edges[state->count].target    = target;
+    state->count++;
+}
+
+/* A state is its outgoing transitions and nothing else, because the terminal
+   mark rides on the transition rather than on the state. See D-027. */
+static size_t DafsaHash(const DafsaState *state)
+{
+    size_t hash = 1469598103934665603u;
+
+    for(size_t i = 0; i < state->count; i++)
+    {
+        size_t parts[3] = { state->edges[i].symbol,
+                            (size_t)state->edges[i].bTerminal,
+                            (size_t)(uintptr_t)state->edges[i].target };
+
+        for(size_t p = 0; p < 3; p++)
+        {
+            hash ^= parts[p];
+            hash *= 1099511628211u;
+        }
+    }
+
+    return hash;
+}
+
+static bool DafsaEqual(const DafsaState *a, const DafsaState *b)
+{
+    if(a->count != b->count)
+        return false;
+
+    for(size_t i = 0; i < a->count; i++)
+    {
+        if(a->edges[i].symbol != b->edges[i].symbol
+           || a->edges[i].bTerminal != b->edges[i].bTerminal
+           || a->edges[i].target != b->edges[i].target)
+            return false;
+    }
+
+    return true;
+}
+
+static DafsaState *DafsaRegisterFind(DafsaState *state)
+{
+    size_t bucket = DafsaHash(state) & (DAFSA_BUCKETS - 1);
+
+    for(DafsaState *at = g_dafsaRegister[bucket]; at != NULL; at = at->hashNext)
+    {
+        if(DafsaEqual(at, state))
+            return at;
+    }
+
+    return NULL;
+}
+
+static void DafsaRegisterAdd(DafsaState *state)
+{
+    size_t bucket = DafsaHash(state) & (DAFSA_BUCKETS - 1);
+
+    state->hashNext          = g_dafsaRegister[bucket];
+    g_dafsaRegister[bucket]  = state;
+}
+
+/* Daciuk incremental minimization. The input has to be sorted, so the only
+   state that can still change is the one at the end of the last word. */
+static void DafsaReplaceOrRegister(DafsaState *state)
+{
+    DafsaEdge *last = DafsaLastEdge(state);
+    if(last == NULL || last->target == NULL)
+        return;
+
+    if(last->target->count != 0)
+        DafsaReplaceOrRegister(last->target);
+
+    DafsaState *found = DafsaRegisterFind(last->target);
+    if(found != NULL)
+    {
+        free(last->target->edges);
+        free(last->target);
+        last->target = found;
+    }
+    else
+    {
+        DafsaRegisterAdd(last->target);
+    }
+}
+
+static size_t DafsaCommonPrefix(const char *word, const char *previous)
+{
+    size_t at = 0;
+    while(word[at] != '\0' && word[at] == previous[at])
+        at++;
+
+    return at;
+}
+
+static void DafsaAddWord(DafsaState *root, const char *word,
+                         const char *previous)
+{
+    size_t      common = DafsaCommonPrefix(word, previous);
+    DafsaState *state  = root;
+
+    for(size_t i = 0; i < common; i++)
+    {
+        DafsaEdge *edge = DafsaLastEdge(state);
+
+        /* The previous word ended here, and this one carries on past it.
+           A terminal transition keeps its mark and gains a target */
+        if(edge->target == NULL)
+            edge->target = DafsaStateNew();
+
+        state = edge->target;
+    }
+
+    if(state->count != 0)
+        DafsaReplaceOrRegister(state);
+
+    for(size_t i = common; word[i] != '\0'; i++)
+    {
+        bool bLast = (word[i + 1] == '\0');
+        DafsaState *next = bLast ? NULL : DafsaStateNew();
+
+        DafsaAppend(state, (uint8_t)word[i], bLast, next);
+        if(!bLast)
+            state = next;
+    }
+}
+
+static void DafsaCount(DafsaState *state)
+{
+    if(state == NULL || state->bVisited)
+        return;
+
+    state->bVisited = true;
+    g_dafsaStates++;
+    g_dafsaTransitions += state->count;
+
+    for(size_t i = 0; i < state->count; i++)
+        DafsaCount(state->edges[i].target);
+}
+
+static int CompareString(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Reverses the whole name rather than the label order, because the lookup this
+   would replace walks a query backwards one character at a time. */
+static char *ReverseName(const char *name)
+{
+    size_t len = strlen(name);
+    char  *out = Alloc(len + 1);
+
+    for(size_t i = 0; i < len; i++)
+        out[i] = name[len - 1 - i];
+
+    out[len] = '\0';
+    return out;
+}
+
+static char **g_terminals;
+static size_t g_terminalCount;
+static size_t g_terminalCapacity;
+
+static void RememberTerminal(char *reversed)
+{
+    if(g_terminalCount == g_terminalCapacity)
+    {
+        g_terminalCapacity = (g_terminalCapacity == 0)
+                           ? 1024 : g_terminalCapacity * 2;
+        g_terminals = realloc(g_terminals,
+                              g_terminalCapacity * sizeof(char *));
+        if(g_terminals == NULL)
+            Fatal("out of memory");
+    }
+
+    g_terminals[g_terminalCount] = reversed;
+    g_terminalCount++;
+}
+
+/* The names the trie actually marks, which is fewer than the file offered:
+   a name already covered by a shorter rule is never stored. */
+static void CollectTerminals(Node *node, char **labels, size_t depth)
+{
+    for(size_t i = 0; i < node->count; i++)
+    {
+        labels[depth] = node->edges[i].label;
+
+        if(node->edges[i].bTerminal)
+        {
+            char   dotted[512];
+            size_t at = 0;
+
+            for(size_t back = depth + 1; back > 0; back--)
+            {
+                int wrote = snprintf(dotted + at, sizeof dotted - at, "%s%s",
+                                     labels[back - 1], (back > 1) ? "." : "");
+                if(wrote < 0 || (size_t)wrote >= sizeof dotted - at)
+                    Fatal("name too long to measure");
+
+                at += (size_t)wrote;
+            }
+
+            RememberTerminal(ReverseName(dotted));
+        }
+        else if(node->edges[i].child != NULL)
+        {
+            CollectTerminals(node->edges[i].child, labels, depth + 1);
+        }
+    }
+}
+
+/* A broken minimizer reports a smaller structure, which is exactly the answer
+   this measurement is here to decide. So the walk is checked before the size
+   is believed. */
+static bool DafsaAccepts(DafsaState *state, const char *word)
+{
+    for(size_t i = 0; word[i] != '\0'; i++)
+    {
+        DafsaEdge *edge = NULL;
+        for(size_t e = 0; e < state->count; e++)
+        {
+            if(state->edges[e].symbol == (uint8_t)word[i])
+            {
+                edge = &state->edges[e];
+                break;
+            }
+        }
+
+        if(edge == NULL)
+            return false;
+
+        if(word[i + 1] == '\0')
+            return edge->bTerminal;
+
+        if(edge->target == NULL)
+            return false;
+
+        state = edge->target;
+    }
+
+    return false;
+}
+
+static void MeasureDafsa(Node *root, size_t trieBytes)
+{
+    char *labels[128];
+
+    CollectTerminals(root, labels, 0);
+    qsort(g_terminals, g_terminalCount, sizeof(char *), CompareString);
+
+    g_dafsaRegister = Alloc(DAFSA_BUCKETS * sizeof(DafsaState *));
+
+    DafsaState *dafsaRoot = DafsaStateNew();
+    const char *previous  = "";
+
+    for(size_t i = 0; i < g_terminalCount; i++)
+    {
+        DafsaAddWord(dafsaRoot, g_terminals[i], previous);
+        previous = g_terminals[i];
+    }
+
+    DafsaReplaceOrRegister(dafsaRoot);
+    DafsaCount(dafsaRoot);
+
+    size_t missing  = 0;
+    size_t admitted = 0;
+    for(size_t i = 0; i < g_terminalCount; i++)
+    {
+        if(!DafsaAccepts(dafsaRoot, g_terminals[i]))
+            missing++;
+
+        char extended[512];
+        snprintf(extended, sizeof extended, "%sx", g_terminals[i]);
+        if(DafsaAccepts(dafsaRoot, extended))
+            admitted++;
+    }
+
+    if(missing != 0)
+        Fatal("the measured dafsa lost names, so its size means nothing");
+
+    /* The DBL2 layout planned in TODO.md P2: a LOUDS bitvector holding each
+       state's degree in unary, one symbol byte and one terminal bit per
+       transition, and a rank index over the bitvector. */
+    size_t bits        = g_dafsaStates + g_dafsaTransitions;
+    size_t louds       = (bits + 7) / 8;
+    size_t symbols     = g_dafsaTransitions;
+    size_t terminals   = (g_dafsaTransitions + 7) / 8;
+    size_t superblocks = ((bits + 511) / 512) * 4;
+    size_t blocks      = ((bits + 63) / 64) * 2;
+    size_t total       = BLOCKLIST_HEADER_BYTES + louds + symbols + terminals
+                       + superblocks + blocks;
+
+    fprintf(stderr,
+            "mkblocklist: dafsa %zu names, %zu states, %zu transitions, "
+            "%zu of them also accept one more character\n",
+            g_terminalCount, g_dafsaStates, g_dafsaTransitions, admitted);
+    fprintf(stderr,
+            "mkblocklist: dafsa %zu bytes (louds %zu, symbols %zu, "
+            "terminals %zu, rank %zu), %.1f a name, trie is %zu\n",
+            total, louds, symbols, terminals, superblocks + blocks,
+            (double)total / (double)g_terminalCount, trieBytes);
+}
+
 /* Every accepted name, kept so the file can be checked against the daemon's
    own lookup before it ships. */
 static char **g_names;
@@ -461,12 +817,25 @@ static void ReadList(Node *root, FILE *in, size_t *accepted, size_t *skipped)
 
 int main(int argc, char **argv)
 {
-    bool bCArray = (argc > 1 && strcmp(argv[1], "-c") == 0);
-    int  first   = bCArray ? 2 : 1;
+    bool bCArray  = false;
+    bool bMeasure = false;
+    int  first    = 1;
+
+    while(first < argc && argv[first][0] == '-' && argv[first][1] != '\0')
+    {
+        if(strcmp(argv[first], "-c") == 0)
+            bCArray = true;
+        else if(strcmp(argv[first], "-m") == 0)
+            bMeasure = true;
+        else
+            break;
+
+        first++;
+    }
 
     if(argc <= first)
     {
-        fprintf(stderr, "usage: mkblocklist [-c] out [list ...]\n");
+        fprintf(stderr, "usage: mkblocklist [-c] [-m] out [list ...]\n");
         return 1;
     }
 
@@ -540,5 +909,9 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "mkblocklist: %zu names, %zu skipped, %zu bytes, checked\n",
             accepted, skipped, imageSize);
+
+    if(bMeasure)
+        MeasureDafsa(root, imageSize);
+
     return 0;
 }
