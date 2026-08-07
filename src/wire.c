@@ -380,6 +380,116 @@ bool WireEncodeName(const char *dotted, WireName *out)
     return true;
 }
 
+bool WireNameText(const WireName *name, char *out, size_t cap)
+{
+    if(out == NULL || cap == 0)
+        return false;
+
+    out[0] = '\0';
+    if(name == NULL)
+        return false;
+
+    size_t at  = 0;
+    size_t put = 0;
+
+    if(name->len <= 1)
+    {
+        if(cap < 2)
+            return false;
+        out[0] = '.';
+        out[1] = '\0';
+        return true;
+    }
+
+    while(at < name->len)
+    {
+        uint8_t labelLen = name->wire[at];
+        if(labelLen == 0)
+            break;
+
+        /* A pointer or an unknown label kind never reaches a stored name, so
+           anything but a length here means the caller passed something else */
+        if((labelLen & 0xC0) != 0 || at + 1 + labelLen > name->len)
+            goto refuse;
+
+        if(put != 0)
+        {
+            if(put + 1 >= cap)
+                goto refuse;
+            out[put++] = '.';
+        }
+
+        for(size_t i = 0; i < labelLen; i++)
+        {
+            uint8_t c = name->wire[at + 1 + i];
+
+            /* Space separates fields in the log line and a newline separates
+               records, so a label carrying either would let a client forge an
+               entry. The escape byte and the label separator go with them. */
+            if(c > 0x20 && c < 0x7f && c != '\\' && c != '.')
+            {
+                if(put + 1 >= cap)
+                    goto refuse;
+                out[put++] = (char)c;
+                continue;
+            }
+
+            if(put + 4 >= cap)
+                goto refuse;
+
+            out[put++] = '\\';
+            out[put++] = (char)('0' + (c / 100));
+            out[put++] = (char)('0' + ((c / 10) % 10));
+            out[put++] = (char)('0' + (c % 10));
+        }
+
+        at += 1 + labelLen;
+    }
+
+    out[put] = '\0';
+    return true;
+
+    /* A partial name is worse than none: it reads as a real, shorter name */
+refuse:
+    out[0] = '\0';
+    return false;
+}
+
+const char *WireTypeName(uint16_t type, char *scratch, size_t cap)
+{
+    switch(type)
+    {
+        case WIRE_TYPE_A:     return "A";
+        case WIRE_TYPE_CNAME: return "CNAME";
+        case WIRE_TYPE_SOA:   return "SOA";
+        case WIRE_TYPE_PTR:   return "PTR";
+        case WIRE_TYPE_AAAA:  return "AAAA";
+        case WIRE_TYPE_DNAME: return "DNAME";
+        case WIRE_TYPE_OPT:   return "OPT";
+        case WIRE_TYPE_HTTPS: return "HTTPS";
+        default: break;
+    }
+
+    if(scratch == NULL || cap < 6)
+        return "?";
+
+    size_t   put   = 0;
+    char     digits[5];
+    size_t   count = 0;
+    unsigned value = type;
+
+    do {
+        digits[count++] = (char)('0' + (value % 10));
+        value /= 10;
+    } while(value != 0);
+
+    while(count > 0)
+        scratch[put++] = digits[--count];
+
+    scratch[put] = '\0';
+    return scratch;
+}
+
 bool WireNameEqual(const WireName *a, const WireName *b)
 {
     if(a->len != b->len)

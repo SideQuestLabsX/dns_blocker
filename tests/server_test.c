@@ -15,6 +15,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -22,11 +23,15 @@
 
 static int G_FAILURES;
 
+/* The daemon under test writes its query log to stdout, so the harness keeps
+   its own copy of the real one. Without this a FAIL line is buried in traffic. */
+static FILE *G_OUT;
+
 #define CHECK(cond)                                                        \
     do {                                                                   \
         if(!(cond))                                                        \
         {                                                                  \
-            printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);         \
+            fprintf(G_OUT, "FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);         \
             G_FAILURES++;                                                  \
         }                                                                  \
     } while(0)
@@ -447,7 +452,7 @@ static void TestUdpQueryIsForwardedAndAnswered(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP udp: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP udp: cannot bind test ports\n");
         return;
     }
 
@@ -485,7 +490,7 @@ static void TestSecondQueryIsACacheHit(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP cache hit: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP cache hit: cannot bind test ports\n");
         return;
     }
 
@@ -528,7 +533,7 @@ static void TestTcpQuery(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP tcp: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP tcp: cannot bind test ports\n");
         return;
     }
 
@@ -571,7 +576,7 @@ static void TestOversizedUdpAnswerSetsTruncated(void)
        answer must come back with TC rather than as a large datagram. */
     if(!FixtureUp(&fix, 300, 24, false))
     {
-        printf("SKIP truncation: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP truncation: cannot bind test ports\n");
         return;
     }
 
@@ -606,7 +611,7 @@ static void TestUpstreamSilenceBecomesServfail(void)
 
     if(!FixtureUp(&fix, 300, 0, true))
     {
-        printf("SKIP servfail: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP servfail: cannot bind test ports\n");
         return;
     }
 
@@ -645,7 +650,7 @@ static void TestRetryMovesToTheSecondUpstream(void)
 
     if(!FixturePairUp(&fix, 300))
     {
-        printf("SKIP failover: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP failover: cannot bind test ports\n");
         return;
     }
 
@@ -692,7 +697,7 @@ static void TestStartFailureMovesToTheSecondUpstream(void)
 
     if(!FixturePairUp(&fix, 300))
     {
-        printf("SKIP start failover: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP start failover: cannot bind test ports\n");
         return;
     }
 
@@ -724,7 +729,7 @@ static void TestProbeMeasuresAnUnselectedUpstream(void)
 
     if(!FixturePairUp(&fix, 300))
     {
-        printf("SKIP probe: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP probe: cannot bind test ports\n");
         return;
     }
 
@@ -758,7 +763,7 @@ static void TestResponseSentToListenerIsIgnored(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP loop guard: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP loop guard: cannot bind test ports\n");
         return;
     }
 
@@ -790,7 +795,7 @@ static void TestOneStalledQueryDoesNotBlockOthers(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP head of line: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP head of line: cannot bind test ports\n");
         return;
     }
 
@@ -846,7 +851,7 @@ static void TestTableFullEvictsOldest(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP eviction: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP eviction: cannot bind test ports\n");
         return;
     }
 
@@ -890,7 +895,7 @@ static void TestReservedSlotSurvivesAFlood(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP reserved slot: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP reserved slot: cannot bind test ports\n");
         return;
     }
 
@@ -942,7 +947,7 @@ static void TestInternalLookupAnswer(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP internal lookup: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP internal lookup: cannot bind test ports\n");
         return;
     }
 
@@ -972,7 +977,7 @@ static void TestInternalLookupTimeoutFailsSoft(void)
 
     if(!FixtureUp(&fix, 120, 0, false))
     {
-        printf("SKIP internal timeout: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP internal timeout: cannot bind test ports\n");
         return;
     }
 
@@ -994,6 +999,76 @@ static void TestInternalLookupTimeoutFailsSoft(void)
     FixtureDown(&fix);
 }
 
+#if defined(FEATURE_QUERY_LOG) && FEATURE_QUERY_LOG
+/* The query stream is what an operator reads to see what is being blocked, so
+   the outcome on each line has to be the one that actually happened. */
+static void TestQueryLogLines(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+    char    text[4096];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        fprintf(G_OUT, "SKIP query log: cannot bind test ports\n");
+        return;
+    }
+
+    char path[] = "/tmp/dns_blocker_qlog_XXXXXX";
+    int  sink   = mkstemp(path);
+    CHECK(sink >= 0);
+
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    CHECK(saved >= 0);
+    CHECK(dup2(sink, STDOUT_FILENO) >= 0);
+
+    TrieBuild(&fix.blocklist);
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+
+    size_t len = BuildQuery(query, sizeof query, 0x900, "blocked.example.com",
+                            WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 5);
+    (void)recv(client, reply, sizeof reply, MSG_DONTWAIT);
+
+    len = BuildQuery(query, sizeof query, 0x901, "a.example.com", WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 5);
+    (void)recv(client, reply, sizeof reply, MSG_DONTWAIT);
+
+    /* Same name again, so the second answer comes out of the cache */
+    len = BuildQuery(query, sizeof query, 0x902, "a.example.com", WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 5);
+    (void)recv(client, reply, sizeof reply, MSG_DONTWAIT);
+
+    fflush(stdout);
+    CHECK(dup2(saved, STDOUT_FILENO) >= 0);
+    close(saved);
+    close(client);
+
+    CHECK(lseek(sink, 0, SEEK_SET) == 0);
+    ssize_t got = read(sink, text, sizeof text - 1);
+    CHECK(got > 0);
+    text[(got > 0) ? got : 0] = '\0';
+    close(sink);
+    unlink(path);
+
+    CHECK(strstr(text, "query udp blocked.example.com A blocked NXDOMAIN") != NULL);
+    CHECK(strstr(text, "query udp a.example.com A forwarded NOERROR") != NULL);
+    CHECK(strstr(text, "query udp a.example.com A hit NOERROR") != NULL);
+
+    /* A blocked name must never also appear as forwarded, which would mean the
+       upstream saw it */
+    CHECK(strstr(text, "blocked.example.com A forwarded") == NULL);
+
+    FixtureDown(&fix);
+}
+#endif
+
 /* A background transfer shares this poll loop rather than running its own, so
    the loop has to report a descriptor it knows nothing about. */
 static void TestWatchedDescriptor(void)
@@ -1004,7 +1079,7 @@ static void TestWatchedDescriptor(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP watch: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP watch: cannot bind test ports\n");
         return;
     }
 
@@ -1062,7 +1137,7 @@ static void TestResolveRefusals(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP resolve refusals: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP resolve refusals: cannot bind test ports\n");
         return;
     }
 
@@ -1087,7 +1162,7 @@ static void TestTcpClientVanishingMidQuery(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP tcp vanish: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP tcp vanish: cannot bind test ports\n");
         return;
     }
 
@@ -1169,7 +1244,7 @@ static void TestLocalNamesAreAnsweredHere(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP local: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP local: cannot bind test ports\n");
         return;
     }
 
@@ -1273,7 +1348,7 @@ static void TestUnknownLocalPtrGoesToRouter(void)
 
     if(!FixturePtrRouteUp(&fix, 300))
     {
-        printf("SKIP conditional PTR: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP conditional PTR: cannot bind test ports\n");
         FixtureDown(&fix);
         return;
     }
@@ -1343,7 +1418,7 @@ static void TestBlockedNameIsRefusedLocally(void)
 
     if(!FixtureUp(&fix, 300, 0, false))
     {
-        printf("SKIP blocked: cannot bind test ports\n");
+        fprintf(G_OUT, "SKIP blocked: cannot bind test ports\n");
         return;
     }
 
@@ -1420,6 +1495,17 @@ static void TestCloseCancelsActiveProbe(void)
 
 int main(void)
 {
+    /* Hold the real stdout, then send the daemon's query log to /dev/null.
+       TestQueryLogLines points it at a file of its own when it needs to read
+       the lines back. */
+    G_OUT = fdopen(dup(STDOUT_FILENO), "w");
+    if(G_OUT == NULL)
+        return 1;
+
+    setvbuf(G_OUT, NULL, _IOLBF, 0);
+    if(freopen("/dev/null", "w", stdout) == NULL)
+        return 1;
+
     TestUdpQueryIsForwardedAndAnswered();
     TestSecondQueryIsACacheHit();
     TestTcpQuery();
@@ -1436,6 +1522,9 @@ int main(void)
     TestInternalLookupTimeoutFailsSoft();
     TestWatchedDescriptor();
     TestResolveRefusals();
+#if defined(FEATURE_QUERY_LOG) && FEATURE_QUERY_LOG
+    TestQueryLogLines();
+#endif
     TestTcpClientVanishingMidQuery();
     TestBlockedNameIsRefusedLocally();
     TestLocalNamesAreAnsweredHere();
@@ -1444,10 +1533,10 @@ int main(void)
 
     if(G_FAILURES != 0)
     {
-        printf("%d check(s) failed\n", G_FAILURES);
+        fprintf(G_OUT, "%d check(s) failed\n", G_FAILURES);
         return 1;
     }
 
-    printf("server: all checks passed\n");
+    fprintf(G_OUT, "server: all checks passed\n");
     return 0;
 }

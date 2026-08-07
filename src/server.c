@@ -3,6 +3,7 @@
 #include "server.h"
 
 #include "msg.h"
+#include "qlog.h"
 #include "wire.h"
 
 #include <errno.h>
@@ -168,6 +169,23 @@ static void CloseConnection(Connection *conn)
     conn->bAwaiting = false;
 }
 
+/* The question the query carried, re-read at completion because the answer to
+   a forwarded query is decided long after HandleQuery returned. */
+static bool TxQuestion(const Transaction *tx, WireQuestion *out)
+{
+    Reader     reader;
+    WireHeader header;
+
+    ReaderInit(&reader, tx->query, tx->queryLen);
+    return WireParseHeader(&reader, &header) && header.qdCount == 1
+        && WireParseQuestion(&reader, out);
+}
+
+static uint16_t RcodeOf(const uint8_t *msg, size_t len)
+{
+    return (uint16_t)(MsgFlags(msg, len) & 0x000Fu);
+}
+
 static void TxRelease(Transaction *tx)
 {
     UpstreamEnd(&tx->exchange);
@@ -254,6 +272,10 @@ static void Fail(Server *server, Transaction *tx, uint16_t rcode)
         TxRelease(tx);
         return;
     }
+
+    WireQuestion asked;
+    if(TxQuestion(tx, &asked))
+        QueryLog(tx->client.bOverTcp, &asked, QLOG_OUTCOME_FAILED, rcode);
 
     if(MsgBuildReply(reply, sizeof reply, tx->query, tx->queryLen,
                      rcode, &replyLen))
@@ -486,10 +508,17 @@ static void TxFinish(Server *server, Transaction *tx,
 
     MsgSetId(reply, replyLen, tx->clientId);
 
+    WireQuestion asked;
+    bool bAsked = TxQuestion(tx, &asked);
+
     if(!tx->client.bOverTcp && replyLen > tx->advertised)
     {
         size_t shortLen = 0;
         server->truncated++;
+
+        if(bAsked)
+            QueryLog(tx->client.bOverTcp, &asked, QLOG_OUTCOME_TRUNCATED,
+                     MSG_RCODE_NOERROR);
 
         if(MsgBuildTruncated(reply, CFG_TCP_MSG_BYTES, tx->query, tx->queryLen,
                              &shortLen))
@@ -501,6 +530,10 @@ static void TxFinish(Server *server, Transaction *tx,
         TxRelease(tx);
         return;
     }
+
+    if(bAsked)
+        QueryLog(tx->client.bOverTcp, &asked, QLOG_OUTCOME_FORWARDED,
+                 RcodeOf(reply, replyLen));
 
     Deliver(server, &tx->client, reply, replyLen);
     TxRelease(tx);
@@ -723,7 +756,13 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
     Handled local = AnswerLocal(server, query, queryLen, &question, out, cap,
                                 outLen);
     if(local != LOCAL_NOT_OURS)
+    {
+        if(local == Handled_Reply)
+            QueryLog(client->bOverTcp, &question, QLOG_OUTCOME_LOCAL,
+                     RcodeOf(out, *outLen));
+
         return local;
+    }
 
     /* Answered here, so a blocked name never reaches the upstream and never
        takes a cache slot. */
@@ -733,7 +772,11 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
         server->blocked++;
 
         if(MsgBuildReply(out, cap, query, queryLen, CFG_BLOCKED_RCODE, outLen))
+        {
+            QueryLog(client->bOverTcp, &question, QLOG_OUTCOME_BLOCKED,
+                     CFG_BLOCKED_RCODE);
             return Handled_Reply;
+        }
 
         return Handled_Drop;
     }
@@ -751,10 +794,16 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
         {
             server->truncated++;
             if(MsgBuildTruncated(out, cap, query, queryLen, outLen))
+            {
+                QueryLog(client->bOverTcp, &question, QLOG_OUTCOME_TRUNCATED,
+                         MSG_RCODE_NOERROR);
                 return Handled_Reply;
+            }
             return Handled_Drop;
         }
 
+        QueryLog(client->bOverTcp, &question, QLOG_OUTCOME_HIT,
+                 RcodeOf(out, *outLen));
         return Handled_Reply;
     }
 
@@ -766,7 +815,11 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
 
         server->failures++;
         if(MsgBuildReply(out, cap, query, queryLen, MSG_RCODE_SERVFAIL, outLen))
+        {
+            QueryLog(client->bOverTcp, &question, QLOG_OUTCOME_FAILED,
+                     MSG_RCODE_SERVFAIL);
             return Handled_Reply;
+        }
 
         return Handled_Drop;
     }
@@ -777,7 +830,11 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
 
     server->failures++;
     if(MsgBuildReply(out, cap, query, queryLen, MSG_RCODE_SERVFAIL, outLen))
+    {
+        QueryLog(client->bOverTcp, &question, QLOG_OUTCOME_FAILED,
+                 MSG_RCODE_SERVFAIL);
         return Handled_Reply;
+    }
 
     return Handled_Drop;
 }

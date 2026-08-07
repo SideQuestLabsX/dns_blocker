@@ -80,6 +80,11 @@ endif
 # license text
 LICENSE_FILES := $(BUILD)/THIRD_PARTY_LICENSES.md
 
+# On by default. The query stream is the daemon's largest and most sensitive
+# output, so setting this to 0 removes the call sites rather than leaving a
+# branch a misconfiguration can flip
+FEATURES += -DFEATURE_QUERY_LOG=1
+
 # Off by default on purpose
 # FEATURES += -DFEATURE_DGA_FILTER=1
 # FEATURES += -DFEATURE_IO_URING=1     # opt-in only, pulls in liburing
@@ -184,10 +189,12 @@ endif
 
 # Host tests. Sanitizers are incompatible with -static-pie, so these do not
 # share CFLAGS with the shipped binary
+# $(FEATURES) is included so a test builds the same feature set as the shipped
+# binary. Without it a compile-time feature is never exercised by any test
 TEST_CFLAGS := -std=c11 -O1 -g \
 	-fsanitize=address,undefined -fno-omit-frame-pointer \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
-	-Isrc
+	-Isrc $(FEATURES)
 
 ifeq ($(PROFILE),encrypted)
   ENCRYPTED_TESTS := $(BUILD)/upstream_dot_test $(BUILD)/tls_backend_test $(BUILD)/fetch_tls_test $(BUILD)/sync_driver_test
@@ -271,7 +278,7 @@ $(BUILD)/tls_backend_test: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
 
 # Binds loopback sockets and drives a real query through the whole path
-$(BUILD)/server_test: tests/server_test.c src/server.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
+$(BUILD)/server_test: tests/server_test.c src/server.c src/qlog.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
 $(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)

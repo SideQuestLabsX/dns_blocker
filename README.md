@@ -47,12 +47,33 @@ Raspberry Pi Zero W and the Zero 2 W.
 The daemon passes HTTPS and SVCB records through without change, so Encrypted
 Client Hello continues to operate.
 
+Every answered query writes one line to `stdout`:
+
+```text
+query udp doubleclick.net A blocked NXDOMAIN
+query udp example.com A forwarded NOERROR
+query tcp example.com A hit NOERROR
+```
+
+The fields are the transport, the name, the record type, the outcome and the
+response code. The outcome is one of `local`, `blocked`, `hit`, `forwarded`,
+`truncated` or `failed`. A name is printed with `\DDD` in place of any byte
+that would otherwise split the line, because the name came from a client.
+
 Keep the query stream off permanent storage. It is the largest output in the
 system, frequent small appends are the worst write pattern for an SD card, and
 the stream records every domain that each device on the network resolved. The
 daemon writes only to `stdout`, so the supervisor makes this decision. With
 systemd, set `StandardOutput=null`, or set journald `Storage=volatile`. If you
 do not, the card receives every query.
+
+To remove the stream from the binary, build with `FEATURE_QUERY_LOG=0`. That
+deletes the call sites, so no configuration can turn it back on. `stderr`
+carries the daemon's own faults and is never gated.
+
+```sh
+make FEATURES=-DFEATURE_QUERY_LOG=0
+```
 
 The daemon serves TCP on port 53. A response that is larger than the UDP
 payload size gets the `TC` bit, and the client sends the query again over TCP.

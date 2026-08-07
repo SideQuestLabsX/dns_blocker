@@ -123,4 +123,13 @@ bool WireNameEqualExact(const WireName *a, const WireName *b);
    Used for the names the daemon holds as text: the host map and the probe. */
 bool WireEncodeName(const char *dotted, WireName *out);
 
+/* Wire name back to dotted text, for the query log. The name came off the
+   network, so a byte that would break a single-line record is written as
+   \DDD rather than passed through. Always terminates `out`. */
+bool WireNameText(const WireName *name, char *out, size_t cap);
+
+/* Short mnemonic for the common types, or the decimal number in `scratch`
+   for everything else. */
+const char *WireTypeName(uint16_t type, char *scratch, size_t cap);
+
 #endif

@@ -356,9 +356,84 @@ static void TestAllPrefixesOfAValidMessage(void)
     CHECK(edns.bPresent);
 }
 
+/* The log line is one record per query, so a name carrying a newline or a
+   space would let a client forge entries in it. */
+static void TestNameText(void)
+{
+    WireName name;
+    char     text[512];
+    char     scratch[8];
+
+    CHECK(WireEncodeName("example.com", &name));
+    CHECK(WireNameText(&name, text, sizeof text));
+    CHECK(strcmp(text, "example.com") == 0);
+
+    CHECK(WireEncodeName("a.b.c.example.com", &name));
+    CHECK(WireNameText(&name, text, sizeof text));
+    CHECK(strcmp(text, "a.b.c.example.com") == 0);
+
+    /* The root, which is one zero byte */
+    memset(&name, 0, sizeof name);
+    name.wire[0] = 0;
+    name.len     = 1;
+    CHECK(WireNameText(&name, text, sizeof text));
+    CHECK(strcmp(text, ".") == 0);
+
+    /* A label holding a newline, a space and a quote. None may reach the line
+       as itself. */
+    memset(&name, 0, sizeof name);
+    name.wire[0] = 5;
+    name.wire[1] = 'a';
+    name.wire[2] = '\n';
+    name.wire[3] = ' ';
+    name.wire[4] = '"';
+    name.wire[5] = 'b';
+    name.wire[6] = 0;
+    name.len     = 7;
+    CHECK(WireNameText(&name, text, sizeof text));
+    /* A quote passes through: the format is space separated and unquoted, so
+       only the field and record separators are load bearing */
+    CHECK(strcmp(text, "a\\010\\032\"b") == 0);
+    CHECK(strchr(text, '\n') == NULL);
+    CHECK(strchr(text, ' ') == NULL);
+
+    /* A dot inside a label is escaped, or the text reads as two labels */
+    memset(&name, 0, sizeof name);
+    name.wire[0] = 3;
+    name.wire[1] = 'a';
+    name.wire[2] = '.';
+    name.wire[3] = 'b';
+    name.wire[4] = 0;
+    name.len     = 5;
+    CHECK(WireNameText(&name, text, sizeof text));
+    CHECK(strcmp(text, "a\\046b") == 0);
+
+    /* A buffer too small refuses rather than writing a partial name */
+    CHECK(WireEncodeName("example.com", &name));
+    for(size_t cap = 1; cap <= strlen("example.com"); cap++)
+    {
+        char small[16];
+        CHECK(!WireNameText(&name, small, cap));
+        CHECK(small[0] == '\0');
+    }
+
+    CHECK(!WireNameText(NULL, text, sizeof text));
+    CHECK(!WireNameText(&name, text, 0));
+
+    CHECK(strcmp(WireTypeName(WIRE_TYPE_A, scratch, sizeof scratch), "A") == 0);
+    CHECK(strcmp(WireTypeName(WIRE_TYPE_AAAA, scratch, sizeof scratch),
+                 "AAAA") == 0);
+    CHECK(strcmp(WireTypeName(WIRE_TYPE_HTTPS, scratch, sizeof scratch),
+                 "HTTPS") == 0);
+    CHECK(strcmp(WireTypeName(99, scratch, sizeof scratch), "99") == 0);
+    CHECK(strcmp(WireTypeName(65535, scratch, sizeof scratch), "65535") == 0);
+    CHECK(strcmp(WireTypeName(0, scratch, sizeof scratch), "0") == 0);
+}
+
 int main(void)
 {
     TestWellFormedQuery();
+    TestNameText();
     TestBackwardPointer();
     TestCompressedTailResumesAfterPointer();
     TestSelfReferentialPointer();
