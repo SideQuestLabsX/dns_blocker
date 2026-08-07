@@ -377,6 +377,45 @@ sudo setcap cap_net_bind_service=+ep /usr/local/sbin/dns_blocker
 [`init`](https://github.com/SideQuestLabsX/init) supervises the daemon as a
 generic task and needs none of this.
 
+## Status
+
+The daemon keeps its current state in a small file at `CFG_STATUS_PATH`, beside
+the blocklist. Reading it needs no signal, no port and no restart:
+
+```sh
+dns_blocker --status
+```
+
+```text
+pid         941
+uptime      2 s
+queries     4, hits 1, blocked 0, local 0, forwarded 3, failed 0
+refused     malformed 0, truncated 0, connections 0, evicted 0, retries 0
+cache       hits 1, misses 3, inserts 3, evictions 0, refused 0
+blocklist   mapped, 6543894 bytes
+sync        idle, next in 3600 s, installed 6543894 bytes
+upstream    1.1.1.1:53 plain, 27 ms, queries 3, failures 0, rejected 0, probes 0
+upstream    9.9.9.9:53 plain, unmeasured, queries 0, failures 0, rejected 0, probes 0
+```
+
+Pass a path to read a segment somewhere else: `dns_blocker --status /run/x`.
+
+The same binary reads and writes it, so a reader can never hold a stale idea of
+the layout. It maps the file read-only and exits, which cannot disturb a running
+daemon. The header carries a version, and a reader refuses a segment it does not
+recognise instead of printing nonsense.
+
+The daemon writes a snapshot every `CFG_STATUS_PERIOD_MS` and once more on the
+way out, so the file also says how a stopped daemon left things. It is on a
+tmpfs and a reboot takes it.
+
+Log lines and this file answer different questions. `stdout` and `stderr` are a
+stream of events for whatever drains them. This is the current state, and
+nothing has to be kept or parsed to sample it.
+
+The file follows the directory it lives in: an operator who can read
+`/run/dns_blocker` can read the status.
+
 ## Health probe
 
 `make check` builds `dns_blocker.check`. This small companion program resolves

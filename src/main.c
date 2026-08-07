@@ -6,6 +6,7 @@
 #include "config.h"
 #include "hosts.h"
 #include "server.h"
+#include "status.h"
 #include "sync.h"
 #include "tls.h"
 #include "upstream.h"
@@ -314,8 +315,39 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
 
 #endif
 
-int main(void)
+/* The only argument the daemon takes. Reading the segment is the same binary
+   because the layout lives in one place, and a reader that maps it read-only
+   and exits cannot disturb the daemon that wrote it. */
+static int ReportStatus(int argc, char **argv)
 {
+    const char *path = (argc > 2) ? argv[2] : CFG_STATUS_PATH;
+
+    if(path == NULL)
+    {
+        fputs("dns_blocker: no status path in this build\n", stderr);
+        return EXIT_FAILURE;
+    }
+
+    if(!StatusReport(path, stdout))
+    {
+        fprintf(stderr, "dns_blocker: cannot read %s\n", path);
+        return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
+
+int main(int argc, char **argv)
+{
+    if(argc > 1)
+    {
+        if(strcmp(argv[1], "--status") == 0)
+            return ReportStatus(argc, argv);
+
+        fputs("usage: dns_blocker [--status [path]]\n", stderr);
+        return EXIT_FAILURE;
+    }
+
     Memory    mem;
     Blocklist list;
     HostMap   hosts;
@@ -459,13 +491,39 @@ int main(void)
                      ServerNowMilliseconds() + CFG_SYNC_FIRST_MS, false };
 #endif
 
+    Status   status      = { NULL, 0 };
+    uint32_t statusDueMs = ServerNowMilliseconds();
+
+    if(CFG_STATUS_PATH != NULL
+       && !StatusOpen(&status, CFG_STATUS_PATH, statusDueMs))
+        fprintf(stderr, "dns_blocker: no status segment at %s\n",
+                CFG_STATUS_PATH);
+
     while(!G_STOP)
     {
+        uint32_t nowMs = ServerNowMilliseconds();
+
 #if defined(PROFILE_ENCRYPTED)
-        SyncTick(&run, ServerNowMilliseconds());
+        SyncTick(&run, nowMs);
         ServerWatch(&server, run.bActive ? SyncFd(&sync) : -1,
                     run.bActive ? SyncEvents(&sync) : 0);
 #endif
+
+        if((int32_t)(nowMs - statusDueMs) >= 0)
+        {
+            StatusSync syncState = { 0, 0, 0, 0 };
+#if defined(PROFILE_ENCRYPTED)
+            syncState.bActive        = run.bActive ? 1u : 0u;
+            syncState.fail           = (uint32_t)sync.fail;
+            syncState.installedBytes = (list.source == BlocklistSource_Mapped)
+                                     ? list.size : 0;
+            syncState.nextDueMs      = run.bActive
+                                     ? 0 : (uint64_t)(run.dueMs - nowMs);
+#endif
+            StatusPublish(&status, &server, &cache, &upstreams, &list,
+                          &syncState, nowMs);
+            statusDueMs = nowMs + CFG_STATUS_PERIOD_MS;
+        }
 
         if(ServerPoll(&server, 1000) < 0)
         {
@@ -493,6 +551,12 @@ int main(void)
             (unsigned long long)server.forwarded,
             (unsigned long long)server.failures,
             (unsigned long long)rejected);
+
+    /* The last snapshot stays on the tmpfs, so a reader can still see how a
+       stopped daemon left things */
+    StatusPublish(&status, &server, &cache, &upstreams, &list, NULL,
+                  ServerNowMilliseconds());
+    StatusClose(&status);
 
     ServerClose(&server);
     BlocklistUnload(&list);

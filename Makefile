@@ -202,7 +202,7 @@ else
   ENCRYPTED_TESTS :=
 endif
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/status_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -213,6 +213,7 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/upstream_test
 	@$(BUILD)/fetch_test
 	@$(BUILD)/sync_test
+	@$(BUILD)/status_test
 	@$(BUILD)/server_test
 	@$(BUILD)/tls_test
 	@$(BUILD)/fuzz_quick 50000
@@ -258,6 +259,9 @@ $(BUILD)/fetch_test: tests/fetch_test.c src/fetch.c $(HDR) | $(BUILD)
 
 # Staging and the rename. Touches the filesystem, so it runs against a
 # temporary directory rather than the configured path
+$(BUILD)/status_test: tests/status_test.c src/status.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
 $(BUILD)/sync_test: tests/sync_test.c src/sync.c src/fetch.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
@@ -287,7 +291,7 @@ $(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is
 # the only way the byte-wise field reads get exercised on real ARM
-XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native $(BUILD)/fetch_test_native
+XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native $(BUILD)/fetch_test_native $(BUILD)/status_test_native
 
 ifeq ($(PROFILE),encrypted)
   XTEST += $(BUILD)/upstream_dot_test_native $(BUILD)/tls_backend_test_native
@@ -297,6 +301,9 @@ test-static: $(XTEST)
 
 test-static-run: $(XTEST)
 	@for t in $(XTEST); do $(RUNNER) $$t || exit 1; done
+
+$(BUILD)/status_test_native: tests/status_test.c src/status.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/wire_test_native: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@

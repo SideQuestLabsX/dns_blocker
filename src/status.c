@@ -1,0 +1,325 @@
+#define _POSIX_C_SOURCE 200809L
+
+#include "status.h"
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+/* Fixed size, so a reader built against this version knows the layout before
+   it maps anything */
+_Static_assert(sizeof(StatusBlock) < 4096,
+               "the status block must stay within one page");
+
+#define STATUS_READ_TRIES 64
+
+static void StoreSequence(uint32_t *at, uint32_t value)
+{
+    __atomic_store_n(at, value, __ATOMIC_RELEASE);
+}
+
+static uint32_t LoadSequence(const uint32_t *at)
+{
+    return __atomic_load_n(at, __ATOMIC_ACQUIRE);
+}
+
+bool StatusOpen(Status *status, const char *path, uint32_t nowMs)
+{
+    if(status == NULL || path == NULL)
+        return false;
+
+    status->block     = NULL;
+    status->startedMs = nowMs;
+
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if(fd < 0)
+        return false;
+
+    if(ftruncate(fd, (off_t)sizeof(StatusBlock)) != 0)
+    {
+        close(fd);
+        return false;
+    }
+
+    void *at = mmap(NULL, sizeof(StatusBlock), PROT_READ | PROT_WRITE,
+                    MAP_SHARED, fd, 0);
+    close(fd);
+
+    if(at == MAP_FAILED)
+        return false;
+
+    StatusBlock *block = at;
+
+    /* An earlier run may have left a snapshot here, and a reader must not take
+       it for this one. The sequence goes odd before anything else changes */
+    StoreSequence(&block->sequence, LoadSequence(&block->sequence) | 1u);
+    /* Even is settled, so the zeroed block reads as a real snapshot of a daemon
+       that has answered nothing yet */
+    memset(block, 0, sizeof *block);
+    memcpy(block->magic, STATUS_MAGIC, sizeof block->magic);
+    block->version = STATUS_VERSION;
+    block->bytes   = (uint32_t)sizeof(StatusBlock);
+
+    status->block = block;
+    return true;
+}
+
+void StatusClose(Status *status)
+{
+    if(status == NULL || status->block == NULL)
+        return;
+
+    munmap(status->block, sizeof(StatusBlock));
+    status->block = NULL;
+}
+
+static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
+                             uint32_t nowMs)
+{
+    size_t count = (pool != NULL) ? pool->count : 0;
+    if(count > CFG_MAX_UPSTREAMS)
+        count = CFG_MAX_UPSTREAMS;
+
+    block->upstreamCount = (uint32_t)count;
+
+    for(size_t i = 0; i < count; i++)
+    {
+        const Upstream *from = &pool->members[i];
+        StatusUpstream *to   = &block->upstreams[i];
+
+        memset(to, 0, sizeof *to);
+        to->transport           = (uint8_t)from->transport;
+        to->bDown               = from->bDown ? 1u : 0u;
+        to->srttMs              = from->srttMs;
+        to->consecutiveFailures = from->consecutiveFailures;
+        to->queries             = from->queries;
+        to->failures            = from->failures;
+        to->rejected            = from->rejected;
+        to->probes              = from->probes;
+
+        if(from->bDown && (int32_t)(from->downUntilMs - nowMs) > 0)
+            to->downForMs = from->downUntilMs - nowMs;
+
+        if(from->addr.ss_family == AF_INET)
+        {
+            const struct sockaddr_in *v4 = (const struct sockaddr_in *)&from->addr;
+            memcpy(to->address, &v4->sin_addr, 4);
+            to->addressLen = 4;
+            to->port       = ntohs(v4->sin_port);
+        }
+        else if(from->addr.ss_family == AF_INET6)
+        {
+            const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)&from->addr;
+            memcpy(to->address, &v6->sin6_addr, 16);
+            to->addressLen = 16;
+            to->port       = ntohs(v6->sin6_port);
+        }
+    }
+}
+
+void StatusPublish(Status *status, const Server *server, const Cache *cache,
+                   const UpstreamPool *pool, const Blocklist *list,
+                   const StatusSync *sync, uint32_t nowMs)
+{
+    if(status == NULL || status->block == NULL)
+        return;
+
+    StatusBlock *block = status->block;
+
+    StoreSequence(&block->sequence, block->sequence + 1);
+
+    block->pid      = (uint32_t)getpid();
+    block->uptimeMs = nowMs - status->startedMs;
+
+    if(server != NULL)
+    {
+        block->queries             = server->queries;
+        block->hits                = server->hits;
+        block->blocked             = server->blocked;
+        block->local               = server->local;
+        block->forwarded           = server->forwarded;
+        block->failures            = server->failures;
+        block->malformed           = server->malformed;
+        block->truncated           = server->truncated;
+        block->refusedConnections  = server->refusedConnections;
+        block->evictedTransactions = server->evictedTransactions;
+        block->retries             = server->retries;
+    }
+
+    if(cache != NULL)
+    {
+        block->cacheHits      = cache->hits;
+        block->cacheMisses    = cache->misses;
+        block->cacheInserts   = cache->inserts;
+        block->cacheEvictions = cache->evictions;
+        block->cacheRejects   = cache->rejects;
+    }
+
+    if(list != NULL)
+    {
+        block->blocklistSource = (uint32_t)list->source;
+        block->blocklistBytes  = list->size;
+    }
+
+    if(sync != NULL)
+        block->sync = *sync;
+
+    PublishUpstreams(block, pool, nowMs);
+
+    StoreSequence(&block->sequence, block->sequence + 1);
+}
+
+bool StatusRead(const char *path, StatusBlock *out)
+{
+    if(path == NULL || out == NULL)
+        return false;
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if(fd < 0)
+        return false;
+
+    struct stat info;
+    if(fstat(fd, &info) != 0 || (size_t)info.st_size < sizeof(StatusBlock))
+    {
+        close(fd);
+        return false;
+    }
+
+    void *at = mmap(NULL, sizeof(StatusBlock), PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+
+    if(at == MAP_FAILED)
+        return false;
+
+    const StatusBlock *block = at;
+    bool               bRead = false;
+
+    for(unsigned i = 0; i < STATUS_READ_TRIES; i++)
+    {
+        uint32_t before = LoadSequence(&block->sequence);
+        if((before & 1u) != 0)
+            continue;
+
+        memcpy(out, block, sizeof *out);
+
+        if(LoadSequence(&block->sequence) == before)
+        {
+            bRead = true;
+            break;
+        }
+    }
+
+    munmap(at, sizeof(StatusBlock));
+
+    if(!bRead)
+        return false;
+
+    return memcmp(out->magic, STATUS_MAGIC, sizeof out->magic) == 0
+        && out->version == STATUS_VERSION
+        && out->bytes == sizeof(StatusBlock)
+        && out->upstreamCount <= CFG_MAX_UPSTREAMS;
+}
+
+static const char *AddressText(const StatusUpstream *upstream, char *out,
+                               size_t cap)
+{
+    int family = (upstream->addressLen == 16) ? AF_INET6 : AF_INET;
+
+    if(upstream->addressLen == 0
+       || inet_ntop(family, upstream->address, out, (socklen_t)cap) == NULL)
+        snprintf(out, cap, "?");
+
+    return out;
+}
+
+void StatusPrint(const StatusBlock *block, FILE *out)
+{
+    if(block == NULL || out == NULL)
+        return;
+
+    fprintf(out, "pid         %u\n", block->pid);
+    fprintf(out, "uptime      %llu s\n",
+            (unsigned long long)(block->uptimeMs / 1000u));
+    fprintf(out, "queries     %llu, hits %llu, blocked %llu, local %llu, "
+                 "forwarded %llu, failed %llu\n",
+            (unsigned long long)block->queries,
+            (unsigned long long)block->hits,
+            (unsigned long long)block->blocked,
+            (unsigned long long)block->local,
+            (unsigned long long)block->forwarded,
+            (unsigned long long)block->failures);
+    fprintf(out, "refused     malformed %llu, truncated %llu, connections %llu, "
+                 "evicted %llu, retries %llu\n",
+            (unsigned long long)block->malformed,
+            (unsigned long long)block->truncated,
+            (unsigned long long)block->refusedConnections,
+            (unsigned long long)block->evictedTransactions,
+            (unsigned long long)block->retries);
+    fprintf(out, "cache       hits %llu, misses %llu, inserts %llu, "
+                 "evictions %llu, refused %llu\n",
+            (unsigned long long)block->cacheHits,
+            (unsigned long long)block->cacheMisses,
+            (unsigned long long)block->cacheInserts,
+            (unsigned long long)block->cacheEvictions,
+            (unsigned long long)block->cacheRejects);
+    fprintf(out, "blocklist   %s, %llu bytes\n",
+            BlocklistSourceName((BlocklistSource)block->blocklistSource),
+            (unsigned long long)block->blocklistBytes);
+    fprintf(out, "sync        %s, next in %llu s, installed %llu bytes\n",
+            (block->sync.bActive != 0) ? "running" : "idle",
+            (unsigned long long)(block->sync.nextDueMs / 1000u),
+            (unsigned long long)block->sync.installedBytes);
+
+    for(uint32_t i = 0; i < block->upstreamCount; i++)
+    {
+        const StatusUpstream *upstream = &block->upstreams[i];
+        char                  address[64];
+        char                  rtt[32];
+
+        if(upstream->srttMs == UINT32_MAX)
+            snprintf(rtt, sizeof rtt, "unmeasured");
+        else
+            snprintf(rtt, sizeof rtt, "%u ms", upstream->srttMs);
+
+        fprintf(out, "upstream    %s:%u %s, %s, queries %llu, failures %llu, "
+                     "rejected %llu, probes %llu",
+                AddressText(upstream, address, sizeof address), upstream->port,
+                StatusTransportName(upstream->transport), rtt,
+                (unsigned long long)upstream->queries,
+                (unsigned long long)upstream->failures,
+                (unsigned long long)upstream->rejected,
+                (unsigned long long)upstream->probes);
+
+        if(upstream->bDown != 0)
+            fprintf(out, ", held down for %u ms", upstream->downForMs);
+
+        fprintf(out, "\n");
+    }
+}
+
+bool StatusReport(const char *path, FILE *out)
+{
+    StatusBlock block;
+
+    if(!StatusRead(path, &block))
+        return false;
+
+    StatusPrint(&block, out);
+    return true;
+}
+
+const char *StatusTransportName(uint8_t transport)
+{
+    switch(transport)
+    {
+        case UpstreamTransport_Plaintext: return "plain";
+        case UpstreamTransport_Dot:       return "dot";
+        case UpstreamTransport_Doh:       return "doh";
+        default:                          return "unknown";
+    }
+}

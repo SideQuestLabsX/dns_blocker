@@ -38,6 +38,17 @@
 #define CFG_BLOCKLIST_PATH      "/run/dns_blocker/blocklist.trie"
 #define CFG_BLOCKLIST_MAX_BYTES MIB(16)
 
+/* Read-only state for anything that wants to look, beside the list it shares a
+   directory with. NULL publishes nothing. The interval bounds the write rate:
+   a snapshot is a few hundred bytes and the serve loop would otherwise take one
+   per packet. */
+#ifndef CFG_STATUS_PATH
+  #define CFG_STATUS_PATH       "/run/dns_blocker/status"
+#endif
+#ifndef CFG_STATUS_PERIOD_MS
+  #define CFG_STATUS_PERIOD_MS  1000u
+#endif
+
 /* Local names. The router is the DHCP authority and this daemon never sees a
    lease, so the map is static: an address followed by the names it answers to,
    in the format /etc/hosts uses. A name without a dot gets CFG_LOCAL_DOMAIN
