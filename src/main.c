@@ -198,12 +198,26 @@ static bool SyncDue(uint32_t nowMs, uint32_t dueMs)
     return (int32_t)(nowMs - dueMs) >= 0;
 }
 
-static void SyncStop(SyncRun *run, uint32_t nowMs, uint32_t delayMs)
+/* A run that stops without saying why leaves a permanent defect looking like a
+   flaky network, because the only other symptom is another attempt later */
+static void SyncStop(SyncRun *run, uint32_t nowMs, uint32_t delayMs,
+                     const char *why)
 {
+    if(why != NULL)
+        fprintf(stderr, "sync: %s, retrying in %us\n", why, delayMs / 1000u);
+
     SyncEnd(run->job);
     ServerResolveCancel(run->server);
     run->bActive = false;
     run->dueMs   = nowMs + delayMs;
+}
+
+static void SyncStopOnFailure(SyncRun *run, uint32_t nowMs)
+{
+    char why[160];
+    snprintf(why, sizeof why, "the %s transfer failed, %s",
+             SyncPhaseText(run->job), SyncFailText(run->job));
+    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS, why);
 }
 
 static void SyncTick(SyncRun *run, uint32_t nowMs)
@@ -215,6 +229,8 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
 
         if(!SyncBegin(run->job, run->tls, run->path))
         {
+            fprintf(stderr, "sync: cannot start against %s, retrying in %us\n",
+                    run->path, CFG_SYNC_RETRY_MS / 1000u);
             run->dueMs = nowMs + CFG_SYNC_RETRY_MS;
             return;
         }
@@ -231,7 +247,8 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
             case ServerResolve_Idle:
                 if(!ServerResolveBegin(run->server, SyncHost(run->job),
                                        WIRE_TYPE_A))
-                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS,
+                             "the reserved lookup slot is busy");
                 break;
 
             case ServerResolve_Ready:
@@ -244,7 +261,8 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
                 if(!ServerResolveTake(run->server, addr, &addrLen)
                    || addrLen != 4)
                 {
-                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS,
+                             "the answer carried no IPv4 address");
                     break;
                 }
 
@@ -257,14 +275,19 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
                 memcpy(&peer, &v4, sizeof v4);
 
                 if(!SyncProvideAddress(run->job, &peer, sizeof v4))
-                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                    SyncStopOnFailure(run, nowMs);
                 break;
             }
 
             case ServerResolve_Failed:
+            {
+                char why[CFG_FETCH_HOST_BYTES + 32];
+                snprintf(why, sizeof why, "%s did not resolve",
+                         SyncHost(run->job));
                 ServerResolveCancel(run->server);
-                SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                SyncStop(run, nowMs, CFG_SYNC_RETRY_MS, why);
                 break;
+            }
 
             case ServerResolve_Waiting:
                 break;
@@ -281,12 +304,12 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
             fputs("sync: the installed list did not map, keeping the old one\n",
                   stderr);
 
-        SyncStop(run, nowMs, CFG_SYNC_PERIOD_MS);
+        SyncStop(run, nowMs, CFG_SYNC_PERIOD_MS, NULL);
         return;
     }
 
     if(step == SyncStep_Failed)
-        SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+        SyncStopOnFailure(run, nowMs);
 }
 
 #endif

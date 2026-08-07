@@ -301,6 +301,9 @@ static void TestDigestMismatchKeepsTheOldList(const char *dir)
     /* The list the daemon is serving has to survive a bad download */
     CHECK(SizeOf(target) == 8);
     CHECK(!Exists(staging));
+    CHECK(job.fail == SyncFail_Digest);
+    CHECK(strcmp(SyncPhaseText(&job), "trie") == 0);
+    CHECK(strcmp(SyncFailText(&job), "the digest did not match") == 0);
 
     SyncEnd(&job);
     unlink(target);
@@ -328,6 +331,8 @@ static void TestListingWithoutTheAsset(const char *dir)
     /* Nothing was downloaded, so no staging file was ever opened */
     CHECK(!Exists(target));
     CHECK(!Exists(staging));
+    CHECK(job.fail == SyncFail_Listing);
+    CHECK(strstr(SyncFailText(&job), CFG_BLOCKLIST_ASSET) != NULL);
 
     SyncEnd(&job);
 }
@@ -351,6 +356,8 @@ static void TestTransferFailureCleansUp(const char *dir)
     /* A partial download must not be left behind for the next run to find */
     CHECK(!Exists(staging));
     CHECK(!Exists(target));
+    CHECK(job.fail == SyncFail_Transfer);
+    CHECK(job.job.fail == FetchFail_Body);
 
     SyncEnd(&job);
 }
@@ -368,8 +375,50 @@ static void TestServerError(const char *dir)
     CHECK(SyncBegin(&job, &G_BACKEND, target));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(!Exists(target));
+    CHECK(job.fail == SyncFail_Transfer);
+    CHECK(job.job.fail == FetchFail_Status);
+    CHECK(strcmp(SyncPhaseText(&job), "digest listing") == 0);
 
     SyncEnd(&job);
+}
+
+/* Each of these stops the run for a different reason, and the daemon only
+   retries on a timer, so the reason is the whole diagnosis. */
+static void TestFailuresNameThemselves(const char *dir)
+{
+    SyncJob job;
+    char    target[256];
+
+    snprintf(target, sizeof target, "%s/named.trie", dir);
+
+    ScriptReset();
+    Reply("HTTP/2 200 OK\r\nContent-Length: 0\r\n\r\n", NULL, 0);
+    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
+    CHECK(job.job.fail == FetchFail_Header);
+    CHECK(strcmp(SyncFailText(&job), "the response header was refused") == 0);
+    SyncEnd(&job);
+
+    ScriptReset();
+    for(unsigned i = 0; i < CFG_FETCH_MAX_REDIRECTS + 1; i++)
+        ReplyRedirect("https://cdn.example/asset");
+    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
+    CHECK(job.job.fail == FetchFail_Redirects);
+    SyncEnd(&job);
+
+    /* A directory that does not exist cannot hold a staging file */
+    ScriptReset();
+    ReplyBody(G_LISTING, strlen(G_LISTING));
+    ReplyBody("hello\n", 6);
+    CHECK(SyncBegin(&job, &G_BACKEND, "/nonexistent/dns_blocker/blocklist.trie"));
+    CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
+    CHECK(job.fail == SyncFail_Staging);
+    SyncEnd(&job);
+
+    CHECK(strcmp(SyncFailText(NULL), "no run") == 0);
+    CHECK(strcmp(SyncPhaseText(NULL), "no run") == 0);
+    CHECK(strcmp(FetchFailText(NULL), "no transfer") == 0);
 }
 
 static void TestRefusals(const char *dir)
@@ -429,6 +478,7 @@ int main(void)
     TestListingWithoutTheAsset(dir);
     TestTransferFailureCleansUp(dir);
     TestServerError(dir);
+    TestFailuresNameThemselves(dir);
     TestRefusals(dir);
 
     close(listener);

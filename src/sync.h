@@ -61,6 +61,16 @@ typedef enum
     SyncStep_Failed
 } SyncStep;
 
+typedef enum
+{
+    SyncFail_None,
+    SyncFail_Transfer,
+    SyncFail_Staging,
+    SyncFail_Listing,
+    SyncFail_Digest,
+    SyncFail_Install
+} SyncFail;
+
 /* Sequences the two transfers and the install. Nothing here resolves a name:
    when a host has to become an address the driver stops and asks, which keeps
    the upstream pool and the poll loop out of this file. */
@@ -79,9 +89,10 @@ typedef struct
        request belongs to the new host rather than the original one */
     bool bFollowing;
 
-    uint8_t digestText[CFG_SYNC_DIGEST_BYTES];
-    uint8_t want[FETCH_DIGEST_BYTES];
-    bool    bHaveWant;
+    uint8_t  digestText[CFG_SYNC_DIGEST_BYTES];
+    uint8_t  want[FETCH_DIGEST_BYTES];
+    bool     bHaveWant;
+    SyncFail fail;
 } SyncJob;
 
 /* Prepares a run against `path`. The first step always asks for an address. */
@@ -100,6 +111,12 @@ short SyncEvents(const SyncJob *job);
 int SyncFd(const SyncJob *job);
 SyncStep SyncProgress(SyncJob *job);
 void SyncEnd(SyncJob *job);
+
+/* Which transfer was running, and why it stopped. Both are for a log line and
+   neither is ever NULL. A run that fails silently retries on a timer, which
+   hides a permanent defect behind what looks like a flaky network. */
+const char *SyncPhaseText(const SyncJob *job);
+const char *SyncFailText(const SyncJob *job);
 
 #endif
 

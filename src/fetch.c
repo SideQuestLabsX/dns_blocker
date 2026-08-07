@@ -381,11 +381,20 @@ static void ResetChannel(FetchJob *job)
     job->fd = -1;
 }
 
+static FetchStep Fail(FetchJob *job, FetchFail reason)
+{
+    job->fail = reason;
+    return FetchStep_Failed;
+}
+
 static bool Connect(FetchJob *job, TlsBackend *backend,
                     const struct sockaddr_storage *addr, socklen_t addrLen)
 {
     if(!BuildRequest(job))
+    {
+        job->fail = FetchFail_Request;
         return false;
+    }
 
     job->state        = FetchState_Connect;
     job->sent         = 0;
@@ -399,12 +408,16 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
     int fd = socket(addr->ss_family,
                     SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if(fd < 0)
+    {
+        job->fail = FetchFail_Socket;
         return false;
+    }
 
     int connected = connect(fd, (const struct sockaddr *)addr, addrLen);
     if(connected != 0 && errno != EINPROGRESS)
     {
         close(fd);
+        job->fail = FetchFail_Socket;
         return false;
     }
 
@@ -412,6 +425,7 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
     {
         close(fd);
         job->channel.fd = -1;
+        job->fail       = FetchFail_Tls;
         return false;
     }
 
@@ -440,7 +454,10 @@ bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
     job->state   = FetchState_Idle;
 
     if(!FetchParseUrl(url, &job->url))
+    {
+        job->fail = FetchFail_Url;
         return false;
+    }
 
     return Connect(job, backend, addr, addrLen);
 }
@@ -468,9 +485,14 @@ size_t FetchBodyLength(const FetchJob *job)
 bool FetchFollow(FetchJob *job, TlsBackend *backend,
                  const struct sockaddr_storage *addr, socklen_t addrLen)
 {
-    if(job == NULL || backend == NULL || addr == NULL
-       || job->redirects >= CFG_FETCH_MAX_REDIRECTS)
+    if(job == NULL || backend == NULL || addr == NULL)
         return false;
+
+    if(job->redirects >= CFG_FETCH_MAX_REDIRECTS)
+    {
+        job->fail = FetchFail_Redirects;
+        return false;
+    }
 
     job->redirects++;
     ResetChannel(job);
@@ -501,15 +523,15 @@ static FetchStep BodyBytes(FetchJob *job, const uint8_t *data, size_t len)
     /* More bytes than the length promised. The extra belongs to nothing this
        client asked for */
     if(len > job->bodyExpected - job->bodyGot)
-        return FetchStep_Failed;
+        return Fail(job, FetchFail_Body);
 
     if(job->sink >= 0 && !WriteAll(job->sink, data, len))
-        return FetchStep_Failed;
+        return Fail(job, FetchFail_Body);
 
     if(job->memory != NULL)
     {
         if(len > job->maxBody - job->memoryLen)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Body);
         memcpy(job->memory + job->memoryLen, data, len);
         job->memoryLen += len;
     }
@@ -532,7 +554,7 @@ static FetchStep OnHeaders(FetchJob *job, const FetchHeaders *headers,
            next request builds from it */
         if(headers->location[0] == '\0'
            || !FetchParseUrl(headers->location, &job->url))
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Url);
 
         return FetchStep_Redirect;
     }
@@ -541,14 +563,14 @@ static FetchStep OnHeaders(FetchJob *job, const FetchHeaders *headers,
        response this client cannot frame */
     if(headers->status != 200 || !headers->bHasContentLength
        || headers->contentLength > job->maxBody)
-        return FetchStep_Failed;
+        return Fail(job, FetchFail_Status);
 
     job->bodyExpected = headers->contentLength;
     job->state        = FetchState_ReadBody;
 
     mbedtls_sha256_init(&job->sha);
     if(mbedtls_sha256_starts(&job->sha, 0) != 0)
-        return FetchStep_Failed;
+        return Fail(job, FetchFail_Body);
     job->bShaReady = true;
 
     if(job->bodyExpected == 0)
@@ -576,7 +598,7 @@ FetchStep FetchProgress(FetchJob *job)
         socklen_t errorLen = sizeof error;
         if(getsockopt(job->fd, SOL_SOCKET, SO_ERROR, &error, &errorLen) != 0
            || error != 0)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Socket);
 
         job->state = FetchState_Handshake;
     }
@@ -587,7 +609,7 @@ FetchStep FetchProgress(FetchJob *job)
         if(result == TlsIo_WantRead || result == TlsIo_WantWrite)
             return FetchStep_Again;
         if(result != TlsIo_Ok)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Tls);
 
         job->state        = FetchState_Write;
         job->channel.want = TlsIo_WantWrite;
@@ -601,7 +623,7 @@ FetchStep FetchProgress(FetchJob *job)
         if(wrote == TlsIo_WantRead || wrote == TlsIo_WantWrite)
             return FetchStep_Again;
         if(wrote <= 0)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Write);
 
         job->sent += (size_t)wrote;
         if(job->sent < job->requestLen)
@@ -618,14 +640,14 @@ FetchStep FetchProgress(FetchJob *job)
     if(job->state == FetchState_ReadHeaders)
     {
         if(job->held >= sizeof job->buffer)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Header);
 
         ssize_t got = TlsChannelRead(&job->channel, job->buffer + job->held,
                                      sizeof job->buffer - job->held);
         if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
             return FetchStep_Again;
         if(got <= 0)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Header);
 
         job->held += (size_t)got;
 
@@ -634,7 +656,7 @@ FetchStep FetchProgress(FetchJob *job)
         FetchParse   parsed    = FetchParseHeaders(job->buffer, job->held,
                                                    &headers, &headerEnd);
         if(parsed == FetchParse_Failed)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Header);
         if(parsed == FetchParse_Incomplete)
             return FetchStep_Again;
 
@@ -651,7 +673,7 @@ FetchStep FetchProgress(FetchJob *job)
         /* A close before the declared length is a truncated file, and a
            truncated trie must never reach the rename */
         if(got <= 0)
-            return FetchStep_Failed;
+            return Fail(job, FetchFail_Body);
 
         FetchStep step = BodyBytes(job, job->buffer, (size_t)got);
         if(step == FetchStep_Done)
@@ -661,7 +683,29 @@ FetchStep FetchProgress(FetchJob *job)
     }
 
     return (job->state == FetchState_Done)
-         ? FetchStep_Done : FetchStep_Failed;
+         ? FetchStep_Done : Fail(job, FetchFail_Socket);
+}
+
+const char *FetchFailText(const FetchJob *job)
+{
+    if(job == NULL)
+        return "no transfer";
+
+    switch(job->fail)
+    {
+        case FetchFail_None:      return "no failure";
+        case FetchFail_Url:       return "the URL was refused";
+        case FetchFail_Request:   return "the request did not fit its buffer";
+        case FetchFail_Socket:    return "the connection failed";
+        case FetchFail_Tls:       return "the TLS handshake failed";
+        case FetchFail_Write:     return "the request could not be sent";
+        case FetchFail_Header:    return "the response header was refused";
+        case FetchFail_Status:    return "the response status or framing was refused";
+        case FetchFail_Body:      return "the body was truncated or oversized";
+        case FetchFail_Redirects: return "too many redirects";
+    }
+
+    return "unknown";
 }
 
 bool FetchDigest(FetchJob *job, uint8_t out[FETCH_DIGEST_BYTES])

@@ -3,7 +3,7 @@
 #include "sync.h"
 
 #include <fcntl.h>
-#include <stdio.h>
+#include <stdio.h>   /* rename(2) */
 #include <string.h>
 #include <unistd.h>
 
@@ -162,6 +162,7 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
         if(job->stagingFd < 0)
         {
             job->state = SyncState_Failed;
+            job->fail  = SyncFail_Staging;
             return false;
         }
 
@@ -173,6 +174,7 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
     if(!bStarted)
     {
         job->state = SyncState_Failed;
+        job->fail  = SyncFail_Transfer;
         return false;
     }
 
@@ -201,9 +203,8 @@ static SyncStep FinishDigest(SyncJob *job)
     if(!FetchFindDigest(job->digestText, FetchBodyLength(&job->job),
                         CFG_BLOCKLIST_ASSET, job->want))
     {
-        fprintf(stderr, "sync: the listing names no %s, refusing\n",
-                CFG_BLOCKLIST_ASSET);
         job->state = SyncState_Failed;
+        job->fail  = SyncFail_Listing;
         return SyncStep_Failed;
     }
 
@@ -218,6 +219,7 @@ static SyncStep FinishDigest(SyncJob *job)
     if(!FetchParseUrl(CFG_BLOCKLIST_URL, &url))
     {
         job->state = SyncState_Failed;
+        job->fail  = SyncFail_Transfer;
         return SyncStep_Failed;
     }
 
@@ -235,6 +237,7 @@ static SyncStep FinishAsset(SyncJob *job)
         SyncAbandon(job->stagingFd, job->staging);
         job->stagingFd = -1;
         job->state     = SyncState_Failed;
+        job->fail      = SyncFail_Digest;
         return SyncStep_Failed;
     }
 
@@ -244,9 +247,9 @@ static SyncStep FinishAsset(SyncJob *job)
 
     if(result != SyncInstall_Ok)
     {
-        if(result == SyncInstall_Mismatch)
-            fprintf(stderr, "sync: digest mismatch, keeping the current list\n");
         job->state = SyncState_Failed;
+        job->fail  = (result == SyncInstall_Mismatch) ? SyncFail_Digest
+                                                      : SyncFail_Install;
         return SyncStep_Failed;
     }
 
@@ -290,11 +293,38 @@ SyncStep SyncProgress(SyncJob *job)
             job->stagingFd = -1;
         }
         job->state = SyncState_Failed;
+        job->fail  = SyncFail_Transfer;
         return SyncStep_Failed;
     }
 
     return (job->phase == SyncPhase_Digest) ? FinishDigest(job)
                                             : FinishAsset(job);
+}
+
+const char *SyncPhaseText(const SyncJob *job)
+{
+    if(job == NULL)
+        return "no run";
+
+    return (job->phase == SyncPhase_Digest) ? "digest listing" : "trie";
+}
+
+const char *SyncFailText(const SyncJob *job)
+{
+    if(job == NULL)
+        return "no run";
+
+    switch(job->fail)
+    {
+        case SyncFail_None:     return "no failure";
+        case SyncFail_Transfer: return FetchFailText(&job->job);
+        case SyncFail_Staging:  return "the staging file could not be opened";
+        case SyncFail_Listing:  return "the listing names no " CFG_BLOCKLIST_ASSET;
+        case SyncFail_Digest:   return "the digest did not match";
+        case SyncFail_Install:  return "the install failed";
+    }
+
+    return "unknown";
 }
 
 void SyncEnd(SyncJob *job)

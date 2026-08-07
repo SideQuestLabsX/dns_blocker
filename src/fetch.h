@@ -80,6 +80,23 @@ typedef enum
     FetchStep_Failed
 } FetchStep;
 
+/* Why a transfer stopped. A failed download otherwise looks the same from
+   outside whether the certificate was refused, the header block did not fit or
+   the peer hung up, and the daemon only retries on a timer. */
+typedef enum
+{
+    FetchFail_None,
+    FetchFail_Url,
+    FetchFail_Request,
+    FetchFail_Socket,
+    FetchFail_Tls,
+    FetchFail_Write,
+    FetchFail_Header,
+    FetchFail_Status,
+    FetchFail_Body,
+    FetchFail_Redirects
+} FetchFail;
+
 /* One transfer. The caller owns the storage and the staging descriptor, so
    nothing here allocates. The body is written out as it arrives and hashed on
    the way past, which is what keeps a 6.5MB trie off the heap and out of the
@@ -100,8 +117,9 @@ typedef struct
     size_t   held;
     size_t   bodyGot;
     size_t   bodyExpected;
-    unsigned redirects;
-    unsigned status;
+    unsigned  redirects;
+    unsigned  status;
+    FetchFail fail;
 
     mbedtls_sha256_context sha;
     bool bShaReady;
@@ -136,6 +154,9 @@ bool FetchFollow(FetchJob *job, TlsBackend *backend,
 
 short FetchEvents(const FetchJob *job);
 FetchStep FetchProgress(FetchJob *job);
+
+/* A short reason for the last failure, for a log line. Never NULL. */
+const char *FetchFailText(const FetchJob *job);
 
 /* Valid after FetchStep_Redirect. Parsed already, so the caller resolves
    `job->url.host` rather than re-reading the raw header. */
