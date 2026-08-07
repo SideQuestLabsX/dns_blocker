@@ -67,6 +67,17 @@ extern const size_t        G_EMBEDDED_SIZE;
 bool BlocklistLoad(Blocklist *list, const char *path);
 void BlocklistUnload(Blocklist *list);
 
+/* Swaps in a freshly downloaded list while the daemon is serving. The new file
+   is mapped and checked before the old mapping is released, so a corrupt or
+   unreadable replacement leaves the running list exactly as it was and returns
+   false.
+
+   The daemon is single threaded and every lookup runs to completion inside one
+   poll iteration, so a swap between iterations needs no locking. Calling this
+   from a signal handler or a second thread would hand a reader a pointer into
+   an unmapped page. */
+bool BlocklistReload(Blocklist *list, const char *path);
+
 const char *BlocklistSourceName(BlocklistSource source);
 
 /* True when the name itself, or a parent of it, carries a terminal mark. */

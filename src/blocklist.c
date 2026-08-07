@@ -82,6 +82,31 @@ bool BlocklistLoad(Blocklist *list, const char *path)
     return false;
 }
 
+bool BlocklistReload(Blocklist *list, const char *path)
+{
+    if(list == NULL || path == NULL)
+        return false;
+
+    /* Mapped into a separate record first. Writing into `list` before the new
+       file is known good would leave a failed reload with no list at all */
+    Blocklist fresh;
+    memset(&fresh, 0, sizeof fresh);
+
+    if(!MapFile(&fresh, path))
+        return false;
+
+    Blocklist old = *list;
+    *list = fresh;
+
+    if(old.source == BlocklistSource_Mapped && old.base != NULL)
+    {
+        void *mem = (void *)(uintptr_t)old.base;
+        munmap(mem, old.size);
+    }
+
+    return true;
+}
+
 void BlocklistUnload(Blocklist *list)
 {
     if(list == NULL)

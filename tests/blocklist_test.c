@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "blocklist.h"
 #include "wire.h"
 
@@ -6,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int G_FAILURES;
 
@@ -293,6 +296,122 @@ static void TestCorruptBodyIsBounded(void)
     free(file);
 }
 
+/* net -> tracker(terminal). Distinguishable from BuildSample, so a swap that
+   did not happen shows up as the wrong name being blocked. */
+static uint8_t *BuildOther(Blocklist *list, size_t *sizeOut)
+{
+    static Builder2 b;
+    memset(&b, 0, sizeof b);
+
+    uint32_t root = NodePut(&b, 1);
+    uint32_t net  = NodePut(&b, 1);
+
+    ChildPut(&b, root, 0, "net", net, false);
+    ChildPut(&b, net, 0, "tracker", 0, true);
+
+    return Finish(&b, list, sizeOut);
+}
+
+static bool WriteTrie(const char *path, const uint8_t *file, size_t size)
+{
+    FILE *out = fopen(path, "wb");
+    if(out == NULL)
+        return false;
+
+    size_t wrote = fwrite(file, 1, size, out);
+    fclose(out);
+    return wrote == size;
+}
+
+/* A reload happens while the daemon is serving, so a bad replacement must
+   never cost it the list it already has. */
+static void TestReload(void)
+{
+    char dir[] = "/tmp/dns_blocker_reload_XXXXXX";
+    if(mkdtemp(dir) == NULL)
+    {
+        printf("FAIL %s:%d  cannot create a temporary directory\n",
+               __FILE__, __LINE__);
+        G_FAILURES++;
+        return;
+    }
+
+    char first[256];
+    char second[256];
+    char broken[256];
+    snprintf(first, sizeof first, "%s/first.trie", dir);
+    snprintf(second, sizeof second, "%s/second.trie", dir);
+    snprintf(broken, sizeof broken, "%s/broken.trie", dir);
+
+    Blocklist built;
+    size_t    size = 0;
+
+    uint8_t *sample = BuildSample(&built, &size);
+    CHECK(WriteTrie(first, sample, size));
+
+    size_t   otherSize = 0;
+    uint8_t *other     = BuildOther(&built, &otherSize);
+    CHECK(WriteTrie(second, other, otherSize));
+
+    uint8_t *corrupt = malloc(otherSize);
+    memcpy(corrupt, other, otherSize);
+    corrupt[0] = 'X';
+    CHECK(WriteTrie(broken, corrupt, otherSize));
+
+    Blocklist list;
+    CHECK(BlocklistLoad(&list, first));
+    CHECK(list.source == BlocklistSource_Mapped);
+    CHECK_BLOCKED(&list, "doubleclick.com", true);
+    CHECK_BLOCKED(&list, "tracker.net", false);
+
+    /* The lookups below read through the new mapping. Reading the old one
+       after it is unmapped is what this proves does not happen. */
+    CHECK(BlocklistReload(&list, second));
+    CHECK(list.source == BlocklistSource_Mapped);
+    CHECK_BLOCKED(&list, "tracker.net", true);
+    CHECK_BLOCKED(&list, "sub.tracker.net", true);
+    CHECK_BLOCKED(&list, "doubleclick.com", false);
+
+    CHECK(!BlocklistReload(&list, broken));
+    CHECK_BLOCKED(&list, "tracker.net", true);
+
+    char absent[256];
+    snprintf(absent, sizeof absent, "%s/absent.trie", dir);
+    CHECK(!BlocklistReload(&list, absent));
+    CHECK_BLOCKED(&list, "tracker.net", true);
+
+    CHECK(WriteTrie(broken, corrupt, 3));
+    CHECK(!BlocklistReload(&list, broken));
+    CHECK_BLOCKED(&list, "tracker.net", true);
+
+    CHECK(!BlocklistReload(&list, NULL));
+    CHECK(!BlocklistReload(NULL, second));
+    CHECK_BLOCKED(&list, "tracker.net", true);
+
+    BlocklistUnload(&list);
+
+    /* An embedded list lives in .rodata, so a swap away from it must not try
+       to unmap it */
+    Blocklist embedded;
+    if(BlocklistLoad(&embedded, "/nonexistent/blocklist.trie")
+       && embedded.source == BlocklistSource_Embedded)
+    {
+        CHECK(BlocklistReload(&embedded, second));
+        CHECK(embedded.source == BlocklistSource_Mapped);
+        CHECK_BLOCKED(&embedded, "tracker.net", true);
+    }
+    BlocklistUnload(&embedded);
+
+    free(corrupt);
+    free(other);
+    free(sample);
+
+    unlink(first);
+    unlink(second);
+    unlink(broken);
+    rmdir(dir);
+}
+
 int main(void)
 {
     TestExactAndSuffix();
@@ -301,6 +420,7 @@ int main(void)
     TestEmbeddedList();
     TestCorruptHeaderRefused();
     TestCorruptBodyIsBounded();
+    TestReload();
 
     if(G_FAILURES != 0)
     {
