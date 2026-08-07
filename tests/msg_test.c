@@ -225,6 +225,88 @@ static void TestRefusesMalformedAndTinyBuffers(void)
     CHECK(!MsgBuildReply(big, sizeof big, query, 0, MSG_RCODE_SERVFAIL, &replyLen));
 }
 
+static void TestFirstAddress(void)
+{
+    uint8_t buf[512];
+    Builder b = { buf, sizeof buf, 0 };
+    uint8_t addr[16];
+    uint8_t addrLen = 0;
+
+    PutResponseHeader(&b, MSG_RCODE_NOERROR, 1, 0, 0);
+    PutQuestion(&b, "example.com", WIRE_TYPE_A);
+    PutARecord(&b, "example.com", 300);
+    CHECK(MsgFirstAddress(b.buf, b.len, WIRE_TYPE_A, addr, &addrLen));
+    CHECK(addrLen == 4);
+    CHECK(addr[0] == 93 && addr[1] == 184 && addr[2] == 216 && addr[3] == 34);
+
+    /* A resolver answering a CNAME chain puts the alias first. The address
+       record behind it is still the answer to the question. */
+    b.len = 0;
+    PutResponseHeader(&b, MSG_RCODE_NOERROR, 2, 0, 0);
+    PutQuestion(&b, "www.example.com", WIRE_TYPE_A);
+    PutName(&b, "www.example.com");
+    PutU16(&b, WIRE_TYPE_CNAME);
+    PutU16(&b, WIRE_CLASS_IN);
+    PutU32(&b, 300);
+    {
+        size_t lengthAt = b.len;
+        PutU16(&b, 0);
+        size_t start = b.len;
+        PutName(&b, "example.com");
+        b.buf[lengthAt]     = (uint8_t)((b.len - start) >> 8);
+        b.buf[lengthAt + 1] = (uint8_t)(b.len - start);
+    }
+    PutARecord(&b, "example.com", 300);
+    addrLen = 0;
+    CHECK(MsgFirstAddress(b.buf, b.len, WIRE_TYPE_A, addr, &addrLen));
+    CHECK(addrLen == 4);
+
+    /* Asking for A must not take an AAAA, or the address goes into a sockaddr
+       of the wrong family */
+    b.len = 0;
+    PutResponseHeader(&b, MSG_RCODE_NOERROR, 1, 0, 0);
+    PutQuestion(&b, "example.com", WIRE_TYPE_AAAA);
+    PutName(&b, "example.com");
+    PutU16(&b, WIRE_TYPE_AAAA);
+    PutU16(&b, WIRE_CLASS_IN);
+    PutU32(&b, 300);
+    PutU16(&b, 16);
+    for(uint8_t i = 0; i < 16; i++)
+        PutU8(&b, i);
+    CHECK(!MsgFirstAddress(b.buf, b.len, WIRE_TYPE_A, addr, &addrLen));
+    addrLen = 0;
+    CHECK(MsgFirstAddress(b.buf, b.len, WIRE_TYPE_AAAA, addr, &addrLen));
+    CHECK(addrLen == 16);
+    CHECK(addr[15] == 15);
+
+    /* An A record whose rdata is not four bytes is skipped, not copied */
+    b.len = 0;
+    PutResponseHeader(&b, MSG_RCODE_NOERROR, 1, 0, 0);
+    PutQuestion(&b, "example.com", WIRE_TYPE_A);
+    PutName(&b, "example.com");
+    PutU16(&b, WIRE_TYPE_A);
+    PutU16(&b, WIRE_CLASS_IN);
+    PutU32(&b, 300);
+    PutU16(&b, 3);
+    PutU8(&b, 1);
+    PutU8(&b, 2);
+    PutU8(&b, 3);
+    CHECK(!MsgFirstAddress(b.buf, b.len, WIRE_TYPE_A, addr, &addrLen));
+
+    b.len = 0;
+    PutResponseHeader(&b, MSG_RCODE_NXDOMAIN, 0, 0, 0);
+    PutQuestion(&b, "example.com", WIRE_TYPE_A);
+    CHECK(!MsgFirstAddress(b.buf, b.len, WIRE_TYPE_A, addr, &addrLen));
+
+    b.len = 0;
+    PutResponseHeader(&b, MSG_RCODE_NOERROR, 1, 0, 0);
+    PutQuestion(&b, "example.com", WIRE_TYPE_A);
+    PutARecord(&b, "example.com", 300);
+    CHECK(!MsgFirstAddress(b.buf, b.len - 2, WIRE_TYPE_A, addr, &addrLen));
+    CHECK(!MsgFirstAddress(b.buf, b.len, WIRE_TYPE_HTTPS, addr, &addrLen));
+    CHECK(!MsgFirstAddress(NULL, 0, WIRE_TYPE_A, addr, &addrLen));
+}
+
 int main(void)
 {
     TestIdRoundTrip();
@@ -236,6 +318,7 @@ int main(void)
     TestBuildAnswerCarriesAName();
     TestBuildAnswerRefusesTinyBuffers();
     TestRefusesMalformedAndTinyBuffers();
+    TestFirstAddress();
 
     if(G_FAILURES != 0)
     {

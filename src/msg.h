@@ -54,4 +54,14 @@ bool MsgBuildQuery(uint8_t *out, size_t cap, const WireName *name,
 bool MsgBuildTruncated(uint8_t *out, size_t cap, const uint8_t *query,
                        size_t queryLen, size_t *outLen);
 
+/* First address record of `type` in the answer section, written as 4 or 16
+   raw bytes. A CNAME chain needs no walking here, because the address record
+   the resolver returned alongside it is the one being asked for.
+
+   The caller must have run VerifyAnswer first. This scans an answer section
+   that is already known to be in bailiwick, and it does no checking of its
+   own. */
+bool MsgFirstAddress(const uint8_t *msg, size_t len, uint16_t type,
+                     uint8_t *addr, uint8_t *addrLen);
+
 #endif

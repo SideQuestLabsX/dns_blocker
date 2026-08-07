@@ -195,7 +195,7 @@ else
   ENCRYPTED_TESTS :=
 endif
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -205,6 +205,7 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/hosts_test
 	@$(BUILD)/upstream_test
 	@$(BUILD)/fetch_test
+	@$(BUILD)/sync_test
 	@$(BUILD)/server_test
 	@$(BUILD)/tls_test
 	@$(BUILD)/fuzz_quick 50000
@@ -245,6 +246,11 @@ $(BUILD)/upstream_test: tests/upstream_test.c src/upstream.c src/msg.c src/verif
 # The release response parser. Attacker-controlled bytes, so it is tested apart
 # from the socket that delivers them
 $(BUILD)/fetch_test: tests/fetch_test.c src/fetch.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+# Staging and the rename. Touches the filesystem, so it runs against a
+# temporary directory rather than the configured path
+$(BUILD)/sync_test: tests/sync_test.c src/sync.c src/fetch.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # Drives the transfer states against scripted bytes. Links without src/tls.c,

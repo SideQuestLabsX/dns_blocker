@@ -162,3 +162,48 @@ bool MsgBuildTruncated(uint8_t *out, size_t cap, const uint8_t *query,
     return BuildFromQuestion(out, cap, query, queryLen, MSG_FLAG_TC,
                              MSG_RCODE_NOERROR, outLen);
 }
+
+bool MsgFirstAddress(const uint8_t *msg, size_t len, uint16_t type,
+                     uint8_t *addr, uint8_t *addrLen)
+{
+    if(msg == NULL || addr == NULL || addrLen == NULL)
+        return false;
+
+    uint16_t want = (type == WIRE_TYPE_AAAA) ? 16 : 4;
+    if(type != WIRE_TYPE_A && type != WIRE_TYPE_AAAA)
+        return false;
+
+    Reader     reader;
+    WireHeader header;
+
+    ReaderInit(&reader, msg, len);
+    if(!WireParseHeader(&reader, &header) || header.anCount == 0)
+        return false;
+
+    for(uint16_t i = 0; i < header.qdCount; i++)
+    {
+        WireQuestion question;
+        if(!WireParseQuestion(&reader, &question))
+            return false;
+    }
+
+    for(uint16_t i = 0; i < header.anCount; i++)
+    {
+        WireRecord record;
+        if(!WireReadRecord(&reader, &record))
+            return false;
+
+        if(record.type != type || record.klass != WIRE_CLASS_IN
+           || record.rdLength != want)
+            continue;
+
+        if(record.rdOffset > len || len - record.rdOffset < want)
+            return false;
+
+        memcpy(addr, msg + record.rdOffset, want);
+        *addrLen = (uint8_t)want;
+        return true;
+    }
+
+    return false;
+}
