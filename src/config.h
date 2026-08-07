@@ -182,6 +182,7 @@
 #define CFG_FETCH_PATH_BYTES    1024
 #define CFG_FETCH_HEADER_BYTES  4096
 #define CFG_FETCH_MAX_REDIRECTS 4
+#define CFG_FETCH_REQUEST_BYTES 512
 
 /* Latency probing. A real answer times the selected upstream for free, so a
    probe only has to measure the others. One probe goes to one upstream on this

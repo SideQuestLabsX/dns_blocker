@@ -54,4 +54,86 @@ bool FetchStatusIsRedirect(unsigned status);
 bool FetchFindDigest(const uint8_t *data, size_t len, const char *assetName,
                      uint8_t digest[FETCH_DIGEST_BYTES]);
 
+#if defined(PROFILE_ENCRYPTED)
+
+#include "tls.h"
+
+#include <mbedtls/sha256.h>
+#include <sys/socket.h>
+
+typedef enum
+{
+    FetchState_Idle,
+    FetchState_Connect,
+    FetchState_Handshake,
+    FetchState_Write,
+    FetchState_ReadHeaders,
+    FetchState_ReadBody,
+    FetchState_Done
+} FetchState;
+
+typedef enum
+{
+    FetchStep_Again,
+    FetchStep_Done,
+    FetchStep_Redirect,
+    FetchStep_Failed
+} FetchStep;
+
+/* One transfer. The caller owns the storage and the staging descriptor, so
+   nothing here allocates. The body is written out as it arrives and hashed on
+   the way past, which is what keeps a 6.5MB trie off the heap and out of the
+   arena. */
+typedef struct
+{
+    TlsChannel channel;
+    FetchState state;
+    FetchUrl   url;
+
+    int      fd;
+    int      sink;
+    size_t   maxBody;
+    size_t   sent;
+    size_t   requestLen;
+    size_t   held;
+    size_t   bodyGot;
+    size_t   bodyExpected;
+    unsigned redirects;
+    unsigned status;
+
+    mbedtls_sha256_context sha;
+    bool bShaReady;
+
+    uint8_t request[CFG_FETCH_REQUEST_BYTES];
+    uint8_t buffer[CFG_FETCH_HEADER_BYTES];
+    char    location[CFG_FETCH_URL_BYTES];
+} FetchJob;
+
+/* `addr` is the resolved peer. Nothing in this file resolves a name, so the
+   caller decides how `url`'s host became an address. `sink` receives the body
+   and stays the caller's to close. */
+bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
+                const struct sockaddr_storage *addr, socklen_t addrLen,
+                int sink, size_t maxBody);
+
+/* Follows the redirect the last step reported, against a freshly resolved
+   address for `job->url.host`. Refuses once the hop count is spent. */
+bool FetchFollow(FetchJob *job, TlsBackend *backend,
+                 const struct sockaddr_storage *addr, socklen_t addrLen);
+
+short FetchEvents(const FetchJob *job);
+FetchStep FetchProgress(FetchJob *job);
+
+/* Valid after FetchStep_Redirect. Parsed already, so the caller resolves
+   `job->url.host` rather than re-reading the raw header. */
+const char *FetchRedirectHost(const FetchJob *job);
+
+/* Valid after FetchStep_Done. Covers the final body only, so redirect hops
+   never enter the hash. */
+bool FetchDigest(FetchJob *job, uint8_t out[FETCH_DIGEST_BYTES]);
+
+void FetchEnd(FetchJob *job);
+
+#endif
+
 #endif
