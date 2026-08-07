@@ -85,12 +85,25 @@ daemon's lookup and fails if anything it inserted does not match.
 
 Point `CFG_BLOCKLIST_PATH` at the result.
 
-The weekly workflow publishes dated blocklist releases. Each release contains
-the trie, `dns_blocker-blocklist.trie.sha256` and a manifest with each source URL,
-size, accepted-name count and SHA-256 digest.
+The weekly workflow publishes a dated release and republishes the same assets
+under the fixed tag `blocklist-latest`, so these URLs always serve the newest
+build:
 
-Download all three files into a staging directory on the same tmpfs as
-`CFG_BLOCKLIST_PATH`, then verify and install them:
+```text
+https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/<asset>
+```
+
+| Asset | Contents |
+|---|---|
+| `dns_blocker-blocklist.trie` | The compiled list the daemon maps |
+| `dns_blocker-blocklist.trie.sha256` | A digest for every other asset |
+| `dns_blocker-blocklist.sources` | Each source URL, size, accepted-name count and SHA-256 digest |
+| `dns_blocker-blocklist.domains.txt.gz` | The exact domain list the trie was compiled from |
+| `THIRD_PARTY_LICENSES.md` | The license terms the release carries |
+
+Download the whole release into a staging directory on the same tmpfs as
+`CFG_BLOCKLIST_PATH`, then verify and install it. The digest file names every
+asset, so `sha256sum -c` fails if any of them is missing:
 
 ```sh
 (cd /run/dns_blocker/update && sha256sum -c dns_blocker-blocklist.trie.sha256)

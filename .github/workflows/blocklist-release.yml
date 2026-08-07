@@ -47,3 +47,18 @@ jobs:
           gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" \
             --title "$title" --notes "$notes" --draft
           gh release edit "$tag" --draft=false --latest=false
+
+          # The daemon downloads from this fixed tag, so its asset URLs never
+          # change. Upload before edit, so a reader never sees the new notes
+          # against the old assets
+          stable="blocklist-latest"
+          stableNotes=$(printf '%s\n\n%s\n' \
+            "The current blocklist, republished every week. This tag is what the daemon downloads." \
+            "Immutable dated copy of this build: ${tag}")
+          if gh release view "$stable" >/dev/null 2>&1; then
+            gh release upload "$stable" "${assets[@]}" --clobber
+            gh release edit "$stable" --title "Blocklist (latest)" --notes "$stableNotes" --latest=false
+          else
+            gh release create "$stable" "${assets[@]}" --target "$GITHUB_SHA" \
+              --title "Blocklist (latest)" --notes "$stableNotes" --latest=false
+          fi
