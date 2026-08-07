@@ -343,6 +343,12 @@ static bool WriteAll(int fd, const uint8_t *data, size_t len)
     return true;
 }
 
+/* A request that does not fit is refused before the socket is opened, which
+   looks like a network failure and retries forever */
+_Static_assert(CFG_FETCH_REQUEST_BYTES
+               > CFG_FETCH_PATH_BYTES + CFG_FETCH_HOST_BYTES + 96,
+               "the request buffer must hold the longest path and host");
+
 static bool BuildRequest(FetchJob *job)
 {
     char host[CFG_FETCH_HOST_BYTES + 8];

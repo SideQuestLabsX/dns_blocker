@@ -175,8 +175,8 @@
 #define CFG_DOH_REQUEST_BYTES   512
 
 /* Blocklist download. The release redirects twice and lands on a signed CDN
-   URL of about 1.4KB, so the URL and header buffers are sized from that rather
-   than from a round number. The body never lands in memory. */
+   URL of about 1.4KB, so the URL and header buffers are sized from the measured
+   responses rather than from a round number. The body never lands in memory. */
 #ifndef CFG_BLOCKLIST_URL
   #define CFG_BLOCKLIST_URL "https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/dns_blocker-blocklist.trie"
 #endif
@@ -187,9 +187,12 @@
 #define CFG_FETCH_URL_BYTES     2048
 #define CFG_FETCH_HOST_BYTES    CFG_TLS_HOSTNAME_BYTES
 #define CFG_FETCH_PATH_BYTES    1024
-#define CFG_FETCH_HEADER_BYTES  4096
+/* Holds a whole header block, measured at 5191 bytes on github.com's 302: a
+   949-byte signed Location beside a 2KB Content-Security-Policy */
+#define CFG_FETCH_HEADER_BYTES  16384
 #define CFG_FETCH_MAX_REDIRECTS 4
-#define CFG_FETCH_REQUEST_BYTES 512
+/* Sized from the path and host caps. The signed CDN path is 905 bytes */
+#define CFG_FETCH_REQUEST_BYTES (CFG_FETCH_PATH_BYTES + CFG_FETCH_HOST_BYTES + 128)
 
 /* The published digest listing names every asset in the release, so this holds
    the whole file rather than one line. Four assets is 382 bytes today. */

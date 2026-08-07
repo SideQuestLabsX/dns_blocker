@@ -155,6 +155,54 @@ static void TestHeaders(void)
     CHECK(ParseText(longLocation, &headers, &headerEnd) == FetchParse_Failed);
 }
 
+/* github.com answers the download URL with a 5191-byte header block: a 949-byte
+   signed Location beside a 2KB Content-Security-Policy. The whole block has to
+   fit, or every redirect is refused. */
+#define GITHUB_REDIRECT_BYTES 5191
+
+static const char G_REDIRECT_PREFIX[] =
+    "Location: https://release-assets.githubusercontent.com/asset?sig=";
+static const char G_REDIRECT_TAIL[] = "\r\nContent-Length: 0\r\n\r\n";
+
+/* The block is built to a fixed size, so a smaller buffer would be written
+   past */
+_Static_assert(CFG_FETCH_HEADER_BYTES >= GITHUB_REDIRECT_BYTES,
+               "the header buffer must hold a measured github.com redirect");
+
+static void TestLargeRedirectHeader(void)
+{
+    static char  block[CFG_FETCH_HEADER_BYTES];
+    FetchHeaders headers;
+    size_t       headerEnd = 0;
+    size_t       at        = 0;
+    size_t       locationFill = 1300;
+
+    at += (size_t)snprintf(block, sizeof block, "HTTP/1.1 302 Found\r\n%s",
+                           G_REDIRECT_PREFIX);
+    memset(block + at, 'a', locationFill);
+    at += locationFill;
+
+    at += (size_t)snprintf(block + at, sizeof block - at,
+                           "\r\nContent-Security-Policy: ");
+
+    CHECK(at + sizeof G_REDIRECT_TAIL < GITHUB_REDIRECT_BYTES);
+    size_t policyFill = GITHUB_REDIRECT_BYTES - at - (sizeof G_REDIRECT_TAIL - 1);
+    memset(block + at, 'b', policyFill);
+    at += policyFill;
+
+    at += (size_t)snprintf(block + at, sizeof block - at, "%s", G_REDIRECT_TAIL);
+
+    CHECK(at == GITHUB_REDIRECT_BYTES);
+    CHECK(FetchParseHeaders((const uint8_t *)block, at, &headers, &headerEnd)
+          == FetchParse_Ok);
+    CHECK(headers.status == 302);
+    CHECK(strncmp(headers.location, G_REDIRECT_PREFIX + strlen("Location: "),
+                  sizeof G_REDIRECT_PREFIX - 1 - strlen("Location: ")) == 0);
+    CHECK(strlen(headers.location)
+          == sizeof G_REDIRECT_PREFIX - 1 - strlen("Location: ") + locationFill);
+    CHECK(headerEnd == at);
+}
+
 /* The real digest file names four assets. Picking the wrong line installs a
    trie that was never verified. */
 static const char G_DIGESTS[] =
@@ -222,6 +270,7 @@ int main(void)
 {
     TestUrl();
     TestHeaders();
+    TestLargeRedirectHeader();
     TestDigest();
 
     if(G_FAILURES != 0)
