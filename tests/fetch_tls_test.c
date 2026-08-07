@@ -249,6 +249,55 @@ static void TestBody(uint16_t port)
     FetchEnd(&job);
 }
 
+/* The digest listing is read, not stored, so it lands in memory. The real one
+   is 382 bytes across four asset lines. */
+static void TestMemorySink(uint16_t port)
+{
+    static const char listing[] =
+        "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  a.trie\n";
+
+    FetchJob job;
+    uint8_t  body[256];
+    uint8_t  digest[FETCH_DIGEST_BYTES];
+    struct sockaddr_storage addr;
+    socklen_t               addrLen = 0;
+
+    LoopbackAddress(&addr, &addrLen, port);
+
+    char head[64];
+    snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\n\r\n",
+             strlen(listing));
+
+    FakeReset();
+    G_READ_CHUNK = 7;
+    Script(head, listing, strlen(listing));
+    CHECK(FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
+                             addrLen, body, sizeof body));
+    CHECK(Drive(&job, 256) == FetchStep_Done);
+    CHECK(FetchBodyLength(&job) == strlen(listing));
+    CHECK(memcmp(body, listing, strlen(listing)) == 0);
+
+    /* The point of keeping it: the digest for the asset comes straight out */
+    CHECK(FetchFindDigest(body, FetchBodyLength(&job), "a.trie", digest));
+    CHECK(digest[0] == 0x58 && digest[31] == 0x03);
+    FetchEnd(&job);
+
+    /* A listing larger than the buffer is refused at the header, before any
+       byte is copied */
+    FakeReset();
+    Script("HTTP/1.1 200 OK\r\nContent-Length: 300\r\n\r\n", NULL, 0);
+    CHECK(FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
+                             addrLen, body, sizeof body));
+    CHECK(Drive(&job, 32) == FetchStep_Failed);
+    CHECK(FetchBodyLength(&job) == 0);
+    FetchEnd(&job);
+
+    CHECK(!FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
+                              addrLen, NULL, sizeof body));
+    CHECK(!FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
+                              addrLen, body, 0));
+}
+
 static void TestRefusals(uint16_t port)
 {
     FetchJob job;
@@ -382,6 +431,7 @@ int main(void)
     G_BACKEND.bReady = true;
 
     TestBody(port);
+    TestMemorySink(port);
     TestRefusals(port);
     TestRedirects(port);
     TestDigestGuard(port);

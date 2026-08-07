@@ -386,6 +386,7 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
     job->held         = 0;
     job->bodyGot      = 0;
     job->bodyExpected = 0;
+    job->memoryLen    = 0;
     job->status       = 0;
     job->channel.fd   = -1;
 
@@ -438,6 +439,26 @@ bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
     return Connect(job, backend, addr, addrLen);
 }
 
+bool FetchBeginToMemory(FetchJob *job, TlsBackend *backend, const char *url,
+                        const struct sockaddr_storage *addr, socklen_t addrLen,
+                        uint8_t *out, size_t cap)
+{
+    if(out == NULL || cap == 0)
+        return false;
+
+    if(!FetchBegin(job, backend, url, addr, addrLen, -1, cap))
+        return false;
+
+    job->memory    = out;
+    job->memoryLen = 0;
+    return true;
+}
+
+size_t FetchBodyLength(const FetchJob *job)
+{
+    return (job != NULL) ? job->memoryLen : 0;
+}
+
 bool FetchFollow(FetchJob *job, TlsBackend *backend,
                  const struct sockaddr_storage *addr, socklen_t addrLen)
 {
@@ -478,6 +499,14 @@ static FetchStep BodyBytes(FetchJob *job, const uint8_t *data, size_t len)
 
     if(job->sink >= 0 && !WriteAll(job->sink, data, len))
         return FetchStep_Failed;
+
+    if(job->memory != NULL)
+    {
+        if(len > job->maxBody - job->memoryLen)
+            return FetchStep_Failed;
+        memcpy(job->memory + job->memoryLen, data, len);
+        job->memoryLen += len;
+    }
 
     mbedtls_sha256_update(&job->sha, data, len);
     job->bodyGot += len;

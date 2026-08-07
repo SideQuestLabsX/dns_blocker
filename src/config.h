@@ -184,6 +184,11 @@
 #define CFG_FETCH_MAX_REDIRECTS 4
 #define CFG_FETCH_REQUEST_BYTES 512
 
+/* The published digest listing names every asset in the release, so this holds
+   the whole file rather than one line. Four assets is 382 bytes today. */
+#define CFG_SYNC_DIGEST_BYTES   2048
+#define CFG_SYNC_PATH_BYTES     256
+
 /* Latency probing. A real answer times the selected upstream for free, so a
    probe only has to measure the others. One probe goes to one upstream on this
    interval and the target rotates, which keeps an unselected resolver seeing a

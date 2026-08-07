@@ -190,7 +190,7 @@ TEST_CFLAGS := -std=c11 -O1 -g \
 	-Isrc
 
 ifeq ($(PROFILE),encrypted)
-  ENCRYPTED_TESTS := $(BUILD)/upstream_dot_test $(BUILD)/tls_backend_test $(BUILD)/fetch_tls_test
+  ENCRYPTED_TESTS := $(BUILD)/upstream_dot_test $(BUILD)/tls_backend_test $(BUILD)/fetch_tls_test $(BUILD)/sync_driver_test
 else
   ENCRYPTED_TESTS :=
 endif
@@ -213,6 +213,7 @@ ifeq ($(PROFILE),encrypted)
 	@$(BUILD)/upstream_dot_test
 	@$(BUILD)/tls_backend_test
 	@$(BUILD)/fetch_tls_test
+	@$(BUILD)/sync_driver_test
 endif
 
 $(BUILD)/wire_test: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
@@ -256,6 +257,11 @@ $(BUILD)/sync_test: tests/sync_test.c src/sync.c src/fetch.c $(HDR) | $(BUILD)
 # Drives the transfer states against scripted bytes. Links without src/tls.c,
 # so the test supplies the shim and no case needs a live peer
 $(BUILD)/fetch_tls_test: tests/fetch_tls_test.c src/fetch.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
+
+# Sequencing: the two transfers, the digest check and the install, driven by
+# scripted replies with the shim supplied by the test
+$(BUILD)/sync_driver_test: tests/sync_driver_test.c src/sync.c src/fetch.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
 
 $(BUILD)/upstream_dot_test: tests/upstream_dot_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)

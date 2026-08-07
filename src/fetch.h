@@ -92,6 +92,8 @@ typedef struct
 
     int      fd;
     int      sink;
+    uint8_t *memory;
+    size_t   memoryLen;
     size_t   maxBody;
     size_t   sent;
     size_t   requestLen;
@@ -115,6 +117,17 @@ typedef struct
 bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
                 const struct sockaddr_storage *addr, socklen_t addrLen,
                 int sink, size_t maxBody);
+
+/* Same transfer, with the body kept in `out` instead of written to a
+   descriptor. For the digest listing, which is a few hundred bytes. `maxBody`
+   becomes `cap`, so a larger response is refused at the header rather than
+   part-way through. */
+bool FetchBeginToMemory(FetchJob *job, TlsBackend *backend, const char *url,
+                        const struct sockaddr_storage *addr, socklen_t addrLen,
+                        uint8_t *out, size_t cap);
+
+/* Bytes written into the memory sink. Valid after FetchStep_Done. */
+size_t FetchBodyLength(const FetchJob *job);
 
 /* Follows the redirect the last step reported, against a freshly resolved
    address for `job->url.host`. Refuses once the hop count is spent. */
