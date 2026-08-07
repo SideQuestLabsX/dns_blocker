@@ -94,6 +94,10 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
                         socklen_t addrLen);
 
 short SyncEvents(const SyncJob *job);
+
+/* The descriptor the transfer is running on, or -1 when none is. Lets the
+   caller hand it to a poll loop it already owns. */
+int SyncFd(const SyncJob *job);
 SyncStep SyncProgress(SyncJob *job);
 void SyncEnd(SyncJob *job);
 

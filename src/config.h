@@ -196,6 +196,19 @@
 #define CFG_SYNC_DIGEST_BYTES   2048
 #define CFG_SYNC_PATH_BYTES     256
 
+/* The first attempt happens after the daemon is already serving, because the
+   clock may still be unstepped at boot and certificate validation needs it.
+   A failure backs off to the retry interval rather than the full period. */
+#ifndef CFG_SYNC_FIRST_MS
+  #define CFG_SYNC_FIRST_MS     (120u * 1000u)
+#endif
+#ifndef CFG_SYNC_PERIOD_MS
+  #define CFG_SYNC_PERIOD_MS    (6u * 3600u * 1000u)
+#endif
+#ifndef CFG_SYNC_RETRY_MS
+  #define CFG_SYNC_RETRY_MS     (15u * 60u * 1000u)
+#endif
+
 /* Latency probing. A real answer times the selected upstream for free, so a
    probe only has to measure the others. One probe goes to one upstream on this
    interval and the target rotates, which keeps an unselected resolver seeing a

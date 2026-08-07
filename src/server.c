@@ -105,6 +105,7 @@ bool ServerOpen(Server *server, Cache *cache, UpstreamPool *upstreams,
     server->blocklist      = blocklist;
     server->hosts          = hosts;
     server->nextGeneration = 1;
+    server->watchFd        = -1;
     server->fdUdp4         = -1;
     server->fdUdp6         = -1;
     server->fdTcp4         = -1;
@@ -429,6 +430,23 @@ bool ServerResolveTake(Server *server, uint8_t *addr, uint8_t *addrLen)
     server->resolveState = ServerResolve_Idle;
     server->resolveLen   = 0;
     return bFound;
+}
+
+void ServerWatch(Server *server, int fd, short events)
+{
+    if(server == NULL)
+        return;
+
+    server->watchFd     = fd;
+    server->watchEvents = events;
+
+    if(fd < 0)
+        server->bWatchReady = false;
+}
+
+bool ServerWatchReady(const Server *server)
+{
+    return server != NULL && server->bWatchReady;
 }
 
 void ServerResolveCancel(Server *server)
@@ -930,7 +948,7 @@ static void ProbeTick(Server *server, uint32_t nowMs)
 
 int ServerPoll(Server *server, int timeoutMs)
 {
-    struct pollfd waiting[5 + CFG_TCP_SLOTS + CFG_TX_SLOTS];
+    struct pollfd waiting[6 + CFG_TCP_SLOTS + CFG_TX_SLOTS];
     int           listeners[4] = { server->fdUdp4, server->fdUdp6,
                                    server->fdTcp4, server->fdTcp6 };
     size_t        connIndex[CFG_TCP_SLOTS];
@@ -999,6 +1017,17 @@ int ServerPoll(Server *server, int timeoutMs)
         count++;
     }
 
+    bool bWatching = server->watchFd >= 0 && server->watchEvents != 0;
+    server->bWatchReady = false;
+
+    if(bWatching)
+    {
+        waiting[count].fd      = server->watchFd;
+        waiting[count].events  = server->watchEvents;
+        waiting[count].revents = 0;
+        count++;
+    }
+
     /* Never sleep past the nearest deadline, or a timeout is only noticed when
        the next packet happens to arrive. */
     int wait = timeoutMs;
@@ -1062,7 +1091,13 @@ int ServerPoll(Server *server, int timeoutMs)
             continue;
         }
 
-        UpstreamPoolProbeReadable(server->upstreams, nowMs);
+        if(bProbing && after == txCount)
+        {
+            UpstreamPoolProbeReadable(server->upstreams, nowMs);
+            continue;
+        }
+
+        server->bWatchReady = true;
     }
 
     TxSweep(server, nowMs);

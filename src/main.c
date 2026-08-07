@@ -6,6 +6,7 @@
 #include "config.h"
 #include "hosts.h"
 #include "server.h"
+#include "sync.h"
 #include "tls.h"
 #include "upstream.h"
 
@@ -176,6 +177,120 @@ static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
     printf("\n");
 }
 
+#if defined(PROFILE_ENCRYPTED)
+
+/* Wiring only. Every branch below hands off to something tested on its own:
+   the driver sequences the transfers, the server resolves on its reserved slot
+   and the blocklist performs the swap. */
+typedef struct
+{
+    SyncJob     *job;
+    TlsBackend  *tls;
+    Server      *server;
+    Blocklist   *list;
+    const char  *path;
+    uint32_t     dueMs;
+    bool         bActive;
+} SyncRun;
+
+static bool SyncDue(uint32_t nowMs, uint32_t dueMs)
+{
+    return (int32_t)(nowMs - dueMs) >= 0;
+}
+
+static void SyncStop(SyncRun *run, uint32_t nowMs, uint32_t delayMs)
+{
+    SyncEnd(run->job);
+    ServerResolveCancel(run->server);
+    run->bActive = false;
+    run->dueMs   = nowMs + delayMs;
+}
+
+static void SyncTick(SyncRun *run, uint32_t nowMs)
+{
+    if(!run->bActive)
+    {
+        if(!SyncDue(nowMs, run->dueMs))
+            return;
+
+        if(!SyncBegin(run->job, run->tls, run->path))
+        {
+            run->dueMs = nowMs + CFG_SYNC_RETRY_MS;
+            return;
+        }
+
+        run->bActive = true;
+    }
+
+    SyncStep step = SyncProgress(run->job);
+
+    if(step == SyncStep_NeedAddress)
+    {
+        switch(ServerResolveCheck(run->server))
+        {
+            case ServerResolve_Idle:
+                if(!ServerResolveBegin(run->server, SyncHost(run->job),
+                                       WIRE_TYPE_A))
+                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                break;
+
+            case ServerResolve_Ready:
+            {
+                uint8_t   addr[16];
+                uint8_t   addrLen = 0;
+                struct sockaddr_in v4;
+                struct sockaddr_storage peer;
+
+                if(!ServerResolveTake(run->server, addr, &addrLen)
+                   || addrLen != 4)
+                {
+                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                    break;
+                }
+
+                memset(&v4, 0, sizeof v4);
+                v4.sin_family = AF_INET;
+                v4.sin_port   = htons(443);
+                memcpy(&v4.sin_addr, addr, 4);
+
+                memset(&peer, 0, sizeof peer);
+                memcpy(&peer, &v4, sizeof v4);
+
+                if(!SyncProvideAddress(run->job, &peer, sizeof v4))
+                    SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                break;
+            }
+
+            case ServerResolve_Failed:
+                ServerResolveCancel(run->server);
+                SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+                break;
+
+            case ServerResolve_Waiting:
+                break;
+        }
+
+        return;
+    }
+
+    if(step == SyncStep_Done)
+    {
+        if(BlocklistReload(run->list, run->path))
+            fprintf(stderr, "sync: installed %zu bytes\n", run->list->size);
+        else
+            fputs("sync: the installed list did not map, keeping the old one\n",
+                  stderr);
+
+        SyncStop(run, nowMs, CFG_SYNC_PERIOD_MS);
+        return;
+    }
+
+    if(step == SyncStep_Failed)
+        SyncStop(run, nowMs, CFG_SYNC_RETRY_MS);
+}
+
+#endif
+
 int main(void)
 {
     Memory    mem;
@@ -308,14 +423,31 @@ int main(void)
     printf("listening on port %d\n", CFG_DNS_PORT);
     fflush(stdout);
 
+#if defined(PROFILE_ENCRYPTED)
+    SyncJob  sync;
+    SyncRun  run = { &sync, &tls, &server, &list, CFG_BLOCKLIST_PATH,
+                     ServerNowMilliseconds() + CFG_SYNC_FIRST_MS, false };
+#endif
+
     while(!G_STOP)
     {
+#if defined(PROFILE_ENCRYPTED)
+        SyncTick(&run, ServerNowMilliseconds());
+        ServerWatch(&server, run.bActive ? SyncFd(&sync) : -1,
+                    run.bActive ? SyncEvents(&sync) : 0);
+#endif
+
         if(ServerPoll(&server, 1000) < 0)
         {
             fputs("dns_blocker: poll failed\n", stderr);
             break;
         }
     }
+
+#if defined(PROFILE_ENCRYPTED)
+    if(run.bActive)
+        SyncEnd(&sync);
+#endif
 
     uint64_t rejected = 0;
     for(size_t i = 0; i < upstreams.count; i++)

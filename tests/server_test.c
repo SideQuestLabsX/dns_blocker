@@ -12,6 +12,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -993,6 +994,66 @@ static void TestInternalLookupTimeoutFailsSoft(void)
     FixtureDown(&fix);
 }
 
+/* A background transfer shares this poll loop rather than running its own, so
+   the loop has to report a descriptor it knows nothing about. */
+static void TestWatchedDescriptor(void)
+{
+    Fixture fix;
+    int     pair[2];
+    uint8_t query[512];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        printf("SKIP watch: cannot bind test ports\n");
+        return;
+    }
+
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0);
+
+    ServerWatch(&fix.server, pair[0], POLLIN);
+    CHECK(!ServerWatchReady(&fix.server));
+
+    /* Nothing written yet, so a poll that times out reports nothing ready */
+    PumpBriefly(&fix.server, 1);
+    CHECK(!ServerWatchReady(&fix.server));
+
+    CHECK(write(pair[1], "x", 1) == 1);
+    PumpBriefly(&fix.server, 1);
+    CHECK(ServerWatchReady(&fix.server));
+
+    /* Readiness is per poll, not sticky. A stale flag would spin the caller */
+    char drained[4];
+    CHECK(read(pair[0], drained, sizeof drained) == 1);
+    PumpBriefly(&fix.server, 1);
+    CHECK(!ServerWatchReady(&fix.server));
+
+    /* Client traffic still flows while a descriptor is watched. The watch is
+       left idle here on purpose: a descriptor that is always ready returns
+       poll immediately every pass, which is the caller's job to consume. */
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    size_t len = BuildQuery(query, sizeof query, 0x777, "a.example.com",
+                            WIRE_TYPE_A);
+    send(client, query, len, 0);
+    PumpBriefly(&fix.server, 5);
+
+    uint8_t reply[2048];
+    CHECK(recv(client, reply, sizeof reply, MSG_DONTWAIT) > 0);
+    CHECK(!ServerWatchReady(&fix.server));
+    close(client);
+
+    ServerWatch(&fix.server, -1, 0);
+    CHECK(!ServerWatchReady(&fix.server));
+    PumpBriefly(&fix.server, 1);
+    CHECK(!ServerWatchReady(&fix.server));
+
+    /* The server never closed it, because it does not own it */
+    CHECK(write(pair[1], "z", 1) == 1);
+
+    close(pair[0]);
+    close(pair[1]);
+    FixtureDown(&fix);
+}
+
 static void TestResolveRefusals(void)
 {
     Fixture fix;
@@ -1373,6 +1434,7 @@ int main(void)
     TestReservedSlotSurvivesAFlood();
     TestInternalLookupAnswer();
     TestInternalLookupTimeoutFailsSoft();
+    TestWatchedDescriptor();
     TestResolveRefusals();
     TestTcpClientVanishingMidQuery();
     TestBlockedNameIsRefusedLocally();

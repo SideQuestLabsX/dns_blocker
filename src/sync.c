@@ -188,6 +188,14 @@ short SyncEvents(const SyncJob *job)
     return FetchEvents(&job->job);
 }
 
+int SyncFd(const SyncJob *job)
+{
+    if(job == NULL || job->state != SyncState_Transfer)
+        return -1;
+
+    return job->job.fd;
+}
+
 static SyncStep FinishDigest(SyncJob *job)
 {
     if(!FetchFindDigest(job->digestText, FetchBodyLength(&job->job),

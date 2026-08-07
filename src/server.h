@@ -86,6 +86,13 @@ typedef struct
 
     uint32_t nextGeneration;
 
+    /* One descriptor the caller wants polled alongside the listeners, so a
+       background transfer shares this loop instead of running its own. The
+       server never reads, writes or closes it. */
+    int   watchFd;
+    short watchEvents;
+    bool  bWatchReady;
+
     /* The reserved slot's answer lands here rather than on a socket */
     ServerResolveState resolveState;
     uint16_t           resolveType;
@@ -139,6 +146,13 @@ ServerResolveState ServerResolveCheck(const Server *server);
 bool ServerResolveTake(Server *server, uint8_t *addr, uint8_t *addrLen);
 
 void ServerResolveCancel(Server *server);
+
+/* Adds one descriptor to the next poll. Pass -1 to stop watching. The server
+   reports readiness and nothing else: the owner does the reading. */
+void ServerWatch(Server *server, int fd, short events);
+
+/* True when the watched descriptor was ready during the last poll. */
+bool ServerWatchReady(const Server *server);
 
 uint32_t ServerNowSeconds(void);
 uint32_t ServerNowMilliseconds(void);
