@@ -195,7 +195,7 @@ else
   ENCRYPTED_TESTS :=
 endif
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -204,6 +204,7 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/listline_test
 	@$(BUILD)/hosts_test
 	@$(BUILD)/upstream_test
+	@$(BUILD)/fetch_test
 	@$(BUILD)/server_test
 	@$(BUILD)/tls_test
 	@$(BUILD)/fuzz_quick 50000
@@ -240,6 +241,11 @@ $(BUILD)/hosts_test: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR
 $(BUILD)/upstream_test: tests/upstream_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
+# The release response parser. Attacker-controlled bytes, so it is tested apart
+# from the socket that delivers them
+$(BUILD)/fetch_test: tests/fetch_test.c src/fetch.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
 $(BUILD)/upstream_dot_test: tests/upstream_dot_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@
 
@@ -256,7 +262,7 @@ $(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is
 # the only way the byte-wise field reads get exercised on real ARM
-XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native
+XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native $(BUILD)/fetch_test_native
 
 ifeq ($(PROFILE),encrypted)
   XTEST += $(BUILD)/upstream_dot_test_native $(BUILD)/tls_backend_test_native
@@ -283,6 +289,9 @@ $(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/hosts_test_native: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/fetch_test_native: tests/fetch_test.c src/fetch.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/upstream_dot_test_native: tests/upstream_dot_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)

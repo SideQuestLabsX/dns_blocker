@@ -167,6 +167,22 @@
 #define CFG_DOH_HEADER_BYTES    1024
 #define CFG_DOH_REQUEST_BYTES   512
 
+/* Blocklist download. The release redirects twice and lands on a signed CDN
+   URL of about 1.4KB, so the URL and header buffers are sized from that rather
+   than from a round number. The body never lands in memory. */
+#ifndef CFG_BLOCKLIST_URL
+  #define CFG_BLOCKLIST_URL "https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/dns_blocker-blocklist.trie"
+#endif
+#ifndef CFG_BLOCKLIST_DIGEST_URL
+  #define CFG_BLOCKLIST_DIGEST_URL "https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/dns_blocker-blocklist.trie.sha256"
+#endif
+#define CFG_BLOCKLIST_ASSET     "dns_blocker-blocklist.trie"
+#define CFG_FETCH_URL_BYTES     2048
+#define CFG_FETCH_HOST_BYTES    CFG_TLS_HOSTNAME_BYTES
+#define CFG_FETCH_PATH_BYTES    1024
+#define CFG_FETCH_HEADER_BYTES  4096
+#define CFG_FETCH_MAX_REDIRECTS 4
+
 /* Latency probing. A real answer times the selected upstream for free, so a
    probe only has to measure the others. One probe goes to one upstream on this
    interval and the target rotates, which keeps an unselected resolver seeing a
