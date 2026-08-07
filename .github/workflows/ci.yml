@@ -160,4 +160,6 @@ jobs:
           name: dns_blocker-${{ matrix.arch }}
           path: |
             build/${{ matrix.arch }}-minimal/dns_blocker
+            build/${{ matrix.arch }}-minimal/THIRD_PARTY_LICENSES.md
             build/${{ matrix.arch }}-encrypted/dns_blocker
+            build/${{ matrix.arch }}-encrypted/THIRD_PARTY_LICENSES.md

@@ -8,6 +8,9 @@ combined="$outputDir/combined.txt"
 asset="$outputDir/dns_blocker-blocklist.trie"
 checksum="$outputDir/dns_blocker-blocklist.trie.sha256"
 manifest="$outputDir/dns_blocker-blocklist.sources"
+# GPL-3.0 sources require the compiler input beside the compiled trie
+domains="$outputDir/dns_blocker-blocklist.domains.txt.gz"
+licenses="$outputDir/THIRD_PARTY_LICENSES.md"
 
 mkdir -p "$outputDir/sources"
 : > "$combined"
@@ -85,12 +88,16 @@ if [ "$count" -eq 0 ]; then
 fi
 
 "$mkblocklist" "$asset" "$combined"
-digest=$(sha256sum "$asset")
-digest=${digest%% *}
-printf '%s  dns_blocker-blocklist.trie\n' "$digest" > "$checksum"
-digest=$(sha256sum "$manifest")
-digest=${digest%% *}
-printf '%s  dns_blocker-blocklist.sources\n' "$digest" >> "$checksum"
+gzip -9 -c "$combined" > "$domains"
+cp THIRD_PARTY_LICENSES.md "$licenses"
+
+: > "$checksum"
+for published in dns_blocker-blocklist.trie dns_blocker-blocklist.sources \
+    dns_blocker-blocklist.domains.txt.gz THIRD_PARTY_LICENSES.md
+do
+    digest=$(sha256sum "$outputDir/$published")
+    printf '%s  %s\n' "${digest%% *}" "$published" >> "$checksum"
+done
 (cd "$outputDir" && sha256sum -c dns_blocker-blocklist.trie.sha256)
 
 printf 'blocklist release: %s source(s), %s\n' "$count" "$asset"

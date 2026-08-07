@@ -32,11 +32,16 @@ jobs:
         run: |
           tag="blocklist-$(date -u +%Y-%m-%d)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           title="Blocklist $(date -u +%Y-%m-%d)"
-          notes="Compiled from blocklists/sources.txt at ${GITHUB_SHA}."
+          notes=$(printf '%s\n\n%s %s\n' \
+            "Compiled from blocklists/sources.txt at ${GITHUB_SHA}." \
+            "Two upstream sources are GPL-3.0, so the trie is a combined work" \
+            "under GPL-3.0. dns_blocker-blocklist.domains.txt.gz is its corresponding source. See THIRD_PARTY_LICENSES.md.")
           assets=(
             build/blocklist-release/dns_blocker-blocklist.trie
             build/blocklist-release/dns_blocker-blocklist.trie.sha256
             build/blocklist-release/dns_blocker-blocklist.sources
+            build/blocklist-release/dns_blocker-blocklist.domains.txt.gz
+            build/blocklist-release/THIRD_PARTY_LICENSES.md
           )
 
           gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" \

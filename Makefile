@@ -76,6 +76,10 @@ else
   $(error Unknown PROFILE '$(PROFILE)'. Use: minimal | encrypted)
 endif
 
+# Apache-2.0 4(a) and the MIT notice clause: a recipient of the binary gets the
+# license text
+LICENSE_FILES := $(BUILD)/THIRD_PARTY_LICENSES.md
+
 # Off by default on purpose
 # FEATURES += -DFEATURE_DGA_FILTER=1
 # FEATURES += -DFEATURE_IO_URING=1     # opt-in only, pulls in liburing
@@ -121,11 +125,14 @@ HDR := $(wildcard src/*.h)
 .PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick mbedtls
 all: $(TARGET)
 
-$(TARGET): $(OBJ) $(TLS_DEPS) | $(TLS_CHECK)
+$(TARGET): $(OBJ) $(TLS_DEPS) | $(LICENSE_FILES) $(TLS_CHECK)
 	@test -n "$(strip $(SRC))" || { echo "No sources in src/ yet"; exit 1; }
 	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LIBS)
 	$(call assert_static,$@)
 	@echo "built $@"
+
+$(BUILD)/THIRD_PARTY_LICENSES.md: THIRD_PARTY_LICENSES.md | $(BUILD)
+	cp $< $@
 
 mbedtls: $(MBEDTLS_MARKER)
 	@if [ ! -f "$(MBEDTLS_SOURCE_DIR)/include/mbedtls/ssl.h" ] \

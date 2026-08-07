@@ -270,4 +270,8 @@ on each other, and `dns_blocker` also runs under systemd or from a shell.
 
 ## License
 
-[The Unlicense](LICENSE). Public domain.
+The source in this repository is [The Unlicense](LICENSE), public domain.
+
+The published artifacts also contain third party work.
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) holds the full text of every
+license involved.
