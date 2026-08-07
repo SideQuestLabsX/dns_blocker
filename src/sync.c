@@ -2,9 +2,11 @@
 
 #include "sync.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>   /* rename(2) */
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static const char G_SUFFIX[] = ".new";
@@ -28,6 +30,35 @@ bool SyncStagingPath(char *out, size_t cap, const char *path)
     memcpy(out, path, len);
     memcpy(out + len, G_SUFFIX, sizeof G_SUFFIX);
     return true;
+}
+
+bool SyncPrepareDirectory(const char *path)
+{
+    if(path == NULL)
+        return false;
+
+    size_t cut = 0;
+    for(size_t i = 0; path[i] != '\0'; i++)
+    {
+        if(path[i] == '/')
+            cut = i;
+    }
+
+    /* A bare filename or a file at the root has no directory to make */
+    if(cut == 0)
+        return true;
+
+    char dir[CFG_SYNC_PATH_BYTES];
+    if(cut >= sizeof dir)
+        return false;
+
+    memcpy(dir, path, cut);
+    dir[cut] = '\0';
+
+    if(mkdir(dir, 0750) == 0)
+        return true;
+
+    return errno == EEXIST;
 }
 
 int SyncOpenStaging(const char *stagingPath)

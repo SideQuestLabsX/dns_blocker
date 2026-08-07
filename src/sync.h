@@ -23,6 +23,11 @@ typedef enum
    because rename(2) across filesystems fails. */
 bool SyncStagingPath(char *out, size_t cap, const char *path);
 
+/* Makes the directory `path` lives in. Nothing else creates it: `init` has no
+   tmpfiles facility, and a tmpfs loses it at every boot. True when the
+   directory is already there. */
+bool SyncPrepareDirectory(const char *path);
+
 /* Truncates any staging file left by an interrupted run. */
 int SyncOpenStaging(const char *stagingPath);
 

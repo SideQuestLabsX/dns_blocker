@@ -276,6 +276,101 @@ container on that target's instruction set and runs the tests there. An x86
 test cannot find an unaligned access fault on ARM1176. `ci/build.sh` runs the
 same containers locally and needs docker with qemu binfmt handlers.
 
+## Install
+
+The daemon makes `/run/dns_blocker` at start-up when its account may write to
+`/run`. The directory holds the synced list and the staging file that is renamed
+onto it, and a tmpfs loses it at every boot.
+
+### Under `init`
+
+[`init`](https://github.com/SideQuestLabsX/init) runs the daemon as a generic
+task. Install the binary as an `always` task, and the health probe beside it
+under the name the supervisor expects:
+
+```sh
+install -Dm755 build/armv6-encrypted/dns_blocker /tasks/always/dns_blocker
+install -Dm755 build/armv6-encrypted/dns_blocker.check /tasks/always/dns_blocker.check
+install -dm755 /etc/dns_blocker
+```
+
+Port 53 and the query stream are per-task settings in `init`'s `config.h`:
+
+```c
+static const TaskRule TASK_RULES[] =
+{
+    /* bit 10 is CAP_NET_BIND_SERVICE */
+    { .name = "dns_blocker", .uid = 65534, .capMask = CAP_BIT(10),
+      .flags = RULE_CRITICAL, .outPolicy = LOGP_DROP },
+    { .name = NULL },
+};
+```
+
+`capMask` is retained across `execve`, so the daemon binds port 53 without
+root. `outPolicy = LOGP_DROP` discards `stdout`, which carries one line per
+answered query and names every domain every device resolved. `stderr` keeps the
+shipped route and carries the operational messages. The probe runs with the
+task's identity and capabilities, so it needs no entry of its own.
+
+`RULE_CRITICAL` gates the hardware watchdog, so a device whose only purpose is
+DNS reboots when this task stays unhealthy. Leave the flag out where the device
+does other work.
+
+A task rule with a `uid` also decides who owns the runtime directory. The
+daemon creates `/run/dns_blocker` at start-up only where its own account may
+write to `/run`, which for an unprivileged `uid` means a `boot` task creates it
+first:
+
+```sh
+#!/bin/sh
+mkdir -p /run/dns_blocker
+chown 65534:65534 /run/dns_blocker
+chmod 0750 /run/dns_blocker
+```
+
+Without the directory the daemon still resolves and filters. Only the blocklist
+sync fails, and it says so on `stderr`.
+
+### Under systemd
+
+`deploy/dns_blocker.service` runs the daemon under systemd 247 or later. Put the
+binary and the runtime files where the unit expects them:
+
+```sh
+sudo install -Dm755 build/x86_64-encrypted/dns_blocker /usr/local/sbin/dns_blocker
+sudo install -Dm644 deploy/dns_blocker.service /etc/systemd/system/dns_blocker.service
+sudo install -dm755 /etc/dns_blocker
+sudo systemctl enable --now dns_blocker
+```
+
+The encrypted profile also needs the DER trust bundle at
+`/etc/dns_blocker/ca.der`. Local names go in `/etc/dns_blocker/hosts`, and the
+daemon starts without that file.
+
+| Question | Answer |
+|---|---|
+| Which account | `DynamicUser=yes`. There is no account to create |
+| Port 53 without root | `AmbientCapabilities=CAP_NET_BIND_SERVICE` |
+| Who makes `/run/dns_blocker` | `RuntimeDirectory=dns_blocker`, owned by the service |
+| The synced list after a restart | Kept, through `RuntimeDirectoryPreserve=yes` |
+| The synced list after a reboot | Gone with the tmpfs, so the embedded list filters until the next sync |
+
+The unit sends `stdout` to `/dev/null`, because it carries one line per answered
+query and names every domain every device resolved. Set
+`StandardOutput=journal` to keep that stream, or build with
+`FEATURE_QUERY_LOG=0` to remove it from the binary. `stderr` carries the
+operational messages and goes to the journal either way.
+
+To run the daemon by hand instead, create `/run/dns_blocker` yourself and give
+the binary the capability once:
+
+```sh
+sudo setcap cap_net_bind_service=+ep /usr/local/sbin/dns_blocker
+```
+
+[`init`](https://github.com/SideQuestLabsX/init) supervises the daemon as a
+generic task and needs none of this.
+
 ## Health probe
 
 `make check` builds `dns_blocker.check`. This small companion program resolves

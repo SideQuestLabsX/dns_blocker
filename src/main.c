@@ -411,6 +411,13 @@ int main(void)
         return EXIT_FAILURE;
     }
 
+    /* The list lives on a tmpfs that starts empty, and no supervisor here makes
+       the directory. Filtering fails open, so a refusal is reported and the
+       daemon serves anyway */
+    if(CFG_BLOCKLIST_PATH != NULL && !SyncPrepareDirectory(CFG_BLOCKLIST_PATH))
+        fprintf(stderr, "dns_blocker: cannot make the directory for %s\n",
+                CFG_BLOCKLIST_PATH);
+
     if(!BlocklistLoad(&list, CFG_BLOCKLIST_PATH))
         fputs("dns_blocker: no blocklist available, filtering is disabled\n", stderr);
 

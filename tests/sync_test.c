@@ -79,6 +79,41 @@ static void TestStagingPath(void)
                            "/run/dns_blocker/blocklist.trie"));
 }
 
+/* Under `init` nothing else makes this directory, and a tmpfs loses it at every
+   boot, so the daemon has to make it and has to tolerate finding it. */
+static void TestPrepareDirectory(const char *dir)
+{
+    char made[256];
+    char nested[256];
+    struct stat info;
+
+    snprintf(made, sizeof made, "%s/made/blocklist.trie", dir);
+    CHECK(SyncPrepareDirectory(made));
+    CHECK(SyncPrepareDirectory(made));
+
+    snprintf(nested, sizeof nested, "%s/made", dir);
+    CHECK(stat(nested, &info) == 0);
+    CHECK(S_ISDIR(info.st_mode));
+    CHECK(rmdir(nested) == 0);
+
+    /* One level only, so a missing parent is a refusal rather than a walk */
+    snprintf(nested, sizeof nested, "%s/absent/deeper/blocklist.trie", dir);
+    CHECK(!SyncPrepareDirectory(nested));
+
+    /* Nothing to make */
+    CHECK(SyncPrepareDirectory("blocklist.trie"));
+    CHECK(SyncPrepareDirectory("/blocklist.trie"));
+
+    CHECK(!SyncPrepareDirectory(NULL));
+
+    char oversize[CFG_SYNC_PATH_BYTES + 16];
+    memset(oversize, 'a', sizeof oversize);
+    oversize[0]                    = '/';
+    oversize[sizeof oversize - 8]  = '/';
+    oversize[sizeof oversize - 1]  = '\0';
+    CHECK(!SyncPrepareDirectory(oversize));
+}
+
 static void TestCommitPromotes(const char *dir)
 {
     char target[256];
@@ -242,6 +277,7 @@ int main(void)
     }
 
     TestStagingPath();
+    TestPrepareDirectory(dir);
     TestCommitPromotes(dir);
     TestCommitRefusesMismatch(dir);
     TestCommitWithNoTarget(dir);
