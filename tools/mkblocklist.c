@@ -212,9 +212,11 @@ static void PutU32(uint8_t *at, uint32_t value)
     at[3] = (uint8_t)((value >> 24) & 0xFFu);
 }
 
+/* The FNV constants need 64 bits. In a size_t they truncate on a 32-bit build
+   host, which still hashes but no longer as FNV */
 static size_t HashLabel(const char *label)
 {
-    size_t hash = 1469598103934665603u;
+    uint64_t hash = 1469598103934665603u;
 
     for(const char *c = label; *c != '\0'; c++)
     {
@@ -222,7 +224,7 @@ static size_t HashLabel(const char *label)
         hash *= 1099511628211u;
     }
 
-    return hash;
+    return (size_t)hash;
 }
 
 static uint32_t PoolAdd(Output *out, const char *label)
@@ -351,13 +353,13 @@ static void DafsaAppend(DafsaState *state, uint8_t symbol, bool bTerminal,
    mark rides on the transition rather than on the state */
 static size_t DafsaHash(const DafsaState *state)
 {
-    size_t hash = 1469598103934665603u;
+    uint64_t hash = 1469598103934665603u;
 
     for(size_t i = 0; i < state->count; i++)
     {
-        size_t parts[3] = { state->edges[i].symbol,
-                            (size_t)state->edges[i].bTerminal,
-                            (size_t)(uintptr_t)state->edges[i].target };
+        uint64_t parts[3] = { state->edges[i].symbol,
+                              (uint64_t)state->edges[i].bTerminal,
+                              (uint64_t)(uintptr_t)state->edges[i].target };
 
         for(size_t p = 0; p < 3; p++)
         {
@@ -366,7 +368,7 @@ static size_t DafsaHash(const DafsaState *state)
         }
     }
 
-    return hash;
+    return (size_t)hash;
 }
 
 static bool DafsaEqual(const DafsaState *a, const DafsaState *b)

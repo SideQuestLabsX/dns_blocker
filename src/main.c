@@ -363,6 +363,11 @@ int main(int argc, char **argv)
     TrustMap   trust;
 #endif
 
+    /* stdio blocks output whenever stdout is not a terminal, which is every
+       supervised deployment. A query stream that arrives 4KB at a time is late,
+       and whatever is still buffered dies with the process */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     signal(SIGTERM, OnSignal);
     signal(SIGINT, OnSignal);
     signal(SIGPIPE, SIG_IGN);
