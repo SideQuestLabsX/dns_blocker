@@ -482,6 +482,122 @@ static void TestUdpQueryIsForwardedAndAnswered(void)
     FixtureDown(&fix);
 }
 
+/* Puts a query into the table exactly as a deferral leaves it: owned by a real
+   client, never sent anywhere, waiting for a channel. A plaintext pool has no
+   channels to exhaust, so the state is built rather than provoked. */
+static bool HoldQuery(Fixture *fix, int client, const uint8_t *query,
+                      size_t queryLen, uint16_t id, uint32_t deadlineMs)
+{
+    struct sockaddr_in local;
+    socklen_t          localLen = sizeof local;
+
+    if(getsockname(client, (struct sockaddr *)&local, &localLen) != 0)
+        return false;
+
+    Transaction *tx = &fix->server.transactions[0];
+
+    memset(tx, 0, sizeof *tx);
+    memcpy(tx->query, query, queryLen);
+    tx->queryLen   = (uint16_t)queryLen;
+    tx->pool       = &fix->upstreams;
+    tx->clientId   = id;
+    tx->advertised = CFG_UDP_MSG_BYTES;
+    tx->attempts   = 1;
+    tx->bActive    = true;
+    tx->bWaiting   = true;
+    tx->deadlineMs = deadlineMs;
+
+    tx->client.bOverTcp = false;
+    tx->client.listenFd = fix->server.fdUdp4;
+    tx->client.fromLen  = localLen;
+    memcpy(&tx->client.from, &local, localLen);
+
+    fix->server.deferred++;
+    return true;
+}
+
+/* Every encrypted channel busy is capacity, not failure. The query waits for a
+   channel and is sent when one frees, because a client tolerates latency far
+   better than SERVFAIL. */
+static void TestHeldQueryIsSentWhenAChannelFrees(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        fprintf(G_OUT, "SKIP deferral: cannot bind test ports\n");
+        return;
+    }
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0xD1CE,
+                                 "a.example.com", WIRE_TYPE_A);
+    CHECK(HoldQuery(&fix, client, query, queryLen, 0xD1CE,
+                    ServerNowMilliseconds() + 5000));
+
+    Pump(&fix.server, 6);
+
+    CHECK(!fix.server.transactions[0].bWaiting);
+    CHECK(fix.server.forwarded == 1);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        CHECK(MsgId(reply, (size_t)got) == 0xD1CE);
+        CHECK((reply[3] & 0x0F) == MSG_RCODE_NOERROR);
+    }
+
+    close(client);
+    FixtureDown(&fix);
+}
+
+/* A query that waited out its deadline without ever reaching a resolver gets
+   SERVFAIL, and no resolver is marked for it. Blaming one would take a healthy
+   upstream out of service because this box was busy. */
+static void TestHeldQueryTimesOutWithoutBlamingAnUpstream(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        fprintf(G_OUT, "SKIP deferral timeout: cannot bind test ports\n");
+        return;
+    }
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0xD00D,
+                                 "a.example.com", WIRE_TYPE_A);
+    uint64_t failuresBefore = fix.upstreams.members[0].failures;
+
+    CHECK(HoldQuery(&fix, client, query, queryLen, 0xD00D,
+                    ServerNowMilliseconds() - 1));
+
+    Pump(&fix.server, 4);
+
+    CHECK(!fix.server.transactions[0].bActive);
+    CHECK(fix.upstreams.members[0].failures == failuresBefore);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        CHECK(MsgId(reply, (size_t)got) == 0xD00D);
+        CHECK((reply[3] & 0x0F) == MSG_RCODE_SERVFAIL);
+    }
+
+    close(client);
+    FixtureDown(&fix);
+}
+
 static void TestSecondQueryIsACacheHit(void)
 {
     Fixture fix;
@@ -1507,6 +1623,8 @@ int main(void)
         return 1;
 
     TestUdpQueryIsForwardedAndAnswered();
+    TestHeldQueryIsSentWhenAChannelFrees();
+    TestHeldQueryTimesOutWithoutBlamingAnUpstream();
     TestSecondQueryIsACacheHit();
     TestTcpQuery();
     TestOversizedUdpAnswerSetsTruncated();

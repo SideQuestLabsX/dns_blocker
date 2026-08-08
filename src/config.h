@@ -13,19 +13,20 @@
    The blocklist has its own mapping, because a compiled list gives its size at
    boot. See blocklist.h. The supervisor owns output routing, so the daemon
    writes lines and keeps no log buffer. */
-#define ARENA_TOTAL_BYTES       KIB(2080)
+#define ARENA_TOTAL_BYTES       KIB(2272)
 #define ARENA_CACHE_BYTES       KIB(1536)
 #define ARENA_TXTABLE_BYTES     KIB(128)
 #define ARENA_CONN_BYTES        KIB(192)
 #define ARENA_HOSTS_BYTES       KIB(32)
 
 #if defined(PROFILE_ENCRYPTED)
-  /* Backs MBEDTLS_MEMORY_BUFFER_ALLOC_C so the TLS stack never reaches libc. */
-  #define ARENA_TLS_BYTES       KIB(192)
+  /* Backs MBEDTLS_MEMORY_BUFFER_ALLOC_C so the TLS stack never reaches libc.
+     64KB a channel, so this follows CFG_TLS_SLOTS */
+  #define ARENA_TLS_BYTES       KIB(384)
   #define ARENA_SPARE_BYTES     KIB(0)
 #else
   #define ARENA_TLS_BYTES       KIB(0)
-  #define ARENA_SPARE_BYTES     KIB(192)
+  #define ARENA_SPARE_BYTES     KIB(384)
 #endif
 
 /* Blocklist. Mapped separately from the arena at boot and sized from the
@@ -189,8 +190,13 @@
 #endif
 #define CFG_MAX_UPSTREAMS       4
 
-/* Three TLS channels keep their record buffers within ARENA_TLS_BYTES */
-#define CFG_TLS_SLOTS           3
+/* Every exchange opens its own channel, so a slot is held for a whole
+   handshake: 350 to 430ms measured on ARM1176. Three slots capped the board
+   under ten queries a second and refused 14% of a real LAN's traffic, because
+   one device waking up asks for six names at once. Six slots and the queue in
+   server.c cover that burst. The record buffers have to stay within
+   ARENA_TLS_BYTES, which is sized alongside this. */
+#define CFG_TLS_SLOTS           6
 #define CFG_TLS_HOSTNAME_BYTES  128
 #define CFG_DOH_PATH_BYTES      64
 #define CFG_DOH_HEADER_BYTES    1024

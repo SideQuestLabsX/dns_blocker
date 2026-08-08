@@ -24,7 +24,9 @@
    reader works against every build. */
 
 #define STATUS_MAGIC   "DBS1"
-#define STATUS_VERSION 1u
+/* 2 added the deferred counter. A reader refuses a version it does not know
+   rather than reading the wrong offsets */
+#define STATUS_VERSION 2u
 
 typedef struct
 {
@@ -75,6 +77,7 @@ typedef struct
     uint64_t refusedConnections;
     uint64_t evictedTransactions;
     uint64_t retries;
+    uint64_t deferred;
 
     uint64_t cacheHits;
     uint64_t cacheMisses;

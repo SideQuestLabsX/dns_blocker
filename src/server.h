@@ -53,6 +53,9 @@ typedef struct
     /* The daemon's own lookup rather than a client's. Its answer goes to the
        internal buffer, and no reply is ever written to a socket. */
     bool             bInternal;
+    /* Held because every encrypted channel was busy, not yet sent anywhere.
+       The exchange is untouched, so nothing here may be blamed on a resolver */
+    bool             bWaiting;
     uint16_t         queryLen;
     uint8_t          query[CFG_TX_QUERY_BYTES];
 } Transaction;
@@ -114,6 +117,9 @@ typedef struct
     uint64_t retries;
     uint64_t blocked;
     uint64_t local;
+    /* Queries held for a free encrypted channel. A client waits for one of
+       these rather than being refused, so a rising count is latency, not loss */
+    uint64_t deferred;
 } Server;
 
 /* Binds UDP and TCP on the port, for IPv4 and IPv6. IPv4 is required. The

@@ -150,6 +150,7 @@ void StatusPublish(Status *status, const Server *server, const Cache *cache,
         block->refusedConnections  = server->refusedConnections;
         block->evictedTransactions = server->evictedTransactions;
         block->retries             = server->retries;
+        block->deferred            = server->deferred;
     }
 
     if(cache != NULL)
@@ -261,6 +262,8 @@ void StatusPrint(const StatusBlock *block, FILE *out)
             (unsigned long long)block->refusedConnections,
             (unsigned long long)block->evictedTransactions,
             (unsigned long long)block->retries);
+    fprintf(out, "deferred    %llu, waited for a free encrypted channel\n",
+            (unsigned long long)block->deferred);
     fprintf(out, "cache       hits %llu, misses %llu, inserts %llu, "
                  "evictions %llu, refused %llu\n",
             (unsigned long long)block->cacheHits,

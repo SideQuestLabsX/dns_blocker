@@ -192,6 +192,7 @@ static void TxRelease(Transaction *tx)
     tx->pool      = NULL;
     tx->bActive   = false;
     tx->bInternal = false;
+    tx->bWaiting  = false;
 }
 
 void ServerClose(Server *server)
@@ -356,6 +357,7 @@ static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
     tx->attempts      = 1;
     tx->bActive       = true;
     tx->bInternal     = false;
+    tx->bWaiting      = false;
 
     UpstreamStart result = TxSend(tx);
     while(result == UpstreamStart_Failed
@@ -366,6 +368,16 @@ static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
         tx->attempts++;
         server->retries++;
         result = TxSend(tx);
+    }
+
+    /* Every channel is busy. The resolvers are fine, this box is at capacity,
+       and a client would rather wait for a channel than be told SERVFAIL */
+    if(result == UpstreamStart_Busy)
+    {
+        tx->bWaiting   = true;
+        tx->deadlineMs = ServerNowMilliseconds() + CFG_UPSTREAM_TIMEOUT_MS;
+        server->deferred++;
+        return true;
     }
 
     if(result != UpstreamStart_Started)
@@ -379,6 +391,37 @@ static bool TxStart(Server *server, UpstreamPool *pool, const uint8_t *query,
 
     server->forwarded++;
     return true;
+}
+
+/* A channel was released, so the queries that could not have one are tried
+   again, oldest slot first. Nothing here blames a resolver: a held query never
+   reached one. */
+static void TxDrain(Server *server, uint32_t nowMs)
+{
+    for(size_t i = 0; i < CFG_TX_CLIENT_SLOTS; i++)
+    {
+        Transaction *tx = &server->transactions[i];
+
+        if(!tx->bActive || !tx->bWaiting)
+            continue;
+
+        UpstreamStart result = TxSend(tx);
+        if(result == UpstreamStart_Busy)
+            return;
+
+        tx->bWaiting = false;
+
+        if(result == UpstreamStart_Started)
+        {
+            server->forwarded++;
+            continue;
+        }
+
+        if(result == UpstreamStart_Failed)
+            UpstreamPoolFail(tx->pool, tx->exchange.index, nowMs);
+
+        Fail(server, tx, MSG_RCODE_SERVFAIL);
+    }
 }
 
 bool ServerResolveBegin(Server *server, const char *hostname, uint16_t type)
@@ -409,6 +452,7 @@ bool ServerResolveBegin(Server *server, const char *hostname, uint16_t type)
     tx->attempts      = 1;
     tx->bActive       = true;
     tx->bInternal     = true;
+    tx->bWaiting      = false;
     memset(&tx->client, 0, sizeof tx->client);
 
     server->resolveType  = type;
@@ -590,6 +634,15 @@ static void TxSweep(Server *server, uint32_t nowMs)
 
         if(!tx->bActive || !Elapsed(nowMs, tx->deadlineMs))
             continue;
+
+        /* Waited for a channel and never got one. No resolver was involved, so
+           there is nothing to retry and nobody to hold responsible */
+        if(tx->bWaiting)
+        {
+            tx->bWaiting = false;
+            Fail(server, tx, MSG_RCODE_SERVFAIL);
+            continue;
+        }
 
         (void)TxRetry(server, tx, nowMs);
     }
@@ -1158,6 +1211,7 @@ int ServerPoll(Server *server, int timeoutMs)
     }
 
     TxSweep(server, nowMs);
+    TxDrain(server, nowMs);
     ProbeTick(server, nowMs);
 
     for(size_t i = 0; i < CFG_TCP_SLOTS; i++)
