@@ -313,7 +313,7 @@ static void TestDohCarriesItsPath(void)
    a sweep would do. */
 static void ProbeForget(UpstreamPool *pool)
 {
-    UpstreamEnd(&pool->probe);
+    UpstreamEnd(&pool->probe, NOW);
     pool->bProbing = false;
 }
 

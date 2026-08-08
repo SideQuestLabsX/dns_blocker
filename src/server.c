@@ -188,7 +188,7 @@ static uint16_t RcodeOf(const uint8_t *msg, size_t len)
 
 static void TxRelease(Transaction *tx)
 {
-    UpstreamEnd(&tx->exchange);
+    UpstreamEnd(&tx->exchange, ServerNowMilliseconds());
     tx->pool      = NULL;
     tx->bActive   = false;
     tx->bInternal = false;
@@ -214,10 +214,17 @@ void ServerClose(Server *server)
             TxRelease(&server->transactions[i]);
     }
 
-    if(server->upstreams != NULL && server->upstreams->bProbing)
+    if(server->upstreams != NULL)
     {
-        UpstreamEnd(&server->upstreams->probe);
-        server->upstreams->bProbing = false;
+        if(server->upstreams->bProbing)
+        {
+            UpstreamEnd(&server->upstreams->probe, ServerNowMilliseconds());
+            server->upstreams->bProbing = false;
+        }
+
+        /* The transactions above released their channels rather than closing
+           them, which is the point of holding one open */
+        UpstreamPoolCloseChannels(server->upstreams);
     }
 
     if(server->conns == NULL)
@@ -314,6 +321,15 @@ static Transaction *TxAcquire(Server *server)
     return oldest;
 }
 
+/* A query on an inherited channel waits a fraction of the full timeout, because
+   the channel may be dead with nothing said by either side and the answer to
+   that is a fresh channel rather than more waiting. */
+static uint32_t TxTimeoutMs(const Transaction *tx)
+{
+    return UpstreamExchangeReusedIdle(&tx->exchange)
+         ? CFG_TLS_REUSE_TIMEOUT_MS : CFG_UPSTREAM_TIMEOUT_MS;
+}
+
 static UpstreamStart TxSend(Transaction *tx)
 {
     uint32_t nowMs = ServerNowMilliseconds();
@@ -334,7 +350,7 @@ static UpstreamStart TxSend(Transaction *tx)
     if(result != UpstreamStart_Started)
         return result;
 
-    tx->deadlineMs = nowMs + CFG_UPSTREAM_TIMEOUT_MS;
+    tx->deadlineMs = nowMs + TxTimeoutMs(tx);
     return UpstreamStart_Started;
 }
 
@@ -589,7 +605,7 @@ static bool TxRetry(Server *server, Transaction *tx, uint32_t nowMs)
 
     while(tx->attempts <= CFG_UPSTREAM_RETRIES)
     {
-        UpstreamEnd(&tx->exchange);
+        UpstreamEnd(&tx->exchange, nowMs);
         tx->attempts++;
         server->retries++;
 
@@ -606,6 +622,35 @@ static bool TxRetry(Server *server, Transaction *tx, uint32_t nowMs)
     return false;
 }
 
+/* The channel was open from an earlier query and the server had already closed
+   it. Nothing failed, so the same query goes to the same upstream on a fresh
+   channel: no failure is recorded and the retry budget is untouched. */
+static void TxResend(Server *server, Transaction *tx, uint32_t nowMs)
+{
+    size_t index = tx->exchange.index;
+
+    UpstreamEnd(&tx->exchange, nowMs);
+
+    UpstreamStart result = UpstreamBegin(tx->pool, index, tx->query,
+                                         tx->queryLen, nowMs, &tx->exchange);
+
+    if(result == UpstreamStart_Started)
+    {
+        tx->deadlineMs = nowMs + TxTimeoutMs(tx);
+        return;
+    }
+
+    if(result == UpstreamStart_Busy)
+    {
+        tx->bWaiting   = true;
+        tx->deadlineMs = nowMs + CFG_UPSTREAM_TIMEOUT_MS;
+        server->deferred++;
+        return;
+    }
+
+    (void)TxRetry(server, tx, nowMs);
+}
+
 static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
 {
     uint8_t reply[CFG_TCP_MSG_BYTES];
@@ -614,6 +659,12 @@ static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
     UpstreamRead got = UpstreamComplete(tx->pool, &tx->exchange, nowMs,
                                         reply, sizeof reply, &replyLen);
 
+    if(got == UpstreamRead_Stale)
+    {
+        TxResend(server, tx, nowMs);
+        return;
+    }
+
     if(got == UpstreamRead_Failed)
     {
         (void)TxRetry(server, tx, nowMs);
@@ -621,7 +672,19 @@ static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
     }
 
     if(got != UpstreamRead_Answer)
+    {
+        /* Something came back, so the channel is alive and this query is only
+           slow. It earns the full timeout here rather than the short one an
+           inherited channel starts with. Extends only: the deadline of a query
+           that is waiting for a channel is not this exchange's to move */
+        uint32_t full = tx->exchange.sentMs + CFG_UPSTREAM_TIMEOUT_MS;
+
+        if(!UpstreamExchangeReusedIdle(&tx->exchange)
+           && (int32_t)(full - tx->deadlineMs) > 0)
+            tx->deadlineMs = full;
+
         return;
+    }
 
     TxFinish(server, tx, reply, replyLen);
 }
@@ -641,6 +704,14 @@ static void TxSweep(Server *server, uint32_t nowMs)
         {
             tx->bWaiting = false;
             Fail(server, tx, MSG_RCODE_SERVFAIL);
+            continue;
+        }
+
+        /* An inherited channel that said nothing at all, which a dropped NAT
+           mapping looks exactly like. The resolver never saw the query */
+        if(UpstreamExchangeReusedIdle(&tx->exchange))
+        {
+            TxResend(server, tx, nowMs);
             continue;
         }
 
@@ -1058,11 +1129,13 @@ static void ProbeTick(Server *server, uint32_t nowMs)
 
 int ServerPoll(Server *server, int timeoutMs)
 {
-    struct pollfd waiting[6 + CFG_TCP_SLOTS + CFG_TX_SLOTS];
+    struct pollfd waiting[6 + CFG_TCP_SLOTS + CFG_TX_SLOTS + CFG_TLS_SLOTS];
     int           listeners[4] = { server->fdUdp4, server->fdUdp6,
                                    server->fdTcp4, server->fdTcp6 };
     size_t        connIndex[CFG_TCP_SLOTS];
     size_t        txIndex[CFG_TX_SLOTS];
+    size_t        idleSlot[CFG_TLS_SLOTS];
+    int           idleFd[CFG_TLS_SLOTS];
     nfds_t        count = 0;
 
     for(size_t i = 0; i < 4; i++)
@@ -1127,6 +1200,19 @@ int ServerPoll(Server *server, int timeoutMs)
         count++;
     }
 
+    /* Held open for the next query to the same resolver. Nothing is in flight on
+       one, so anything readable is the server hanging up and the channel goes */
+    size_t idleCount = UpstreamPoolIdleChannels(server->upstreams, idleSlot,
+                                                idleFd, CFG_TLS_SLOTS);
+
+    for(size_t i = 0; i < idleCount; i++)
+    {
+        waiting[count].fd      = idleFd[i];
+        waiting[count].events  = POLLIN | POLLRDHUP;
+        waiting[count].revents = 0;
+        count++;
+    }
+
     bool bWatching = server->watchFd >= 0 && server->watchEvents != 0;
     server->bWatchReady = false;
 
@@ -1143,6 +1229,11 @@ int ServerPoll(Server *server, int timeoutMs)
     int wait = timeoutMs;
     if((txCount > 0 || bProbing) && (wait < 0 || wait > CFG_UPSTREAM_TIMEOUT_MS))
         wait = CFG_UPSTREAM_TIMEOUT_MS;
+
+    /* An idle channel has to be closed near its own timeout, or this side stops
+       being the one that hangs up first */
+    if(idleCount > 0 && (wait < 0 || wait > 1000))
+        wait = 1000;
 
     int ready = poll(waiting, count, wait);
     if(ready < 0)
@@ -1207,9 +1298,18 @@ int ServerPoll(Server *server, int timeoutMs)
             continue;
         }
 
+        size_t idleAt = after - txCount - (bProbing ? 1u : 0u);
+
+        if(idleAt < idleCount)
+        {
+            UpstreamPoolIdleClose(server->upstreams, idleSlot[idleAt]);
+            continue;
+        }
+
         server->bWatchReady = true;
     }
 
+    UpstreamPoolIdleSweep(server->upstreams, nowMs);
     TxSweep(server, nowMs);
     TxDrain(server, nowMs);
     ProbeTick(server, nowMs);

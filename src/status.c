@@ -153,6 +153,13 @@ void StatusPublish(Status *status, const Server *server, const Cache *cache,
         block->deferred            = server->deferred;
     }
 
+    if(pool != NULL)
+    {
+        block->channelOpens  = pool->channelOpens;
+        block->channelReuses = pool->channelReuses;
+        block->channelStale  = pool->channelStale;
+    }
+
     if(cache != NULL)
     {
         block->cacheHits      = cache->hits;
@@ -264,6 +271,10 @@ void StatusPrint(const StatusBlock *block, FILE *out)
             (unsigned long long)block->retries);
     fprintf(out, "deferred    %llu, waited for a free encrypted channel\n",
             (unsigned long long)block->deferred);
+    fprintf(out, "channels    opened %llu, reused %llu, stale %llu\n",
+            (unsigned long long)block->channelOpens,
+            (unsigned long long)block->channelReuses,
+            (unsigned long long)block->channelStale);
     fprintf(out, "cache       hits %llu, misses %llu, inserts %llu, "
                  "evictions %llu, refused %llu\n",
             (unsigned long long)block->cacheHits,

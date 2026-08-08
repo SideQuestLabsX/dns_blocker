@@ -63,6 +63,9 @@ typedef enum
     DohState_ExpectClose
 } DotState;
 
+/* One channel. A slot is free, bound to an exchange, or open and idle against
+   the upstream it was dialled for, which is what takes the handshake off every
+   query after the first. */
 typedef struct
 {
     TlsChannel channel;
@@ -71,7 +74,18 @@ typedef struct
     size_t     got;
     size_t     requestLen;
     size_t     responseLen;
+    size_t     member;
+    uint32_t   idleUntilMs;
     bool       bUsed;
+    /* Open with no exchange on it. Nothing may be in flight, because a reader
+       that finds bytes on an idle channel treats them as the server hanging up */
+    bool       bOpen;
+    /* This exchange started on an already-open channel, so a failure before the
+       first response byte is the server having closed it rather than a fault */
+    bool       bReused;
+    bool       bAnswered;
+    /* Cleared by a Connection: close in the response, and by the reuse switch */
+    bool       bKeepOpen;
     /* The peer answered, with an HTTP status this client cannot use. A refusal
        is permanent until the server changes, unlike a timeout */
     bool       bRefused;
@@ -123,6 +137,12 @@ typedef struct UpstreamPool
 
     uint64_t probesSent;
     uint64_t probeFailures;
+
+    uint64_t channelOpens;
+    uint64_t channelReuses;
+    /* Reused channels the server had already closed. Latency, not loss: the
+       query goes out again on a fresh one */
+    uint64_t channelStale;
 } UpstreamPool;
 
 void UpstreamPoolInit(UpstreamPool *pool, uint32_t nowMs);
@@ -190,6 +210,11 @@ typedef enum
     UpstreamRead_Answer,
     UpstreamRead_Again,
     UpstreamRead_Empty,
+    /* A reused channel died before it answered anything. No resolver failed, so
+       the caller ends the exchange and sends the same query to the same upstream
+       on a fresh channel. Only a reused channel returns this, so one exchange
+       cannot produce it twice */
+    UpstreamRead_Stale,
     UpstreamRead_Failed
 } UpstreamRead;
 
@@ -198,6 +223,30 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
                                uint32_t nowMs, uint8_t *out, size_t cap,
                                size_t *outLen);
 
-void UpstreamEnd(UpstreamExchange *exchange);
+/* True while an exchange sits on a channel it inherited and nothing has come
+   back on it. A timeout there describes the channel rather than the resolver, so
+   the caller resends instead of retrying, and it can time out sooner than a
+   query that had to handshake. */
+bool UpstreamExchangeReusedIdle(const UpstreamExchange *exchange);
+
+/* Keeps the channel open for the next query to the same upstream when the
+   exchange answered and neither side asked to close, and closes it otherwise.
+   A reused channel that answered nothing takes the rest of that upstream's held
+   channels with it: they are dead for the same reason, and each would cost a
+   query to discover. nowMs starts the idle timeout. */
+void UpstreamEnd(UpstreamExchange *exchange, uint32_t nowMs);
+
+/* Open channels no exchange holds. The caller polls them for readability, which
+   on an idle channel means the server hung up, and closes those it reports. The
+   pool owns the descriptors: never read, write or close one. */
+size_t UpstreamPoolIdleChannels(const UpstreamPool *pool, size_t *slots,
+                                int *fds, size_t cap);
+void UpstreamPoolIdleClose(UpstreamPool *pool, size_t slot);
+
+/* Closes the channels whose idle timeout has passed, so this side hangs up
+   before the server does. */
+void UpstreamPoolIdleSweep(UpstreamPool *pool, uint32_t nowMs);
+
+void UpstreamPoolCloseChannels(UpstreamPool *pool);
 
 #endif

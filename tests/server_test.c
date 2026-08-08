@@ -497,6 +497,9 @@ static bool HoldQuery(Fixture *fix, int client, const uint8_t *query,
     Transaction *tx = &fix->server.transactions[0];
 
     memset(tx, 0, sizeof *tx);
+    /* A real deferral never reached a resolver, so it holds no descriptor.
+       Zero is stdin, and leaving it there puts stdin in the daemon's poll set */
+    tx->exchange.fd = -1;
     memcpy(tx->query, query, queryLen);
     tx->queryLen   = (uint16_t)queryLen;
     tx->pool       = &fix->upstreams;

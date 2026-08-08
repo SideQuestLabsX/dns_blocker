@@ -87,6 +87,13 @@ void UpstreamPoolInit(UpstreamPool *pool, uint32_t nowMs)
     for(size_t i = 0; i < CFG_MAX_UPSTREAMS; i++)
         pool->members[i].srttMs = UPSTREAM_RTT_NONE;
 
+#if defined(PROFILE_ENCRYPTED)
+    /* A zeroed descriptor is stdin, and a slot that is closed without ever
+       having been dialled would take it down with it */
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+        pool->tlsSlots[i].channel.fd = -1;
+#endif
+
     pool->probe.fd        = -1;
     pool->probe.tlsSlot   = UPSTREAM_NONE;
     pool->probeDeadlineMs = nowMs + CFG_UPSTREAM_PROBE_MS;
@@ -364,7 +371,7 @@ void UpstreamPoolProbeReadable(UpstreamPool *pool, uint32_t nowMs)
         UpstreamPoolFail(pool, pool->probe.index, nowMs);
     }
 
-    UpstreamEnd(&pool->probe);
+    UpstreamEnd(&pool->probe, nowMs);
     pool->bProbing = false;
 }
 
@@ -376,7 +383,7 @@ void UpstreamPoolProbeSweep(UpstreamPool *pool, uint32_t nowMs)
     pool->probeFailures++;
     UpstreamPoolFail(pool, pool->probe.index, nowMs);
 
-    UpstreamEnd(&pool->probe);
+    UpstreamEnd(&pool->probe, nowMs);
     pool->bProbing = false;
 }
 
@@ -424,19 +431,76 @@ static bool BeginPlaintext(Upstream *member, const uint8_t *sent,
 }
 
 #if defined(PROFILE_ENCRYPTED)
-static size_t AcquireTlsSlot(UpstreamPool *pool)
+static void SlotClose(UpstreamTlsSlot *slot)
 {
+    TlsChannelClose(&slot->channel);
+    memset(slot, 0, sizeof *slot);
+    slot->channel.fd = -1;
+}
+
+/* Three passes, in the order that costs least. An open channel to the same
+   upstream is the handshake this exists to skip, so it wins wherever it sits in
+   the array. Then a free slot. Then the idle channel nearest its own timeout,
+   which is what keeps capacity at CFG_TLS_SLOTS concurrent exchanges however
+   many channels are held open. */
+static size_t AcquireTlsSlot(UpstreamPool *pool, size_t member)
+{
+    size_t spare = UPSTREAM_NONE;
+
+#if CFG_TLS_REUSE
     for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
     {
-        if(!pool->tlsSlots[i].bUsed)
+        UpstreamTlsSlot *slot = &pool->tlsSlots[i];
+
+        if(!slot->bUsed && slot->bOpen && slot->member == member)
         {
-            pool->tlsSlots[i].bUsed     = true;
-            pool->tlsSlots[i].bRefused  = false;
+            slot->bUsed   = true;
+            slot->bOpen   = false;
+            slot->bReused = true;
             return i;
         }
     }
+#endif
 
-    return UPSTREAM_NONE;
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        UpstreamTlsSlot *slot = &pool->tlsSlots[i];
+
+        if(slot->bUsed)
+            continue;
+
+        if(!slot->bOpen)
+        {
+            slot->bUsed   = true;
+            slot->bReused = false;
+            return i;
+        }
+
+        if(spare == UPSTREAM_NONE
+           || (int32_t)(slot->idleUntilMs
+                        - pool->tlsSlots[spare].idleUntilMs) < 0)
+            spare = i;
+    }
+
+    if(spare == UPSTREAM_NONE)
+        return UPSTREAM_NONE;
+
+    SlotClose(&pool->tlsSlots[spare]);
+    pool->tlsSlots[spare].bUsed = true;
+    return spare;
+}
+
+/* The server closed one channel to this upstream, so the others it holds open
+   are closed for the same reason and would each cost a query to discover. */
+static void DropIdleChannels(UpstreamPool *pool, size_t member)
+{
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        UpstreamTlsSlot *slot = &pool->tlsSlots[i];
+
+        if(!slot->bUsed && slot->bOpen && slot->member == member)
+            SlotClose(slot);
+    }
 }
 
 static bool BuildTlsRequest(UpstreamTlsSlot *slot, const Upstream *member,
@@ -472,8 +536,9 @@ static bool BuildTlsRequest(UpstreamTlsSlot *slot, const Upstream *member,
                              "Accept: application/dns-message\r\n"
                              "Content-Type: application/dns-message\r\n"
                              "Content-Length: %zu\r\n"
-                             "Connection: close\r\n\r\n",
-                             member->path, host, queryLen);
+                             "Connection: %s\r\n\r\n",
+                             member->path, host, queryLen,
+                             CFG_TLS_REUSE ? "keep-alive" : "close");
     if(headerLen <= 0 || (size_t)headerLen >= CFG_DOH_REQUEST_BYTES
        || (size_t)headerLen + queryLen > sizeof slot->query)
         return false;
@@ -484,27 +549,45 @@ static bool BuildTlsRequest(UpstreamTlsSlot *slot, const Upstream *member,
     return true;
 }
 
-static UpstreamStart BeginTls(UpstreamPool *pool, Upstream *member,
-                              const uint8_t *sent, size_t queryLen,
-                              UpstreamExchange *exchange)
+static UpstreamStart BeginTls(UpstreamPool *pool, size_t index,
+                              Upstream *member, const uint8_t *sent,
+                              size_t queryLen, UpstreamExchange *exchange)
 {
     if(pool->tls == NULL || !pool->tls->bReady
        || queryLen > CFG_TX_QUERY_BYTES)
         return UpstreamStart_Failed;
 
-    size_t slotIndex = AcquireTlsSlot(pool);
+    size_t slotIndex = AcquireTlsSlot(pool, index);
     if(slotIndex == UPSTREAM_NONE)
         return UpstreamStart_Busy;
 
     UpstreamTlsSlot *slot = &pool->tlsSlots[slotIndex];
-    slot->channel.fd = -1;
+    bool bReused     = slot->bReused;
     slot->state      = DotState_Connect;
     slot->sent       = 0;
     slot->got        = 0;
     slot->requestLen = 0;
     slot->responseLen = 0;
+    slot->member     = index;
+    slot->bAnswered  = false;
+    slot->bRefused   = false;
+    slot->bKeepOpen  = CFG_TLS_REUSE != 0;
+
     if(!BuildTlsRequest(slot, member, sent, queryLen))
         goto fail;
+
+    /* The handshake this whole feature exists to skip */
+    if(bReused)
+    {
+        slot->state        = DotState_Write;
+        slot->channel.want = TlsIo_WantWrite;
+        exchange->fd       = slot->channel.fd;
+        exchange->tlsSlot  = slotIndex;
+        pool->channelReuses++;
+        return UpstreamStart_Started;
+    }
+
+    slot->channel.fd = -1;
 
     int fd = socket(member->addr.ss_family,
                     SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -531,11 +614,11 @@ static UpstreamStart BeginTls(UpstreamPool *pool, Upstream *member,
 
     exchange->fd      = fd;
     exchange->tlsSlot = slotIndex;
+    pool->channelOpens++;
     return UpstreamStart_Started;
 
 fail:
-    memset(slot, 0, sizeof *slot);
-    slot->channel.fd = -1;
+    SlotClose(slot);
     return UpstreamStart_Failed;
 }
 #endif
@@ -571,7 +654,7 @@ UpstreamStart UpstreamBegin(UpstreamPool *pool, size_t index,
 #if defined(PROFILE_ENCRYPTED)
     else if(member->transport == UpstreamTransport_Dot
             || member->transport == UpstreamTransport_Doh)
-        result = BeginTls(pool, member, sent, queryLen, exchange);
+        result = BeginTls(pool, index, member, sent, queryLen, exchange);
 #endif
 
     if(result != UpstreamStart_Started)
@@ -623,6 +706,23 @@ static bool EqualHeader(const uint8_t *data, size_t len, const char *expected)
     }
 
     return true;
+}
+
+/* A Connection value is a token list and only close matters here, so a
+   case-insensitive substring is enough: a false match costs a channel, never an
+   answer. */
+static bool HeaderHasClose(const uint8_t *data, size_t len)
+{
+    static const char token[] = "close";
+    size_t            tokenLen = sizeof token - 1;
+
+    for(size_t i = 0; i + tokenLen <= len; i++)
+    {
+        if(EqualHeader(data + i, tokenLen, token))
+            return true;
+    }
+
+    return false;
 }
 
 static size_t FindCrlf(const uint8_t *data, size_t from, size_t len)
@@ -729,6 +829,11 @@ static bool ParseDohHeaders(UpstreamTlsSlot *slot, size_t headerEnd, size_t cap)
         {
             return false;
         }
+        else if(EqualHeader(slot->response + at, colon - at, "connection"))
+        {
+            if(HeaderHasClose(slot->response + valueAt, valueEnd - valueAt))
+                slot->bKeepOpen = false;
+        }
 
         at = lineEnd + 2;
     }
@@ -747,6 +852,14 @@ static bool ParseDohHeaders(UpstreamTlsSlot *slot, size_t headerEnd, size_t cap)
     slot->responseLen = contentLength;
     slot->state       = DohState_ReadBody;
     return true;
+}
+
+/* A reused channel that dies before its first response byte is the server having
+   closed an idle connection, which is ordinary. Anything else is a fault. */
+static UpstreamRead TlsFail(const UpstreamTlsSlot *slot)
+{
+    return (slot->bReused && slot->got == 0) ? UpstreamRead_Stale
+                                             : UpstreamRead_Failed;
 }
 
 static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
@@ -787,7 +900,7 @@ static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
         if(wrote == TlsIo_WantRead || wrote == TlsIo_WantWrite)
             return UpstreamRead_Again;
         if(wrote <= 0)
-            return UpstreamRead_Failed;
+            return TlsFail(slot);
 
         slot->sent += (size_t)wrote;
         if(slot->sent < slot->requestLen)
@@ -809,7 +922,7 @@ static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
         if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
             return UpstreamRead_Again;
         if(got <= 0)
-            return UpstreamRead_Failed;
+            return TlsFail(slot);
 
         slot->got += (size_t)got;
         if(slot->got < 2)
@@ -840,6 +953,7 @@ static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
 
         memcpy(out, slot->response + 2, slot->responseLen);
         *outLen = slot->responseLen;
+        slot->bAnswered = true;
         return UpstreamRead_Answer;
     }
 
@@ -854,7 +968,7 @@ static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
         if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
             return UpstreamRead_Again;
         if(got <= 0)
-            return UpstreamRead_Failed;
+            return TlsFail(slot);
 
         slot->got += (size_t)got;
         size_t headerEnd = SIZE_MAX;
@@ -890,6 +1004,17 @@ static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
 
         if(slot->got < slot->responseLen)
             return UpstreamRead_Again;
+
+        slot->bAnswered = true;
+
+        /* Content-Length ends the message, so a channel that is staying open
+           answers here. Waiting for a close would be waiting forever */
+        if(slot->bKeepOpen)
+        {
+            memcpy(out, slot->response, slot->responseLen);
+            *outLen = slot->responseLen;
+            return UpstreamRead_Answer;
+        }
 
         slot->state = DohState_ExpectClose;
     }
@@ -982,8 +1107,12 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
     return UpstreamRead_Answer;
 }
 
-void UpstreamEnd(UpstreamExchange *exchange)
+void UpstreamEnd(UpstreamExchange *exchange, uint32_t nowMs)
 {
+#if !defined(PROFILE_ENCRYPTED)
+    (void)nowMs;
+#endif
+
     if((exchange->transport == UpstreamTransport_Dot
         || exchange->transport == UpstreamTransport_Doh)
        && exchange->pool != NULL)
@@ -992,9 +1121,33 @@ void UpstreamEnd(UpstreamExchange *exchange)
         if(exchange->tlsSlot < CFG_TLS_SLOTS)
         {
             UpstreamTlsSlot *slot = &exchange->pool->tlsSlots[exchange->tlsSlot];
-            TlsChannelClose(&slot->channel);
-            memset(slot, 0, sizeof *slot);
-            slot->channel.fd = -1;
+
+            /* Only a channel that carried a whole answer is worth keeping.
+               Anything else is a channel of unknown state, and reusing one of
+               those spends a client's query finding out */
+            if(slot->bAnswered && slot->bKeepOpen)
+            {
+                slot->bUsed       = false;
+                slot->bOpen       = true;
+                slot->bReused     = false;
+                slot->idleUntilMs = nowMs + CFG_TLS_IDLE_MS;
+            }
+            else
+            {
+                /* Inherited and answered nothing. Counted here rather than at
+                   the read, because a channel dropped by a middlebox says
+                   nothing at all and only ever ends on a timeout */
+                bool   bDead  = slot->bReused && !slot->bAnswered;
+                size_t member = slot->member;
+
+                SlotClose(slot);
+
+                if(bDead)
+                {
+                    exchange->pool->channelStale++;
+                    DropIdleChannels(exchange->pool, member);
+                }
+            }
         }
 #endif
     }
@@ -1006,4 +1159,90 @@ void UpstreamEnd(UpstreamExchange *exchange)
     exchange->fd      = -1;
     exchange->tlsSlot = UPSTREAM_NONE;
     exchange->pool    = NULL;
+}
+
+bool UpstreamExchangeReusedIdle(const UpstreamExchange *exchange)
+{
+#if defined(PROFILE_ENCRYPTED)
+    if(exchange == NULL || exchange->pool == NULL
+       || exchange->tlsSlot >= CFG_TLS_SLOTS)
+        return false;
+
+    const UpstreamTlsSlot *slot = &exchange->pool->tlsSlots[exchange->tlsSlot];
+    return slot->bReused && slot->got == 0;
+#else
+    (void)exchange;
+    return false;
+#endif
+}
+
+size_t UpstreamPoolIdleChannels(const UpstreamPool *pool, size_t *slots,
+                                int *fds, size_t cap)
+{
+    size_t count = 0;
+
+#if defined(PROFILE_ENCRYPTED)
+    for(size_t i = 0; i < CFG_TLS_SLOTS && count < cap; i++)
+    {
+        const UpstreamTlsSlot *slot = &pool->tlsSlots[i];
+
+        if(slot->bUsed || !slot->bOpen || slot->channel.fd < 0)
+            continue;
+
+        slots[count] = i;
+        fds[count]   = slot->channel.fd;
+        count++;
+    }
+#else
+    (void)pool;
+    (void)slots;
+    (void)fds;
+    (void)cap;
+#endif
+
+    return count;
+}
+
+void UpstreamPoolIdleClose(UpstreamPool *pool, size_t slot)
+{
+#if defined(PROFILE_ENCRYPTED)
+    /* The bUsed guard carries the whole safety of reporting readiness by slot.
+       An exchange in the same poll pass may already have taken this slot, and
+       the descriptor the caller saw belonged to the channel that was here
+       before it */
+    if(slot < CFG_TLS_SLOTS && !pool->tlsSlots[slot].bUsed)
+        SlotClose(&pool->tlsSlots[slot]);
+#else
+    (void)pool;
+    (void)slot;
+#endif
+}
+
+void UpstreamPoolIdleSweep(UpstreamPool *pool, uint32_t nowMs)
+{
+#if defined(PROFILE_ENCRYPTED)
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        UpstreamTlsSlot *slot = &pool->tlsSlots[i];
+
+        if(!slot->bUsed && slot->bOpen && Elapsed(nowMs, slot->idleUntilMs))
+            SlotClose(slot);
+    }
+#else
+    (void)pool;
+    (void)nowMs;
+#endif
+}
+
+void UpstreamPoolCloseChannels(UpstreamPool *pool)
+{
+#if defined(PROFILE_ENCRYPTED)
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        if(!pool->tlsSlots[i].bUsed)
+            SlotClose(&pool->tlsSlots[i]);
+    }
+#else
+    (void)pool;
+#endif
 }

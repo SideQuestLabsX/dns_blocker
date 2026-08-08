@@ -24,9 +24,9 @@
    reader works against every build. */
 
 #define STATUS_MAGIC   "DBS1"
-/* 2 added the deferred counter. A reader refuses a version it does not know
-   rather than reading the wrong offsets */
-#define STATUS_VERSION 2u
+/* 2 added the deferred counter and 3 the encrypted channel counters. A reader
+   refuses a version it does not know rather than reading the wrong offsets */
+#define STATUS_VERSION 3u
 
 typedef struct
 {
@@ -78,6 +78,12 @@ typedef struct
     uint64_t evictedTransactions;
     uint64_t retries;
     uint64_t deferred;
+
+    /* Channels dialled, queries that skipped a handshake and channels the
+       server had closed under a held query. Zero on a plaintext build */
+    uint64_t channelOpens;
+    uint64_t channelReuses;
+    uint64_t channelStale;
 
     uint64_t cacheHits;
     uint64_t cacheMisses;

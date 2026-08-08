@@ -190,17 +190,48 @@
 #endif
 #define CFG_MAX_UPSTREAMS       4
 
-/* Every exchange opens its own channel, so a slot is held for a whole
-   handshake: 350 to 430ms measured on ARM1176. Three slots capped the board
-   under ten queries a second and refused 14% of a real LAN's traffic, because
-   one device waking up asks for six names at once. Six slots and the queue in
-   server.c cover that burst. The record buffers have to stay within
-   ARENA_TLS_BYTES, which is sized alongside this. */
+/* A slot is held for a whole exchange, and an exchange that has to handshake
+   costs 350 to 430ms on ARM1176. Three slots capped the board under ten queries
+   a second and refused 14% of a real LAN's traffic, because one device waking up
+   asks for six names at once. Six slots and the queue in server.c cover that
+   burst. The record buffers have to stay within ARENA_TLS_BYTES, which is sized
+   alongside this. */
 #define CFG_TLS_SLOTS           6
 #define CFG_TLS_HOSTNAME_BYTES  128
 #define CFG_DOH_PATH_BYTES      64
 #define CFG_DOH_HEADER_BYTES    1024
 #define CFG_DOH_REQUEST_BYTES   512
+
+/* Channel reuse. An answered channel stays open against the resolver it was
+   opened to, and the next query for that resolver skips the handshake, which is
+   where the whole 350ms sits. A server closing an idle channel is ordinary, so a
+   query that finds a dead one is resent on a fresh channel and no resolver is
+   blamed for it.
+
+   The idle timeout is the client's own, well under the 60 to 75s an HTTP server
+   usually keeps a connection for, so this side closes first and a query rarely
+   meets a channel the server has already dropped. 0 for the reuse switch closes
+   every channel after one exchange, which is the behavior before this existed. */
+#ifndef CFG_TLS_REUSE
+  #define CFG_TLS_REUSE         1
+#endif
+#ifndef CFG_TLS_IDLE_MS
+  #define CFG_TLS_IDLE_MS       30000
+#endif
+
+/* A held channel can be dead with neither side saying so: a NAT or a middlebox
+   drops an idle TCP mapping and sends nothing, so the write succeeds into
+   nowhere and no answer or close ever arrives. A reused exchange that has
+   received nothing therefore gives up early and goes out again on a fresh
+   channel, instead of spending CFG_UPSTREAM_TIMEOUT_MS on a connection that
+   cannot answer. Measured: a channel idle for seven minutes cost 2238ms and a
+   failure against a resolver that was working.
+
+   Keep this above a healthy reused round trip, which is the upstream RTT with no
+   handshake in it, or a slow answer is abandoned for a second one. */
+#ifndef CFG_TLS_REUSE_TIMEOUT_MS
+  #define CFG_TLS_REUSE_TIMEOUT_MS 1000
+#endif
 
 /* Blocklist download. The release redirects twice and lands on a signed CDN
    URL of about 1.4KB, so the URL and header buffers are sized from the measured
