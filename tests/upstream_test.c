@@ -156,6 +156,63 @@ static void TestEveryUpstreamDownStillForwards(void)
     CHECK(UpstreamPoolSelect(&pool, NOW, UPSTREAM_NONE) == 1);
 }
 
+/* A resolver that answers and refuses the protocol will refuse the next query
+   too, so it must not keep taking client traffic the way a slow one does. */
+static void TestRefusedUpstreamIsAvoided(void)
+{
+    UpstreamPool pool;
+
+    CHECK(PoolOf(&pool, 3));
+    UpstreamPoolSample(&pool, 0, 400);
+    UpstreamPoolSample(&pool, 1, 10);
+    UpstreamPoolSample(&pool, 2, 200);
+
+    /* The fastest one refuses. Latency would have chosen it every time */
+    UpstreamPoolRefuse(&pool, 1, NOW);
+    CHECK(pool.members[1].bUnusable);
+    CHECK(UpstreamPoolSelect(&pool, NOW, UPSTREAM_NONE) == 2);
+
+    /* Still avoided once its health hold has expired, because the refusal is
+       not a timeout waiting to pass */
+    CHECK(UpstreamPoolSelect(&pool, NOW + CFG_UPSTREAM_DOWN_MS + 1,
+                             UPSTREAM_NONE) == 2);
+
+    /* And avoided as the retry target, which is where the old behaviour spent
+       a second query on a certain failure */
+    CHECK(UpstreamPoolSelect(&pool, NOW, 2) == 0);
+}
+
+static void TestEveryUpstreamRefusingStillForwards(void)
+{
+    UpstreamPool pool;
+
+    CHECK(PoolOf(&pool, 2));
+    UpstreamPoolSample(&pool, 0, 90);
+    UpstreamPoolSample(&pool, 1, 10);
+
+    UpstreamPoolRefuse(&pool, 0, NOW);
+    UpstreamPoolRefuse(&pool, 1, NOW);
+
+    /* Failing closed takes the network down, so the best of a bad pool is used */
+    CHECK(UpstreamPoolSelect(&pool, NOW, UPSTREAM_NONE) == 1);
+}
+
+static void TestAnAnswerClearsTheRefusal(void)
+{
+    UpstreamPool pool;
+
+    CHECK(PoolOf(&pool, 2));
+    UpstreamPoolSample(&pool, 0, 400);
+    UpstreamPoolSample(&pool, 1, 10);
+    UpstreamPoolRefuse(&pool, 1, NOW);
+    CHECK(UpstreamPoolSelect(&pool, NOW, UPSTREAM_NONE) == 0);
+
+    /* The probe keeps reaching it, so a server that starts answering returns */
+    UpstreamPoolSample(&pool, 1, 12);
+    CHECK(!pool.members[1].bUnusable);
+    CHECK(UpstreamPoolSelect(&pool, NOW, UPSTREAM_NONE) == 1);
+}
+
 static void TestRetryMovesToAnotherUpstream(void)
 {
     UpstreamPool pool;
@@ -359,6 +416,9 @@ int main(void)
     TestTheHoldExpires();
     TestAnAnswerClearsTheFailureRun();
     TestEveryUpstreamDownStillForwards();
+    TestRefusedUpstreamIsAvoided();
+    TestEveryUpstreamRefusingStillForwards();
+    TestAnAnswerClearsTheRefusal();
     TestRetryMovesToAnotherUpstream();
     TestRetryMaskMovesAcrossThePool();
     TestAvoidCannotEmptyASinglePool();

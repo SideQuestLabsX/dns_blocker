@@ -148,13 +148,17 @@
    whole query stream. The order decides the boot choice and breaks a tie,
    because no measurement exists yet. Two independent operators, so one going
    down is not correlated with the other. */
-#define CFG_UPSTREAM_ADDRS      { "1.1.1.1", "9.9.9.9" }
+#define CFG_UPSTREAM_ADDRS      { "1.1.1.1", "8.8.8.8" }
 #define CFG_UPSTREAM_PORT       53
 
 #if defined(PROFILE_ENCRYPTED)
-  /* Authentication names follow CFG_UPSTREAM_ADDRS in the same order */
+  /* Authentication names follow CFG_UPSTREAM_ADDRS in the same order.
+     Both endpoints have to answer HTTP/1.1, which is what this client speaks.
+     Measured: Cloudflare, Google and AdGuard return 200, Quad9 returns 505 and
+     is DoH over HTTP/2 only. Quad9 works on DoT, so it belongs in the pool only
+     with CFG_ENCRYPTED_USE_DOH set to 0 */
   #ifndef CFG_UPSTREAM_TLS_NAMES
-    #define CFG_UPSTREAM_TLS_NAMES { "cloudflare-dns.com", "dns.quad9.net" }
+    #define CFG_UPSTREAM_TLS_NAMES { "cloudflare-dns.com", "dns.google" }
   #endif
   #ifndef CFG_DOT_PORT
     #define CFG_DOT_PORT            853

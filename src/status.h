@@ -32,7 +32,7 @@ typedef struct
     uint8_t  addressLen;
     uint8_t  transport;
     uint8_t  bDown;
-    uint8_t  reserved;
+    uint8_t  bUnusable;          /* refused the protocol, not merely slow */
     uint16_t port;
     uint16_t consecutiveFailures;
     uint32_t srttMs;              /* UINT32_MAX until something is measured */

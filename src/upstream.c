@@ -191,10 +191,12 @@ static bool InService(const Upstream *member, uint32_t nowMs)
     return !member->bDown || Elapsed(nowMs, member->downUntilMs);
 }
 
-/* bInServiceOnly separates the two passes. The first honours the hold, and the
-   second ignores it, so a pool that is entirely down still forwards. */
+/* The two flags separate the passes. Honouring the hold comes first, then
+   ignoring it, then ignoring the refusal as well, so a pool where every member
+   is broken still forwards. */
 static size_t BestOf(const UpstreamPool *pool, uint32_t nowMs,
-                     uint32_t excludedMask, bool bInServiceOnly)
+                     uint32_t excludedMask, bool bInServiceOnly,
+                     bool bUsableOnly)
 {
     size_t best = UPSTREAM_NONE;
 
@@ -205,6 +207,8 @@ static size_t BestOf(const UpstreamPool *pool, uint32_t nowMs,
         if(i < 32 && (excludedMask & (UINT32_C(1) << i)) != 0)
             continue;
         if(bInServiceOnly && !InService(member, nowMs))
+            continue;
+        if(bUsableOnly && member->bUnusable)
             continue;
 
         /* Strictly less, so the configured order breaks a tie and an unmeasured
@@ -225,12 +229,14 @@ size_t UpstreamPoolSelect(const UpstreamPool *pool, uint32_t nowMs, size_t avoid
 size_t UpstreamPoolSelectExcept(const UpstreamPool *pool, uint32_t nowMs,
                                 uint32_t excludedMask)
 {
-    size_t best = BestOf(pool, nowMs, excludedMask, true);
+    size_t best = BestOf(pool, nowMs, excludedMask, true, true);
 
     if(best == UPSTREAM_NONE)
-        best = BestOf(pool, nowMs, excludedMask, false);
+        best = BestOf(pool, nowMs, excludedMask, false, true);
+    if(best == UPSTREAM_NONE)
+        best = BestOf(pool, nowMs, excludedMask, false, false);
     if(best == UPSTREAM_NONE && excludedMask != 0)
-        best = BestOf(pool, nowMs, 0, false);
+        best = BestOf(pool, nowMs, 0, false, false);
 
     return best;
 }
@@ -250,6 +256,19 @@ void UpstreamPoolSample(UpstreamPool *pool, size_t index, uint32_t rttMs)
 
     member->consecutiveFailures = 0;
     member->bDown               = false;
+    member->bUnusable           = false;
+}
+
+/* The peer answered and refused the protocol. Counted as a failure, and kept
+   out of selection while anything else can be used, because retrying a server
+   that cannot speak HTTP/1.1 spends a client's query on a certainty. */
+void UpstreamPoolRefuse(UpstreamPool *pool, size_t index, uint32_t nowMs)
+{
+    if(index >= pool->count)
+        return;
+
+    pool->members[index].bUnusable = true;
+    UpstreamPoolFail(pool, index, nowMs);
 }
 
 void UpstreamPoolFail(UpstreamPool *pool, size_t index, uint32_t nowMs)
@@ -411,7 +430,8 @@ static size_t AcquireTlsSlot(UpstreamPool *pool)
     {
         if(!pool->tlsSlots[i].bUsed)
         {
-            pool->tlsSlots[i].bUsed = true;
+            pool->tlsSlots[i].bUsed     = true;
+            pool->tlsSlots[i].bRefused  = false;
             return i;
         }
     }
@@ -641,7 +661,21 @@ static bool ParseDohHeaders(UpstreamTlsSlot *slot, size_t headerEnd, size_t cap)
     if(lineEnd == SIZE_MAX || lineEnd < 12
        || memcmp(slot->response, "HTTP/1.1 200", 12) != 0
        || (lineEnd > 12 && slot->response[12] != ' '))
+    {
+        /* Three statuses say this request shape is never acceptable, and the
+           client sends the same shape every time: 415 rejects the media type,
+           501 the method and 505 the HTTP version. Quad9 answers 505 because
+           its endpoint is HTTP/2 only. Everything else, 503 included, is the
+           server having a bad minute and worth retrying */
+        if(lineEnd != SIZE_MAX && lineEnd >= 12
+           && memcmp(slot->response, "HTTP/1.1 ", 9) == 0
+           && (memcmp(slot->response + 9, "415", 3) == 0
+               || memcmp(slot->response + 9, "501", 3) == 0
+               || memcmp(slot->response + 9, "505", 3) == 0))
+            slot->bRefused = true;
+
         return false;
+    }
 
     bool   bContentLength = false;
     bool   bContentType   = false;
@@ -899,7 +933,14 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
     {
         UpstreamRead result = TlsProgress(exchange, out, cap, outLen);
         if(result != UpstreamRead_Answer)
+        {
+            if(result == UpstreamRead_Failed
+               && exchange->tlsSlot < CFG_TLS_SLOTS
+               && pool->tlsSlots[exchange->tlsSlot].bRefused)
+                UpstreamPoolRefuse(pool, exchange->index, nowMs);
+
             return result;
+        }
         got = (ssize_t)*outLen;
     }
 #endif

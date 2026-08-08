@@ -95,6 +95,7 @@ static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
         memset(to, 0, sizeof *to);
         to->transport           = (uint8_t)from->transport;
         to->bDown               = from->bDown ? 1u : 0u;
+        to->bUnusable           = from->bUnusable ? 1u : 0u;
         to->srttMs              = from->srttMs;
         to->consecutiveFailures = from->consecutiveFailures;
         to->queries             = from->queries;
@@ -297,6 +298,8 @@ void StatusPrint(const StatusBlock *block, FILE *out)
 
         if(upstream->bDown != 0)
             fprintf(out, ", held down for %u ms", upstream->downForMs);
+        if(upstream->bUnusable != 0)
+            fprintf(out, ", REFUSED THE PROTOCOL");
 
         fprintf(out, "\n");
     }

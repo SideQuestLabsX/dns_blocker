@@ -478,6 +478,40 @@ static void TestDohRejectsHttpFailure(void)
     CHECK(UpstreamComplete(&pool, &exchange, NOW, answer, sizeof answer,
                            &answerLen) == UpstreamRead_Failed);
 
+    /* 503 is the server having a bad day, so it stays in the pool */
+    CHECK(!pool.members[0].bUnusable);
+
+    UpstreamEnd(&exchange);
+    close(fds[1]);
+}
+
+/* Quad9's DoH endpoint is HTTP/2 only and answers 505 to this client. That is
+   the server refusing the protocol, and no retry or wait changes it, so the
+   resolver has to leave the rotation rather than absorb queries forever. */
+static void TestDohVersionRefusalMarksTheUpstream(void)
+{
+    int fds[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    UpstreamPool     pool;
+    UpstreamExchange exchange;
+    uint8_t          answer[CFG_TCP_MSG_BYTES];
+    size_t           answerLen = 0;
+    ExchangeOf(&pool, &exchange, DohState_ReadHeaders, fds[0]);
+    pool.members[0].transport = UpstreamTransport_Doh;
+    exchange.transport = UpstreamTransport_Doh;
+
+    static const char response[] =
+        "HTTP/1.1 505 HTTP Version Not Supported\r\n"
+        "Content-Length: 0\r\n\r\n";
+    memcpy(G_READ_DATA, response, sizeof response - 1);
+    G_READ_LEN = sizeof response - 1;
+
+    CHECK(UpstreamComplete(&pool, &exchange, NOW, answer, sizeof answer,
+                           &answerLen) == UpstreamRead_Failed);
+    CHECK(pool.members[0].bUnusable);
+    CHECK(pool.members[0].failures == 1);
+
     UpstreamEnd(&exchange);
     close(fds[1]);
 }
@@ -620,6 +654,8 @@ int main(void)
     TestPartialDohResponseCompletes();
     FakeReset();
     TestDohRejectsHttpFailure();
+    FakeReset();
+    TestDohVersionRefusalMarksTheUpstream();
     FakeReset();
     TestDohRejectsChunkedResponse();
     FakeReset();

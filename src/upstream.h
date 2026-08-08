@@ -36,6 +36,11 @@ typedef struct
     uint16_t consecutiveFailures;
     bool     bDown;
 
+    /* Refused the protocol rather than failed to answer, so waiting changes
+       nothing. Selection skips it while any other member can still be used, and
+       an accepted answer clears it. */
+    bool     bUnusable;
+
     uint64_t queries;
     uint64_t mismatches;
     uint64_t rejected;
@@ -67,6 +72,9 @@ typedef struct
     size_t     requestLen;
     size_t     responseLen;
     bool       bUsed;
+    /* The peer answered, with an HTTP status this client cannot use. A refusal
+       is permanent until the server changes, unlike a timeout */
+    bool       bRefused;
     uint8_t    query[CFG_DOH_REQUEST_BYTES + CFG_TX_QUERY_BYTES];
     uint8_t    response[CFG_DOH_HEADER_BYTES + CFG_TCP_MSG_BYTES];
 } UpstreamTlsSlot;
@@ -144,6 +152,10 @@ void UpstreamPoolSample(UpstreamPool *pool, size_t index, uint32_t rttMs);
 
 /* Counts a failure and holds the upstream down once they run consecutively. */
 void UpstreamPoolFail(UpstreamPool *pool, size_t index, uint32_t nowMs);
+
+/* A failure the server will repeat: it answered and refused the protocol. Kept
+   out of selection while any other member is usable, cleared by an answer. */
+void UpstreamPoolRefuse(UpstreamPool *pool, size_t index, uint32_t nowMs);
 
 /* True when the probe interval has passed and there is another upstream worth
    measuring. The caller adds its own condition: the daemon does not probe while
