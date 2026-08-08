@@ -127,7 +127,7 @@ endef
 # stale generator writes a list in a format the daemon no longer reads
 HDR := $(wildcard src/*.h)
 
-.PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick mbedtls
+.PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick mbedtls FORCE
 all: $(TARGET)
 
 $(TARGET): $(OBJ) $(TLS_DEPS) | $(LICENSE_FILES) $(TLS_CHECK)
@@ -171,7 +171,17 @@ $(BUILD)/embedded_gen.c: $(EMBED_LIST) $(BUILD)/mkblocklist | $(BUILD)
 	$(BUILD)/mkblocklist -c $@ $(EMBED_LIST)
 endif
 
-$(BUILD)/embedded.o: $(EMBED_SRC) | $(BUILD)
+# Which source compiles depends on a variable, and an object file cannot show
+# that. Without the stamp, EMBED_LIST= links the previous list and reports it as
+# the fallback, so a build that meant to ship none ships one.
+# FORCE runs the recipe every build, and the file only moves when the value did
+FORCE:
+
+$(BUILD)/embedded.stamp: FORCE | $(BUILD)
+	@printf '%s\n' '$(strip $(EMBED_LIST))' > $@.new
+	@if cmp -s $@.new $@; then rm -f $@.new; else mv $@.new $@; fi
+
+$(BUILD)/embedded.o: $(EMBED_SRC) $(BUILD)/embedded.stamp | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Health probe binary run by a supervisor. Keep it tiny

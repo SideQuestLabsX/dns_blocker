@@ -35,7 +35,9 @@
    NULL consults no file, which leaves the list linked into .rodata as the whole
    policy. That is the air-gapped build, where a list is changed by re-flashing
    and by nothing else. */
-#define CFG_BLOCKLIST_PATH      "/run/dns_blocker/blocklist.trie"
+#ifndef CFG_BLOCKLIST_PATH
+  #define CFG_BLOCKLIST_PATH    "/run/dns_blocker/blocklist.trie"
+#endif
 #define CFG_BLOCKLIST_MAX_BYTES MIB(16)
 
 /* Read-only state for anything that wants to look, beside the list it shares a
@@ -56,7 +58,12 @@
 
    The TTL is short because the map is a statement about a LAN, where an address
    changes without anything being able to tell a client in advance. */
-#define CFG_HOSTS_PATH          "/etc/dns_blocker/hosts"
+/* Guarded like the rest, so a test run can point them somewhere writable.
+   Without the guard a -D override is silently discarded and the run tests the
+   shipped path instead of the one it asked for */
+#ifndef CFG_HOSTS_PATH
+  #define CFG_HOSTS_PATH        "/etc/dns_blocker/hosts"
+#endif
 #define CFG_LOCAL_DOMAIN        "lan"
 #define CFG_HOSTS_MAX           96
 #define CFG_LOCAL_TTL_SEC       60
