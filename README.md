@@ -317,8 +317,21 @@ Set `CFG_PTR_ROUTER_ADDR` to `NULL` to disable it.
 
 ## Build
 
-The supported targets are `x86_64`, `aarch64`, `armv7` and `armv6`. ARMv6 and
-ARMv7 are different targets.
+The supported targets are:
+
+| `ARCH` | Target |
+|---|---|
+| `x86_64` | 64-bit x86 |
+| `x86` | 32-bit x86 |
+| `aarch64` | 64-bit ARM |
+| `armv7` | 32-bit ARMv7 with hard float |
+| `armv6` | 32-bit ARMv6 with hard float |
+| `riscv64` | 64-bit RISC-V |
+| `loongarch64` | 64-bit LoongArch |
+| `mips` | 32-bit big-endian MIPS32r2 |
+| `mipsel` | 32-bit little-endian MIPS32r2 |
+
+ARMv6 and ARMv7 are different targets.
 
 ```sh
 make
@@ -331,9 +344,24 @@ the embedded list runs on the build host. `HOSTCC` names it and defaults to
 `gcc`.
 
 Every target links static, and `-fstack-protector-strong` is always on. The
-64-bit targets also link position independent, so they get ASLR. 32-bit ARM
-does not, because gcc there accepts `-static-pie` and gives a dynamic binary.
-The build reads the linked file and stops if the result needs a loader.
+`x86_64`, `x86`, `aarch64` and `riscv64` Alpine builds also link position
+independent. ARM, LoongArch and MIPS use static executables because their
+selected toolchains do not produce a valid static PIE. The build reads the
+linked file and stops if the result needs a loader.
+
+The manually triggered `Binary release` workflow creates a dated tag such as
+`binary-2026-08-09-31315414666-1` and publishes these assets:
+
+| Asset | Contents |
+|---|---|
+| `dns_blocker-<arch>-minimal` | Minimal profile daemon |
+| `dns_blocker-<arch>-encrypted` | Encrypted profile daemon |
+| `dns_blocker-<arch>.check` | Health probe |
+| `dns_blocker.sha256` | SHA-256 digest for every binary and the license file |
+| `THIRD_PARTY_LICENSES.md` | License text shipped with the binaries |
+
+Each binary is static musl. The release workflow builds and tests every
+supported target before it publishes the release.
 
 ## Test
 
@@ -349,10 +377,10 @@ under emulation on the target instruction set. The encrypted profile also runs
 the DoH/DoT state tests and the real mbedTLS backend test this way.
 
 CI runs the host and encrypted tests, links both profiles and fuzzes against a
-corpus that stays between runs. It then builds each target in an Alpine
-container on that target's instruction set and runs the tests there. An x86
-test cannot find an unaligned access fault on ARM1176. `ci/build.sh` runs the
-same containers locally and needs docker with qemu binfmt handlers.
+corpus that stays between runs. Alpine target toolchains build six targets in
+containers. Zig builds LoongArch and both MIPS byte orders. QEMU runs each
+non-x86 target on its instruction set. This exposes ARM1176 unaligned access
+faults that x86 tests cannot reproduce.
 
 ## Install
 

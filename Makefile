@@ -4,6 +4,7 @@
 # freestanding, which -nostdlib would break
 
 ARCH    ?= x86_64
+ARCHES  := x86_64 x86 aarch64 armv7 armv6 riscv64 loongarch64 mips mipsel
 # minimal | encrypted
 PROFILE ?= encrypted
 BUILD   ?= build/$(ARCH)-$(PROFILE)
@@ -43,22 +44,31 @@ CFLAGS_COMMON := \
 	-Isrc
 
 # 32-bit ARM musl has no -static-pie. gcc accepts the flag and emits a dynamic
-# binary, so those targets link -static and lose ASLR. Measured on the
-# cross-tools toolchain and on Alpine, which agree. The 64-bit targets keep
-# -static-pie. assert_static below rejects a dynamic result either way
+# binary, so those targets link -static. Zig also uses -static for LoongArch and
+# MIPS. assert_static below rejects a dynamic result
 #
 # ARMv6 (Pi Zero W / ARM1176): no movw/movt, no NEON, unaligned access unsafe.
 # Read multi-byte DNS fields byte-wise regardless of target.
 ifeq ($(ARCH),x86_64)
   CFLAGS_ARCH := -m64 -static-pie
+else ifeq ($(ARCH),x86)
+  CFLAGS_ARCH := -m32 -static-pie
 else ifeq ($(ARCH),aarch64)
   CFLAGS_ARCH := -march=armv8-a -static-pie
 else ifeq ($(ARCH),armv7)
   CFLAGS_ARCH := -march=armv7-a -mfloat-abi=hard -mfpu=vfpv3-d16 -static
 else ifeq ($(ARCH),armv6)
   CFLAGS_ARCH := -march=armv6 -mfloat-abi=hard -mfpu=vfp -static
+else ifeq ($(ARCH),riscv64)
+  CFLAGS_ARCH := -march=rv64gc -mabi=lp64d -static-pie
+else ifeq ($(ARCH),loongarch64)
+  CFLAGS_ARCH := -static
+else ifeq ($(ARCH),mips)
+  CFLAGS_ARCH := -march=mips32r2 -mabi=32 -static
+else ifeq ($(ARCH),mipsel)
+  CFLAGS_ARCH := -march=mips32r2 -mabi=32 -static
 else
-  $(error Unknown ARCH '$(ARCH)'. Use: x86_64 aarch64 armv7 armv6)
+  $(error Unknown ARCH '$(ARCH)'. Use: $(ARCHES))
 endif
 
 MBEDTLS_CFLAGS := -O2 -fstack-protector-strong \

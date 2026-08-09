@@ -1,0 +1,177 @@
+name: Binary release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: binary-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.arch }} binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            platform: linux/amd64
+            image: alpine:3.20
+          - arch: x86
+            platform: linux/386
+            image: i386/alpine:3.20
+          - arch: aarch64
+            platform: linux/arm64
+            image: arm64v8/alpine:3.20
+          - arch: armv7
+            platform: linux/arm/v7
+            image: arm32v7/alpine:3.20
+          - arch: armv6
+            platform: linux/arm/v6
+            image: arm32v6/alpine:3.20
+          - arch: riscv64
+            platform: linux/riscv64
+            image: riscv64/alpine:3.20
+          - arch: loongarch64
+            zig_target: loongarch64-linux-musl
+            runner: qemu-loongarch64
+          - arch: mips
+            zig_target: mips-linux-musleabi
+            runner: qemu-mips
+          - arch: mipsel
+            zig_target: mipsel-linux-musleabi
+            runner: qemu-mipsel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - if: ${{ matrix.image != '' }}
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Build and test in Alpine
+        if: ${{ matrix.image != '' }}
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          cat > /tmp/build.sh <<'SH'
+          set -eu
+          apk add --no-cache build-base curl python3
+          export EMBED_LIST=
+          export EMBED_TIER=
+          make ARCH="$ARCH" PROFILE=minimal
+          make ARCH="$ARCH" PROFILE=minimal check
+          make ARCH="$ARCH" PROFILE=minimal test-static-run
+          make ARCH="$ARCH" PROFILE=encrypted
+          make ARCH="$ARCH" PROFILE=encrypted test-static-run
+          SH
+          docker run --rm --platform "${{ matrix.platform }}" \
+            -e ARCH -v "$PWD:/w" -v /tmp/build.sh:/build.sh -w /w \
+            "${{ matrix.image }}" sh /build.sh
+
+      - name: Install Zig and QEMU
+        if: ${{ matrix.zig_target != '' }}
+        env:
+          ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+          ZIG_VERSION: 0.16.0
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+          archive="$RUNNER_TEMP/zig.tar.xz"
+          curl -fsSL --retry 3 \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+            -o "$archive"
+          printf '%s  %s\n' "$ZIG_SHA256" "$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/zig"
+          tar -xJf "$archive" --strip-components=1 -C "$RUNNER_TEMP/zig"
+          echo "$RUNNER_TEMP/zig" >> "$GITHUB_PATH"
+
+      - name: Cross-build and test with Zig
+        if: ${{ matrix.zig_target != '' }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUNNER: ${{ matrix.runner }}
+          ZIG_TARGET: ${{ matrix.zig_target }}
+        run: |
+          export CC="zig cc -target $ZIG_TARGET"
+          export AR="zig ar"
+          export EMBED_LIST=
+          export EMBED_TIER=
+          make ARCH="$ARCH" PROFILE=minimal
+          make ARCH="$ARCH" PROFILE=minimal check
+          make ARCH="$ARCH" PROFILE=minimal RUNNER="$RUNNER" test-static-run
+          make ARCH="$ARCH" PROFILE=encrypted
+          make ARCH="$ARCH" PROFILE=encrypted RUNNER="$RUNNER" test-static-run
+
+      - name: Name release assets
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p release
+          install -m755 "build/${ARCH}-minimal/dns_blocker" \
+            "release/dns_blocker-${ARCH}-minimal"
+          install -m755 "build/${ARCH}-encrypted/dns_blocker" \
+            "release/dns_blocker-${ARCH}-encrypted"
+          install -m755 "build/${ARCH}-minimal/dns_blocker.check" \
+            "release/dns_blocker-${ARCH}.check"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-${{ matrix.arch }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binary-*
+          path: release
+          merge-multiple: true
+
+      - name: Verify release assets
+        run: |
+          cp THIRD_PARTY_LICENSES.md release/
+          for arch in x86_64 x86 aarch64 armv7 armv6 riscv64 loongarch64 mips mipsel; do
+            test -s "release/dns_blocker-${arch}-minimal"
+            test -s "release/dns_blocker-${arch}-encrypted"
+            test -s "release/dns_blocker-${arch}.check"
+          done
+          (cd release && sha256sum dns_blocker-* THIRD_PARTY_LICENSES.md \
+            > dns_blocker.sha256)
+          (cd release && sha256sum -c dns_blocker.sha256)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          date=$(date -u +%Y-%m-%d)
+          tag="binary-${date}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          notes=$(printf '%s\n\n%s\n%s\n' \
+            "Static musl binaries built from ${GITHUB_SHA}." \
+            "Architectures: x86_64, x86, aarch64, armv7, armv6, riscv64, loongarch64, mips and mipsel." \
+            "Each architecture has minimal and encrypted profiles plus the health probe. Verify downloads with dns_blocker.sha256.")
+
+          gh release create "$tag" release/* --target "$GITHUB_SHA" \
+            --title "dns_blocker ${date}" --notes "$notes" --draft
+          gh release edit "$tag" --draft=false --latest
+
+          publishedTag=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+            --jq 'select(.draft == false and .immutable == true) | .tag_name')
+          if [ "$publishedTag" != "$tag" ]; then
+            echo "::error::Published release is not immutable"
+            exit 1
+          fi
