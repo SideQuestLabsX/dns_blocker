@@ -43,8 +43,8 @@ CFLAGS_COMMON := \
 	-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wundef \
 	-Isrc
 
-# 32-bit ARM musl has no -static-pie. gcc accepts the flag and emits a dynamic
-# binary, so those targets link -static. Zig also uses -static for LoongArch and
+# Some musl toolchains accept -static-pie and emit a dynamic binary. ARM32 and
+# Alpine RISC-V therefore use -static. Zig also uses -static for LoongArch and
 # MIPS. assert_static below rejects a dynamic result
 #
 # ARMv6 (Pi Zero W / ARM1176): no movw/movt, no NEON, unaligned access unsafe.
@@ -60,7 +60,7 @@ else ifeq ($(ARCH),armv7)
 else ifeq ($(ARCH),armv6)
   CFLAGS_ARCH := -march=armv6 -mfloat-abi=hard -mfpu=vfp -static
 else ifeq ($(ARCH),riscv64)
-  CFLAGS_ARCH := -march=rv64gc -mabi=lp64d -static-pie
+  CFLAGS_ARCH := -static
 else ifeq ($(ARCH),loongarch64)
   CFLAGS_ARCH := -static
 else ifeq ($(ARCH),mips)

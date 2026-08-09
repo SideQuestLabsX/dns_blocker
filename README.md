@@ -344,10 +344,10 @@ the embedded list runs on the build host. `HOSTCC` names it and defaults to
 `gcc`.
 
 Every target links static, and `-fstack-protector-strong` is always on. The
-`x86_64`, `x86`, `aarch64` and `riscv64` Alpine builds also link position
-independent. ARM, LoongArch and MIPS use static executables because their
-selected toolchains do not produce a valid static PIE. The build reads the
-linked file and stops if the result needs a loader.
+`x86_64`, `x86` and `aarch64` Alpine builds also link position independent.
+ARM, RISC-V, LoongArch and MIPS use static executables because their selected
+toolchains do not produce a valid static PIE. The build reads the linked file
+and stops if the result needs a loader.
 
 The manually triggered `Binary release` workflow creates a dated tag such as
 `binary-2026-08-09-31315414666-1` and publishes these assets:
