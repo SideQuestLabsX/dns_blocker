@@ -126,6 +126,94 @@ static bool IsDigit(uint8_t value)
     return value >= '0' && value <= '9';
 }
 
+bool SyncTierIsValid(const char *tier)
+{
+    if(tier == NULL)
+        return false;
+
+    size_t len = strnlen(tier, CFG_BLOCKLIST_TIER_BYTES);
+    if(len == 0 || len == CFG_BLOCKLIST_TIER_BYTES)
+        return false;
+
+    /* Reject names the release script cannot produce */
+    if(tier[0] == '-' || tier[len - 1] == '-')
+        return false;
+
+    for(size_t i = 0; i < len; i++)
+    {
+        uint8_t c = (uint8_t)tier[i];
+        bool bAllowed = (c >= 'a' && c <= 'z') || IsDigit(c) || c == '-';
+
+        if(!bAllowed || (c == '-' && tier[i + 1] == '-'))
+            return false;
+    }
+
+    return true;
+}
+
+const char *SyncLoadTier(const char *path, char *out, size_t cap)
+{
+    if(path == NULL || out == NULL || cap == 0)
+        return CFG_BLOCKLIST_TIER;
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if(fd < 0)
+        return CFG_BLOCKLIST_TIER;
+
+    char    buf[CFG_BLOCKLIST_TIER_BYTES];
+    ssize_t got = read(fd, buf, sizeof buf);
+    close(fd);
+
+    if(got <= 0)
+        return CFG_BLOCKLIST_TIER;
+
+    /* Refuse truncation into another valid tier */
+    if((size_t)got == sizeof buf)
+    {
+        fprintf(stderr, "sync: %s is too long for a tier name, using %s\n",
+                path, CFG_BLOCKLIST_TIER);
+        return CFG_BLOCKLIST_TIER;
+    }
+
+    size_t len = (size_t)got;
+    while(len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+        len--;
+    buf[len] = '\0';
+
+    if(!SyncTierIsValid(buf) || len + 1 > cap)
+    {
+        fprintf(stderr, "sync: %s does not name a tier, using %s\n",
+                path, CFG_BLOCKLIST_TIER);
+        return CFG_BLOCKLIST_TIER;
+    }
+
+    memcpy(out, buf, len + 1);
+    return out;
+}
+
+bool SyncBuildAssetName(char *out, size_t cap, const char *tier)
+{
+    static const char prefix[] = "dns_blocker-blocklist-";
+    static const char suffix[] = ".trie";
+
+    if(out == NULL || cap == 0)
+        return false;
+    out[0] = '\0';
+
+    if(!SyncTierIsValid(tier))
+        return false;
+
+    size_t tierLen = strnlen(tier, CFG_BLOCKLIST_TIER_BYTES);
+    size_t need    = sizeof prefix - 1 + tierLen + sizeof suffix;
+    if(need > cap)
+        return false;
+
+    memcpy(out, prefix, sizeof prefix - 1);
+    memcpy(out + sizeof prefix - 1, tier, tierLen);
+    memcpy(out + sizeof prefix - 1 + tierLen, suffix, sizeof suffix);
+    return true;
+}
+
 static bool DecimalFieldIsValid(const uint8_t *data, size_t begin, size_t end)
 {
     if(begin == end || data[begin] == '0')
@@ -246,8 +334,10 @@ bool SyncBuildReleaseUrl(char *out, size_t cap, const char *releaseTag,
 
 #if defined(PROFILE_ENCRYPTED)
 
+_Static_assert(sizeof CFG_BLOCKLIST_ASSET <= CFG_BLOCKLIST_ASSET_BYTES,
+               "the compiled tier does not fit the asset buffer");
 _Static_assert(sizeof CFG_BLOCKLIST_RELEASE_BASE_URL
-               + CFG_SYNC_RELEASE_TAG_BYTES + sizeof CFG_BLOCKLIST_ASSET
+               + CFG_SYNC_RELEASE_TAG_BYTES + CFG_BLOCKLIST_ASSET_BYTES
                <= CFG_FETCH_URL_BYTES,
                "blocklist release URL exceeds the fetch buffer");
 
@@ -271,7 +361,7 @@ static bool BuildPhaseUrl(const SyncJob *job, char *out, size_t cap)
         return CopyString(out, cap, CFG_BLOCKLIST_LOCATOR_URL);
 
     const char *asset = (job->phase == SyncPhase_Digest)
-                      ? CFG_BLOCKLIST_DIGEST_ASSET : CFG_BLOCKLIST_ASSET;
+                      ? CFG_BLOCKLIST_DIGEST_ASSET : job->asset;
     return SyncBuildReleaseUrl(out, cap, job->releaseTag, asset);
 }
 
@@ -287,7 +377,8 @@ static bool SetPhaseUrl(SyncJob *job)
     return true;
 }
 
-bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path)
+bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
+               const char *tier)
 {
     if(job == NULL || backend == NULL || path == NULL)
         return false;
@@ -296,6 +387,14 @@ bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path)
     job->backend   = backend;
     job->stagingFd = -1;
     job->phase     = SyncPhase_Locator;
+
+    if(!SyncBuildAssetName(job->asset, sizeof job->asset,
+                           (tier != NULL) ? tier : CFG_BLOCKLIST_TIER))
+    {
+        job->state = SyncState_Failed;
+        job->fail  = SyncFail_Tier;
+        return false;
+    }
 
     if(!CopyString(job->path, sizeof job->path, path)
        || !SyncStagingPath(job->staging, sizeof job->staging, job->path))
@@ -423,8 +522,10 @@ static SyncStep FinishLocator(SyncJob *job)
 static SyncStep FinishDigest(SyncJob *job)
 {
     if(!FetchFindDigest(job->metadataText, FetchBodyLength(&job->job),
-                        CFG_BLOCKLIST_ASSET, job->want))
+                        job->asset, job->want))
     {
+        snprintf(job->failText, sizeof job->failText,
+                 "the listing names no %s", job->asset);
         job->state = SyncState_Failed;
         job->fail  = SyncFail_Listing;
         return SyncStep_Failed;
@@ -538,11 +639,12 @@ const char *SyncFailText(const SyncJob *job)
         case SyncFail_None:     return "no failure";
         case SyncFail_Transfer: return FetchFailText(&job->job);
         case SyncFail_Staging:  return "the staging file could not be opened";
-        case SyncFail_Listing:  return "the listing names no " CFG_BLOCKLIST_ASSET;
+        case SyncFail_Listing:  return job->failText;
         case SyncFail_Digest:   return "the digest did not match";
         case SyncFail_Install:  return "the install failed";
         case SyncFail_Locator:  return "the locator names no valid release";
         case SyncFail_Url:      return "the release URL is invalid";
+        case SyncFail_Tier:     return "the configured tier is not a valid name";
     }
 
     return "unknown";

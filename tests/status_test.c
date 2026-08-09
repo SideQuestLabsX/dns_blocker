@@ -36,6 +36,11 @@ static void FillServer(Server *server)
     server->refusedConnections  = 5;
     server->evictedTransactions = 6;
     server->retries             = 8;
+
+    /* Exercise both printed duration units */
+    LatencyAdd(&server->serviceLatency, 40);
+    LatencyAdd(&server->serviceLatency, 200);
+    LatencyAdd(&server->serviceLatency, 30000);
 }
 
 static void FillCache(Cache *cache)
@@ -64,6 +69,9 @@ static void FillPool(UpstreamPool *pool)
     pool->members[0].transport = UpstreamTransport_Dot;
     pool->members[0].srttMs    = 23;
     pool->members[0].queries   = 90;
+    LatencyAdd(&pool->members[0].latency, 20000);
+    LatencyAdd(&pool->members[0].latency, 24000);
+    LatencyAdd(&pool->members[0].latency, 28000);
 
     CHECK(inet_pton(AF_INET, "9.9.9.9", &address.sin_addr) == 1);
     memcpy(&pool->members[1].addr, &address, sizeof address);
@@ -95,7 +103,7 @@ static void TestPublishAndRead(const char *path)
     list.size   = 6543894;
 
     CHECK(StatusOpen(&status, path, 1000));
-    StatusPublish(&status, &server, &cache, &pool, &list, &sync, 4000);
+    StatusPublish(&status, &server, &cache, &pool, &list, &sync, NULL, 4000);
 
     CHECK(StatusRead(path, &block));
     CHECK(block.version == STATUS_VERSION);
@@ -110,13 +118,25 @@ static void TestPublishAndRead(const char *path)
     CHECK(block.cacheEvictions == 9);
     CHECK(block.blocklistBytes == 6543894);
     CHECK(block.blocklistSource == (uint32_t)BlocklistSource_Mapped);
+    CHECK(strcmp(block.blocklistTier, CFG_BLOCKLIST_TIER) == 0);
     CHECK(block.sync.installedBytes == 6543894);
+
+    CHECK(block.service.count == 3);
+    CHECK(block.service.minUs == 40);
+    CHECK(block.service.maxUs == 30000);
+    CHECK(block.service.meanUs == (40 + 200 + 30000) / 3);
+    CHECK(block.service.p50Us >= block.service.minUs);
+    CHECK(block.service.p99Us <= block.service.maxUs);
 
     CHECK(block.upstreamCount == 2);
     CHECK(block.upstreams[0].addressLen == 4);
     CHECK(block.upstreams[0].port == 853);
     CHECK(block.upstreams[0].srttMs == 23);
     CHECK(block.upstreams[0].bDown == 0);
+    CHECK(block.upstreams[0].latency.count == 3);
+    CHECK(block.upstreams[0].latency.minUs == 20000);
+    CHECK(block.upstreams[0].latency.maxUs == 28000);
+    CHECK(block.upstreams[1].latency.count == 0);
     CHECK(strcmp(StatusTransportName(block.upstreams[0].transport), "dot") == 0);
 
     /* Held down until 5000 and the snapshot was taken at 4000 */
@@ -127,12 +147,65 @@ static void TestPublishAndRead(const char *path)
 
     /* A second snapshot moves the counter by two and leaves it even */
     uint32_t before = status.block->sequence;
-    StatusPublish(&status, &server, &cache, &pool, &list, &sync, 5000);
+    StatusPublish(&status, &server, &cache, &pool, &list, &sync, NULL, 5000);
     CHECK(status.block->sequence == before + 2);
     CHECK((status.block->sequence & 1u) == 0);
 
     StatusClose(&status);
     CHECK(status.block == NULL);
+}
+
+/* Status text is part of the operator interface */
+static void TestPrintRenders(const char *path)
+{
+    Status       status;
+    Server       server;
+    Cache        cache;
+    UpstreamPool pool;
+    Blocklist    list;
+    StatusBlock  block;
+    StatusSync   sync = { 0, 0, 6543894, 900000 };
+
+    FillServer(&server);
+    FillCache(&cache);
+    FillPool(&pool);
+
+    memset(&list, 0, sizeof list);
+    list.source = BlocklistSource_Mapped;
+    list.size   = 6543894;
+
+    CHECK(StatusOpen(&status, path, 1000));
+    StatusPublish(&status, &server, &cache, &pool, &list, &sync, NULL, 4000);
+    StatusClose(&status);
+
+    CHECK(StatusRead(path, &block));
+
+    char  *text = NULL;
+    size_t len  = 0;
+    FILE  *out  = open_memstream(&text, &len);
+
+    CHECK(out != NULL);
+    if(out == NULL)
+        return;
+
+    StatusPrint(&block, out);
+    fclose(out);
+
+    CHECK(strstr(text, "tier " CFG_BLOCKLIST_TIER) != NULL);
+    CHECK(strstr(text, "latency     service, n 3,") != NULL);
+    CHECK(strstr(text, "round trip, n 3,") != NULL);
+    CHECK(strstr(text, "round trip, no samples") != NULL);
+
+    CHECK(strstr(text, "min 40 us") != NULL);
+    CHECK(strstr(text, "max 30.00 ms") != NULL);
+    CHECK(strstr(text, "min 20.00 ms") != NULL);
+
+    /* Catch format and argument mismatches */
+    CHECK(strstr(text, "(null)") == NULL);
+    CHECK(strstr(text, "%") == NULL);
+
+    free(text);
+    unlink(path);
 }
 
 /* A reader that copies while the writer is inside a snapshot has to notice and
@@ -146,7 +219,7 @@ static void TestTornReadIsRefused(const char *path)
     FillServer(&server);
 
     CHECK(StatusOpen(&status, path, 0));
-    StatusPublish(&status, &server, NULL, NULL, NULL, NULL, 0);
+    StatusPublish(&status, &server, NULL, NULL, NULL, NULL, NULL, 0);
     CHECK(StatusRead(path, &block));
 
     /* Leave the counter odd, which is what a writer part-way through looks
@@ -199,9 +272,9 @@ static void TestRefusals(const char *dir)
 
     /* Every entry point tolerates a segment that was never opened */
     status.block = NULL;
-    StatusPublish(&status, NULL, NULL, NULL, NULL, NULL, 0);
+    StatusPublish(&status, NULL, NULL, NULL, NULL, NULL, NULL, 0);
     StatusClose(&status);
-    StatusPublish(NULL, NULL, NULL, NULL, NULL, NULL, 0);
+    StatusPublish(NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0);
     StatusClose(NULL);
 
     CHECK(strcmp(StatusTransportName(200), "unknown") == 0);
@@ -218,7 +291,7 @@ static void TestStaleSegmentIsReset(const char *path)
     FillServer(&server);
 
     CHECK(StatusOpen(&status, path, 0));
-    StatusPublish(&status, &server, NULL, NULL, NULL, NULL, 0);
+    StatusPublish(&status, &server, NULL, NULL, NULL, NULL, NULL, 0);
     StatusClose(&status);
 
     CHECK(StatusRead(path, &block));
@@ -245,6 +318,7 @@ int main(void)
     snprintf(path, sizeof path, "%s/status", dir);
 
     TestPublishAndRead(path);
+    TestPrintRenders(path);
     TestTornReadIsRefused(path);
     TestForeignSegmentIsRefused(path);
     TestStaleSegmentIsReset(path);

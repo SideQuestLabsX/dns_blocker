@@ -41,6 +41,15 @@ SyncInstall SyncCommit(int stagingFd, const char *stagingPath,
 /* Drops a transfer that failed before it produced a digest. */
 void SyncAbandon(int stagingFd, const char *stagingPath);
 
+/* Lowercase letters, digits and interior single hyphens */
+bool SyncTierIsValid(const char *tier);
+bool SyncBuildAssetName(char *out, size_t cap, const char *tier);
+
+/* Returns the file tier or CFG_BLOCKLIST_TIER. Missing and empty files are
+   silent; malformed content reports once. The result points to `out` or the
+   config string */
+const char *SyncLoadTier(const char *path, char *out, size_t cap);
+
 bool SyncParseLocator(const uint8_t *data, size_t len, char *releaseTag,
                       size_t releaseTagCap);
 bool SyncBuildReleaseUrl(char *out, size_t cap, const char *releaseTag,
@@ -81,7 +90,8 @@ typedef enum
     SyncFail_Digest,
     SyncFail_Install,
     SyncFail_Locator,
-    SyncFail_Url
+    SyncFail_Url,
+    SyncFail_Tier
 } SyncFail;
 
 /* Sequences the three transfers and the install. Nothing here resolves a name:
@@ -97,6 +107,9 @@ typedef struct
     char path[CFG_SYNC_PATH_BYTES];
     char staging[CFG_SYNC_PATH_BYTES];
     char releaseTag[CFG_SYNC_RELEASE_TAG_BYTES];
+    /* Shared by the digest lookup and download */
+    char asset[CFG_BLOCKLIST_ASSET_BYTES];
+    char failText[CFG_BLOCKLIST_ASSET_BYTES + 32];
     int  stagingFd;
 
     /* Set when a redirect moved the target, so the answer to the next address
@@ -109,8 +122,9 @@ typedef struct
     SyncFail fail;
 } SyncJob;
 
-/* Prepares a run against `path`. The first step always asks for an address. */
-bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path);
+/* Prepares a run against `path`. `tier` NULL uses the compiled default */
+bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
+               const char *tier);
 
 /* The host the driver is waiting on, valid after SyncStep_NeedAddress. */
 const char *SyncHost(const SyncJob *job);

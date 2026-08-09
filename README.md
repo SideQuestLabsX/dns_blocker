@@ -161,8 +161,24 @@ and you take the combination you want rather than a bundle somebody else chose.
 | `THIRD_PARTY_LICENSES.md` | The license terms the release carries |
 
 `CFG_BLOCKLIST_TIER` selects the tier a build downloads. The same asset name is
-used for the download and digest lookup, so a build cannot fetch one tier and
+used for the download and digest lookup, so a run cannot fetch one tier and
 verify another.
+
+To change the tier without rebuilding, write the name into `/etc/dns_blocker/tier`
+and restart:
+
+```sh
+echo aggressive-nsfw-tif-gambling > /etc/dns_blocker/tier
+systemctl restart dns_blocker
+```
+
+If the file is absent, the daemon uses `CFG_BLOCKLIST_TIER`. An invalid value is
+reported once on `stderr` and ignored. A valid tier with no published trie stops
+the sync and leaves the current list in place. `dns_blocker --status` reports
+the selected tier.
+
+During an update, `/run` holds the live trie and a staging copy. Allow twice the
+trie size, and keep each trie below `CFG_BLOCKLIST_MAX_BYTES`.
 
 To install one by hand, download the trie and the digest into a staging
 directory on the same tmpfs as `CFG_BLOCKLIST_PATH`, check that one line, then
@@ -449,13 +465,21 @@ queries     4, hits 1, blocked 0, local 0, forwarded 3, failed 0
 refused     malformed 0, truncated 0, connections 0, evicted 0, retries 0
 cache       hits 1, misses 3, inserts 3, evictions 0, refused 0
 channels    opened 1, reused 2, stale 0
-blocklist   mapped, 2717008 bytes
+blocklist   mapped, 2717008 bytes, tier standard
 sync        idle, next in 3600 s, installed 2717008 bytes
+latency     service, n 4, min 41 us, mean 6.85 ms, p50 52 us, p90 27.30 ms, p99 27.30 ms, max 27.30 ms
 upstream    1.1.1.1:53 plain, 27 ms, queries 3, failures 0, rejected 0, probes 0
+latency       round trip, n 3, min 24.00 ms, mean 27.00 ms, p50 26.62 ms, p90 29.00 ms, p99 29.00 ms, max 29.00 ms
 upstream    9.9.9.9:53 plain, unmeasured, queries 0, failures 0, rejected 0, probes 0
+latency       round trip, no samples
 ```
 
 Pass a path to read a segment somewhere else: `dns_blocker --status /run/x`.
+
+`blocklist` shows the active list and selected tier. `latency` uses microseconds
+below one millisecond. The minimum, mean and maximum are exact. Histogram
+percentiles have up to one part in eight of error. `service` includes local,
+cached and forwarded answers.
 
 The same binary reads and writes it, so a reader can never hold a stale idea of
 the layout. It maps the file read-only and exits, which cannot disturb a running

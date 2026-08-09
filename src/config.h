@@ -1,10 +1,20 @@
 #ifndef DNS_BLOCKER_CONFIG_H
 #define DNS_BLOCKER_CONFIG_H
 
-/* All build-time policy. There is no runtime configuration file. */
+/* Build-time defaults. CFG_BLOCKLIST_TIER_PATH may override the tier at boot */
 
 #define KIB(n) ((size_t)(n) * 1024u)
 #define MIB(n) ((size_t)(n) * 1024u * 1024u)
+
+/* Query logs contain client domains. Zero removes the call sites */
+#ifndef FEATURE_QUERY_LOG
+  #define FEATURE_QUERY_LOG 1
+#endif
+
+/* Zero removes service-path clock reads. Upstream ranking still samples RTT */
+#ifndef FEATURE_LATENCY_STATS
+  #define FEATURE_LATENCY_STATS 1
+#endif
 
 /* Core boot arena. Every slice has a compile-time size and never grows, so
    the slices must add up to ARENA_TOTAL_BYTES. A _Static_assert in main.c
@@ -80,15 +90,23 @@
 #ifndef CFG_HOSTS_PATH
   #define CFG_HOSTS_PATH        "/etc/dns_blocker/hosts"
 #endif
-#define CFG_LOCAL_DOMAIN        "lan"
-#define CFG_HOSTS_MAX           96
-#define CFG_LOCAL_TTL_SEC       60
+#ifndef CFG_LOCAL_DOMAIN
+  #define CFG_LOCAL_DOMAIN      "lan"
+#endif
+#ifndef CFG_HOSTS_MAX
+  #define CFG_HOSTS_MAX         96
+#endif
+#ifndef CFG_LOCAL_TTL_SEC
+  #define CFG_LOCAL_TTL_SEC     60
+#endif
 
 /* A reverse query for a private address is answered here rather than forwarded.
    The upstream cannot know a LAN, so forwarding leaks the internal addressing
    and gets NXDOMAIN back anyway. RFC 6303 asks resolvers to serve these zones
    locally for the same reason. */
-#define CFG_PRIVATE_PTR_LOCAL   1
+#ifndef CFG_PRIVATE_PTR_LOCAL
+  #define CFG_PRIVATE_PTR_LOCAL 1
+#endif
 
 /* Unknown IPv4 PTR names in this prefix go to the router that knows the DHCP
    leases. Set CFG_PTR_ROUTER_ADDR to NULL to keep unknown private PTR names
@@ -132,8 +150,12 @@
 #define CFG_UDP_MSG_BYTES       1500
 
 /* Cache. Clamps bound both thrash and staleness. */
-#define CFG_CACHE_MIN_TTL_SEC   60
-#define CFG_CACHE_MAX_TTL_SEC   86400
+#ifndef CFG_CACHE_MIN_TTL_SEC
+  #define CFG_CACHE_MIN_TTL_SEC 60
+#endif
+#ifndef CFG_CACHE_MAX_TTL_SEC
+  #define CFG_CACHE_MAX_TTL_SEC 86400
+#endif
 
 /* Set-associative. A lookup or an insert touches one bucket only. This bounds
    the probe to CFG_CACHE_WAYS entries and keeps indexing to a mask. ARMv6 has
@@ -163,9 +185,16 @@
    the one with the lowest measured round trip, so no resolver receives the
    whole query stream. The order decides the boot choice and breaks a tie,
    because no measurement exists yet. Two independent operators, so one going
-   down is not correlated with the other. */
-#define CFG_UPSTREAM_ADDRS      { "1.1.1.1", "8.8.8.8" }
-#define CFG_UPSTREAM_PORT       53
+   down is not correlated with the other.
+
+   CFG_UPSTREAM_ADDRS, CFG_UPSTREAM_TLS_NAMES and CFG_UPSTREAM_DOH_PATHS share
+   indices and must be overridden together. */
+#ifndef CFG_UPSTREAM_ADDRS
+  #define CFG_UPSTREAM_ADDRS    { "1.1.1.1", "8.8.8.8" }
+#endif
+#ifndef CFG_UPSTREAM_PORT
+  #define CFG_UPSTREAM_PORT     53
+#endif
 
 #if defined(PROFILE_ENCRYPTED)
   /* Authentication names follow CFG_UPSTREAM_ADDRS in the same order.
@@ -251,6 +280,16 @@
 #ifndef CFG_BLOCKLIST_TIER
   #define CFG_BLOCKLIST_TIER    "standard"
 #endif
+
+/* Optional one-line tier override. Missing or empty uses the compiled tier.
+   Malformed content reports once and uses the compiled tier. NULL skips it */
+#ifndef CFG_BLOCKLIST_TIER_PATH
+  #define CFG_BLOCKLIST_TIER_PATH "/etc/dns_blocker/tier"
+#endif
+
+/* Bounds the composed asset name, and the status field that reports it */
+#define CFG_BLOCKLIST_TIER_BYTES  64
+#define CFG_BLOCKLIST_ASSET_BYTES (CFG_BLOCKLIST_TIER_BYTES + 32)
 #ifndef CFG_BLOCKLIST_LOCATOR_URL
   #define CFG_BLOCKLIST_LOCATOR_URL \
       "https://raw.githubusercontent.com/SideQuestLabsX/dns_blocker/blocklist-pointer/latest"
@@ -260,6 +299,7 @@
       "https://github.com/SideQuestLabsX/dns_blocker/releases/download/"
 #endif
 #define CFG_BLOCKLIST_DIGEST_ASSET "dns_blocker-blocklist.sha256"
+/* Asset for the compiled tier. Runtime sync uses the effective tier */
 #define CFG_BLOCKLIST_ASSET     "dns_blocker-blocklist-" CFG_BLOCKLIST_TIER ".trie"
 #define CFG_FETCH_URL_BYTES     2048
 #define CFG_FETCH_HOST_BYTES    CFG_TLS_HOSTNAME_BYTES

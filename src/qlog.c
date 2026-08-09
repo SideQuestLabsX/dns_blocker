@@ -1,6 +1,6 @@
 #include "qlog.h"
 
-#if defined(FEATURE_QUERY_LOG) && FEATURE_QUERY_LOG
+#if FEATURE_QUERY_LOG
 
 #include "config.h"
 #include "msg.h"

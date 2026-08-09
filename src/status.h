@@ -24,9 +24,23 @@
    reader works against every build. */
 
 #define STATUS_MAGIC   "DBS1"
-/* 2 added the deferred counter and 3 the encrypted channel counters. A reader
-   refuses a version it does not know rather than reading the wrong offsets */
-#define STATUS_VERSION 3u
+/* Readers refuse unknown layouts. Version 4 adds latency and blocklist tier */
+#define STATUS_VERSION 4u
+
+#define STATUS_TIER_BYTES CFG_BLOCKLIST_TIER_BYTES
+
+/* Snapshot summary. Histograms and their bucket layout stay in the daemon */
+typedef struct
+{
+    uint64_t count;
+    uint32_t minUs;
+    uint32_t meanUs;
+    uint32_t p50Us;
+    uint32_t p90Us;
+    uint32_t p99Us;
+    uint32_t maxUs;
+    uint32_t reserved;
+} StatusLatency;
 
 typedef struct
 {
@@ -43,6 +57,7 @@ typedef struct
     uint64_t failures;
     uint64_t rejected;
     uint64_t probes;
+    StatusLatency latency;
 } StatusUpstream;
 
 /* What the sync driver knows and the server does not. Zero everywhere on a
@@ -95,6 +110,10 @@ typedef struct
     uint32_t blocklistReserved;
     uint64_t blocklistBytes;
 
+    /* Effective tier, including before the first successful sync */
+    char blocklistTier[STATUS_TIER_BYTES];
+
+    StatusLatency  service;
     StatusSync     sync;
     StatusUpstream upstreams[CFG_MAX_UPSTREAMS];
 } StatusBlock;
@@ -110,11 +129,10 @@ typedef struct
 bool StatusOpen(Status *status, const char *path, uint32_t nowMs);
 void StatusClose(Status *status);
 
-/* One snapshot. Cheap enough for the serve loop, but the caller decides how
-   often, because nothing here reads a clock of its own. */
+/* One snapshot. `tier` NULL reports the compiled default */
 void StatusPublish(Status *status, const Server *server, const Cache *cache,
                    const UpstreamPool *pool, const Blocklist *list,
-                   const StatusSync *sync, uint32_t nowMs);
+                   const StatusSync *sync, const char *tier, uint32_t nowMs);
 
 /* Reader side. Copies a consistent snapshot out of the mapping, retrying while
    a write is in progress. False for a missing file, a foreign version or a

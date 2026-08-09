@@ -190,6 +190,7 @@ typedef struct
     Server      *server;
     Blocklist   *list;
     const char  *path;
+    const char  *tier;
     uint32_t     dueMs;
     bool         bActive;
 } SyncRun;
@@ -228,7 +229,7 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
         if(!SyncDue(nowMs, run->dueMs))
             return;
 
-        if(!SyncBegin(run->job, run->tls, run->path))
+        if(!SyncBegin(run->job, run->tls, run->path, run->tier))
         {
             if(run->job->fail == SyncFail_None)
             {
@@ -360,6 +361,9 @@ int main(int argc, char **argv)
     Memory    mem;
     Blocklist list;
     HostMap   hosts;
+    char        tierText[CFG_BLOCKLIST_TIER_BYTES];
+    const char *tier = SyncLoadTier(CFG_BLOCKLIST_TIER_PATH, tierText,
+                                   sizeof tierText);
     Cache        cache;
     UpstreamPool upstreams;
     UpstreamPool ptrRouter;
@@ -501,7 +505,7 @@ int main(int argc, char **argv)
 
 #if defined(PROFILE_ENCRYPTED)
     SyncJob  sync;
-    SyncRun  run = { &sync, &tls, &server, &list, CFG_BLOCKLIST_PATH,
+    SyncRun  run = { &sync, &tls, &server, &list, CFG_BLOCKLIST_PATH, tier,
                      ServerNowMilliseconds() + CFG_SYNC_FIRST_MS, false };
 #endif
 
@@ -535,7 +539,7 @@ int main(int argc, char **argv)
                                      ? 0 : (uint64_t)(run.dueMs - nowMs);
 #endif
             StatusPublish(&status, &server, &cache, &upstreams, &list,
-                          &syncState, nowMs);
+                          &syncState, tier, nowMs);
             statusDueMs = nowMs + CFG_STATUS_PERIOD_MS;
         }
 
@@ -568,7 +572,7 @@ int main(int argc, char **argv)
 
     /* The last snapshot stays on the tmpfs, so a reader can still see how a
        stopped daemon left things */
-    StatusPublish(&status, &server, &cache, &upstreams, &list, NULL,
+    StatusPublish(&status, &server, &cache, &upstreams, &list, NULL, tier,
                   ServerNowMilliseconds());
     StatusClose(&status);
 

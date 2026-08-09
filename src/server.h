@@ -6,6 +6,7 @@
 #include "cache.h"
 #include "config.h"
 #include "hosts.h"
+#include "latency.h"
 #include "upstream.h"
 
 #include <stdbool.h>
@@ -37,6 +38,8 @@ typedef struct
     socklen_t               fromLen;
     size_t                  connIndex;
     uint32_t                connGeneration;
+    /* Query arrival carried through deferred delivery, zero when disabled */
+    uint64_t                startUs;
 } ClientRef;
 
 typedef struct
@@ -120,6 +123,9 @@ typedef struct
     /* Queries held for a free encrypted channel. A client waits for one of
        these rather than being refused, so a rising count is latency, not loss */
     uint64_t deferred;
+
+    /* Query arrival to client delivery across local and forwarded paths */
+    LatencyHist serviceLatency;
 } Server;
 
 /* Binds UDP and TCP on the port, for IPv4 and IPv6. IPv4 is required. The
@@ -162,5 +168,6 @@ bool ServerWatchReady(const Server *server);
 
 uint32_t ServerNowSeconds(void);
 uint32_t ServerNowMilliseconds(void);
+uint64_t ServerNowMicroseconds(void);
 
 #endif

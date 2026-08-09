@@ -52,6 +52,136 @@ static void WriteFile(const char *path, const char *text)
     fclose(file);
 }
 
+/* Tier text becomes a URL path segment */
+static void TestTier(void)
+{
+    static const char *const valid[] = {
+        "standard",
+        "compact",
+        "aggressive",
+        "aggressive-nsfw-tif-gambling",
+        "aggressive-nsfw-tif-gambling-piracy-bypass",
+        "a",
+        "base2-x9"
+    };
+
+    for(size_t i = 0; i < sizeof valid / sizeof valid[0]; i++)
+        CHECK(SyncTierIsValid(valid[i]));
+
+    static const char *const invalid[] = {
+        "",
+        "-standard",
+        "standard-",
+        "stand--ard",
+        "Standard",
+        "standard.trie",
+        "standard/../other",
+        "../../etc/passwd",
+        "standard trie",
+        "standard%2f",
+        "standard\ttab",
+        "standard\nnewline",
+        "stand_ard",
+        "standard?x=1",
+        "standard#frag",
+        "//evil.example/x"
+    };
+
+    for(size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++)
+        CHECK(!SyncTierIsValid(invalid[i]));
+
+    CHECK(!SyncTierIsValid(NULL));
+
+    /* The cap includes the terminator */
+    char longTier[CFG_BLOCKLIST_TIER_BYTES + 8];
+    memset(longTier, 'a', sizeof longTier);
+
+    longTier[CFG_BLOCKLIST_TIER_BYTES] = '\0';
+    CHECK(!SyncTierIsValid(longTier));
+    longTier[CFG_BLOCKLIST_TIER_BYTES - 1] = '\0';
+    CHECK(SyncTierIsValid(longTier));
+
+    char asset[CFG_BLOCKLIST_ASSET_BYTES];
+
+    CHECK(SyncBuildAssetName(asset, sizeof asset, "standard"));
+    CHECK(strcmp(asset, "dns_blocker-blocklist-standard.trie") == 0);
+
+    CHECK(SyncBuildAssetName(asset, sizeof asset,
+                             "aggressive-nsfw-tif-gambling"));
+    CHECK(strcmp(asset,
+                 "dns_blocker-blocklist-aggressive-nsfw-tif-gambling.trie") == 0);
+
+    CHECK(SyncBuildAssetName(asset, sizeof asset, CFG_BLOCKLIST_TIER));
+    CHECK(strcmp(asset, CFG_BLOCKLIST_ASSET) == 0);
+
+    memset(asset, 'x', sizeof asset);
+    CHECK(!SyncBuildAssetName(asset, sizeof asset, "bad/tier"));
+    CHECK(asset[0] == '\0');
+
+    CHECK(!SyncBuildAssetName(asset, 8, "standard"));
+    CHECK(!SyncBuildAssetName(NULL, sizeof asset, "standard"));
+    CHECK(!SyncBuildAssetName(asset, 0, "standard"));
+    CHECK(!SyncBuildAssetName(asset, sizeof asset, NULL));
+
+    CHECK(SyncBuildAssetName(asset, sizeof asset, longTier));
+}
+
+/* Invalid overrides keep the compiled tier */
+static void TestLoadTier(const char *dir)
+{
+    char path[256];
+    char tier[CFG_BLOCKLIST_TIER_BYTES];
+
+    snprintf(path, sizeof path, "%s/tier", dir);
+
+    CHECK(strcmp(SyncLoadTier(NULL, tier, sizeof tier),
+                 CFG_BLOCKLIST_TIER) == 0);
+    CHECK(strcmp(SyncLoadTier(path, NULL, sizeof tier),
+                 CFG_BLOCKLIST_TIER) == 0);
+    CHECK(strcmp(SyncLoadTier(path, tier, 0), CFG_BLOCKLIST_TIER) == 0);
+
+    /* Missing file */
+    CHECK(strcmp(SyncLoadTier(path, tier, sizeof tier),
+                 CFG_BLOCKLIST_TIER) == 0);
+
+    WriteFile(path, "aggressive-nsfw-tif-gambling\n");
+    CHECK(strcmp(SyncLoadTier(path, tier, sizeof tier),
+                 "aggressive-nsfw-tif-gambling") == 0);
+
+    WriteFile(path, "compact");
+    CHECK(strcmp(SyncLoadTier(path, tier, sizeof tier), "compact") == 0);
+
+    WriteFile(path, "compact\r\n");
+    CHECK(strcmp(SyncLoadTier(path, tier, sizeof tier), "compact") == 0);
+
+    static const char *const rejected[] = {
+        "", "\n", "  \n", "bad/tier\n", "Compact\n", "-compact\n",
+        "compact--x\n", "compact tier\n", "../../etc/passwd\n"
+    };
+
+    for(size_t i = 0; i < sizeof rejected / sizeof rejected[0]; i++)
+    {
+        WriteFile(path, rejected[i]);
+        CHECK(strcmp(SyncLoadTier(path, tier, sizeof tier),
+                     CFG_BLOCKLIST_TIER) == 0);
+    }
+
+    /* Refuse truncation into another valid tier */
+    char oversize[CFG_BLOCKLIST_TIER_BYTES + 16];
+    memset(oversize, 'a', sizeof oversize - 1);
+    oversize[sizeof oversize - 1] = '\0';
+    WriteFile(path, oversize);
+    CHECK(strcmp(SyncLoadTier(path, tier, sizeof tier),
+                 CFG_BLOCKLIST_TIER) == 0);
+
+    char small[8];
+    WriteFile(path, "aggressive-nsfw\n");
+    CHECK(strcmp(SyncLoadTier(path, small, sizeof small),
+                 CFG_BLOCKLIST_TIER) == 0);
+
+    unlink(path);
+}
+
 static void TestLocator(void)
 {
     static const char valid[] = "blocklist-2026-08-09-31286198180-1";
@@ -343,6 +473,8 @@ int main(void)
     }
 
     TestStagingPath();
+    TestTier();
+    TestLoadTier(dir);
     TestLocator();
     TestPrepareDirectory(dir);
     TestCommitPromotes(dir);

@@ -78,6 +78,22 @@ void StatusClose(Status *status)
     status->block = NULL;
 }
 
+static void PublishLatency(StatusLatency *to, const LatencyHist *from)
+{
+    memset(to, 0, sizeof *to);
+
+    if(from == NULL || from->count == 0)
+        return;
+
+    to->count  = from->count;
+    to->minUs  = from->minUs;
+    to->meanUs = LatencyMean(from);
+    to->p50Us  = LatencyPercentile(from, 500);
+    to->p90Us  = LatencyPercentile(from, 900);
+    to->p99Us  = LatencyPercentile(from, 990);
+    to->maxUs  = from->maxUs;
+}
+
 static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
                              uint32_t nowMs)
 {
@@ -102,6 +118,7 @@ static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
         to->failures            = from->failures;
         to->rejected            = from->rejected;
         to->probes              = from->probes;
+        PublishLatency(&to->latency, &from->latency);
 
         if(from->bDown && (int32_t)(from->downUntilMs - nowMs) > 0)
             to->downForMs = from->downUntilMs - nowMs;
@@ -125,7 +142,7 @@ static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
 
 void StatusPublish(Status *status, const Server *server, const Cache *cache,
                    const UpstreamPool *pool, const Blocklist *list,
-                   const StatusSync *sync, uint32_t nowMs)
+                   const StatusSync *sync, const char *tier, uint32_t nowMs)
 {
     if(status == NULL || status->block == NULL)
         return;
@@ -174,6 +191,12 @@ void StatusPublish(Status *status, const Server *server, const Cache *cache,
         block->blocklistSource = (uint32_t)list->source;
         block->blocklistBytes  = list->size;
     }
+
+    snprintf(block->blocklistTier, sizeof block->blocklistTier, "%s",
+             (tier != NULL) ? tier : CFG_BLOCKLIST_TIER);
+
+    if(server != NULL)
+        PublishLatency(&block->service, &server->serviceLatency);
 
     if(sync != NULL)
         block->sync = *sync;
@@ -246,6 +269,46 @@ static const char *AddressText(const StatusUpstream *upstream, char *out,
     return out;
 }
 
+/* Choose units by magnitude without floating point */
+static const char *DurationText(uint32_t us, char *out, size_t cap)
+{
+    if(us < 1000u)
+        snprintf(out, cap, "%u us", us);
+    else if(us < 1000000u)
+        snprintf(out, cap, "%u.%02u ms", us / 1000u, (us % 1000u) / 10u);
+    else
+        snprintf(out, cap, "%u.%03u s", us / 1000000u, (us % 1000000u) / 1000u);
+
+    return out;
+}
+
+static void PrintLatency(FILE *out, const char *label,
+                         const StatusLatency *latency)
+{
+    if(latency->count == 0)
+    {
+        fprintf(out, "latency     %s, no samples\n", label);
+        return;
+    }
+
+    char min[24];
+    char mean[24];
+    char p50[24];
+    char p90[24];
+    char p99[24];
+    char max[24];
+
+    fprintf(out, "latency     %s, n %llu, min %s, mean %s, p50 %s, p90 %s, "
+                 "p99 %s, max %s\n",
+            label, (unsigned long long)latency->count,
+            DurationText(latency->minUs, min, sizeof min),
+            DurationText(latency->meanUs, mean, sizeof mean),
+            DurationText(latency->p50Us, p50, sizeof p50),
+            DurationText(latency->p90Us, p90, sizeof p90),
+            DurationText(latency->p99Us, p99, sizeof p99),
+            DurationText(latency->maxUs, max, sizeof max));
+}
+
 void StatusPrint(const StatusBlock *block, FILE *out)
 {
     if(block == NULL || out == NULL)
@@ -282,13 +345,16 @@ void StatusPrint(const StatusBlock *block, FILE *out)
             (unsigned long long)block->cacheInserts,
             (unsigned long long)block->cacheEvictions,
             (unsigned long long)block->cacheRejects);
-    fprintf(out, "blocklist   %s, %llu bytes\n",
+    fprintf(out, "blocklist   %s, %llu bytes, tier %s\n",
             BlocklistSourceName((BlocklistSource)block->blocklistSource),
-            (unsigned long long)block->blocklistBytes);
+            (unsigned long long)block->blocklistBytes,
+            (block->blocklistTier[0] != '\0') ? block->blocklistTier
+                                              : "unnamed");
     fprintf(out, "sync        %s, next in %llu s, installed %llu bytes\n",
             (block->sync.bActive != 0) ? "running" : "idle",
             (unsigned long long)(block->sync.nextDueMs / 1000u),
             (unsigned long long)block->sync.installedBytes);
+    PrintLatency(out, "service", &block->service);
 
     for(uint32_t i = 0; i < block->upstreamCount; i++)
     {
@@ -316,6 +382,7 @@ void StatusPrint(const StatusBlock *block, FILE *out)
             fprintf(out, ", REFUSED THE PROTOCOL");
 
         fprintf(out, "\n");
+        PrintLatency(out, "  round trip", &upstream->latency);
     }
 }
 

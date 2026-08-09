@@ -2,6 +2,7 @@
 #define DNS_BLOCKER_UPSTREAM_H
 
 #include "config.h"
+#include "latency.h"
 #include "tls.h"
 #include "verify.h"
 #include "wire.h"
@@ -46,6 +47,9 @@ typedef struct
     uint64_t rejected;
     uint64_t failures;
     uint64_t probes;
+
+    /* Unsmoothed round-trip distribution for status reporting */
+    LatencyHist latency;
 
     VerifyResult lastReject;
 } Upstream;

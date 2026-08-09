@@ -242,7 +242,7 @@ static void TestHappyPath(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(strcmp(SyncHost(&job), "raw.githubusercontent.com") == 0);
     CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
 
@@ -273,7 +273,7 @@ static void TestRedirects(const char *dir)
     ReplyRedirect("https://objects.example/asset");
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
     CHECK(resolves == 6);
     CHECK(SizeOf(target) == 6);
@@ -301,7 +301,7 @@ static void TestDigestMismatchKeepsTheOldList(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("tampered\n", 9);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
 
     /* The list the daemon is serving has to survive a bad download */
@@ -331,7 +331,7 @@ static void TestListingWithoutTheAsset(const char *dir)
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(other, strlen(other));
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
 
     /* Nothing was downloaded, so no staging file was ever opened */
@@ -357,7 +357,7 @@ static void TestTransferFailureCleansUp(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     Reply("HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n", "short", 5);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
 
     /* A partial download must not be left behind for the next run to find */
@@ -380,7 +380,7 @@ static void TestServerError(const char *dir)
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     Reply("HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n", NULL, 0);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(!Exists(target));
     CHECK(job.fail == SyncFail_Transfer);
@@ -401,7 +401,7 @@ static void TestFailuresNameThemselves(const char *dir)
 
     ScriptReset();
     Reply("HTTP/2 200 OK\r\nContent-Length: 0\r\n\r\n", NULL, 0);
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.job.fail == FetchFail_Header);
     CHECK(strcmp(SyncFailText(&job), "the response header was refused") == 0);
@@ -410,7 +410,7 @@ static void TestFailuresNameThemselves(const char *dir)
     ScriptReset();
     for(unsigned i = 0; i < CFG_FETCH_MAX_REDIRECTS + 1; i++)
         ReplyRedirect("https://cdn.example/asset");
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.job.fail == FetchFail_Redirects);
     SyncEnd(&job);
@@ -420,7 +420,7 @@ static void TestFailuresNameThemselves(const char *dir)
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
-    CHECK(SyncBegin(&job, &G_BACKEND, "/nonexistent/dns_blocker/blocklist.trie"));
+    CHECK(SyncBegin(&job, &G_BACKEND, "/nonexistent/dns_blocker/blocklist.trie", NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.fail == SyncFail_Staging);
     SyncEnd(&job);
@@ -430,13 +430,72 @@ static void TestFailuresNameThemselves(const char *dir)
     CHECK(strcmp(FetchFailText(NULL), "no transfer") == 0);
 
     ScriptReset();
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     job.phase = SyncPhase_Digest;
     memcpy(job.releaseTag, "bad/tag", sizeof "bad/tag");
     CHECK(!Answer(&job));
     CHECK(job.fail == SyncFail_Url);
     CHECK(strcmp(SyncFailText(&job), "the release URL is invalid") == 0);
     SyncEnd(&job);
+}
+
+/* Runtime tier selects both digest and asset */
+static void TestRuntimeTierSelectsTheAsset(const char *dir)
+{
+    SyncJob job;
+    char    target[256];
+
+    static const char listing[] =
+        "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  "
+        "dns_blocker-blocklist-aggressive-nsfw.trie\n"
+        "8d4a70100bf861ea3f9dcd701938a183e89c300932ad6ac6b35fa5c8fe4979f9  "
+        CFG_BLOCKLIST_ASSET "\n";
+
+    snprintf(target, sizeof target, "%s/runtime-tier.trie", dir);
+
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyBody(listing, strlen(listing));
+    ReplyBody("hello\n", 6);
+
+    CHECK(SyncBegin(&job, &G_BACKEND, target, "aggressive-nsfw"));
+    CHECK(Run(&job, 512, NULL) == SyncStep_Done);
+    CHECK(SizeOf(target) == 6);
+
+    SyncEnd(&job);
+    unlink(target);
+
+    /* The compiled tier selects the other digest */
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyBody(listing, strlen(listing));
+    ReplyBody("hello\n", 6);
+
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
+    CHECK(job.fail == SyncFail_Digest);
+    CHECK(!Exists(target));
+
+    SyncEnd(&job);
+}
+
+static void TestInvalidTierIsRefused(const char *dir)
+{
+    SyncJob job;
+    char    target[256];
+
+    snprintf(target, sizeof target, "%s/bad-tier.trie", dir);
+
+    ScriptReset();
+    CHECK(!SyncBegin(&job, &G_BACKEND, target, "bad/tier"));
+    CHECK(job.fail == SyncFail_Tier);
+    CHECK(strcmp(SyncFailText(&job), "the configured tier is not a valid name")
+          == 0);
+
+    CHECK(!SyncBegin(&job, &G_BACKEND, target, ""));
+    CHECK(job.fail == SyncFail_Tier);
+
+    CHECK(!Exists(target));
 }
 
 static void TestInvalidLocator(const char *dir)
@@ -448,7 +507,7 @@ static void TestInvalidLocator(const char *dir)
 
     ScriptReset();
     ReplyBody("blocklist-latest\n", strlen("blocklist-latest\n"));
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.fail == SyncFail_Locator);
     CHECK(strcmp(SyncPhaseText(&job), "release locator") == 0);
@@ -465,18 +524,18 @@ static void TestRefusals(const char *dir)
 
     snprintf(target, sizeof target, "%s/guard.trie", dir);
 
-    CHECK(!SyncBegin(NULL, &G_BACKEND, target));
-    CHECK(!SyncBegin(&job, NULL, target));
-    CHECK(!SyncBegin(&job, &G_BACKEND, NULL));
+    CHECK(!SyncBegin(NULL, &G_BACKEND, target, NULL));
+    CHECK(!SyncBegin(&job, NULL, target, NULL));
+    CHECK(!SyncBegin(&job, &G_BACKEND, NULL, NULL));
 
     char oversize[CFG_SYNC_PATH_BYTES + 16];
     memset(oversize, 'a', sizeof oversize);
     oversize[sizeof oversize - 1] = '\0';
-    CHECK(!SyncBegin(&job, &G_BACKEND, oversize));
+    CHECK(!SyncBegin(&job, &G_BACKEND, oversize, NULL));
 
     ScriptReset();
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
-    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
 
     /* An address is only meaningful while the driver is waiting for one */
     CHECK(SyncEvents(&job) == 0);
@@ -517,6 +576,8 @@ int main(void)
     TestServerError(dir);
     TestFailuresNameThemselves(dir);
     TestInvalidLocator(dir);
+    TestRuntimeTierSelectsTheAsset(dir);
+    TestInvalidTierIsRefused(dir);
     TestRefusals(dir);
 
     close(listener);

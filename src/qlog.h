@@ -1,6 +1,7 @@
 #ifndef DNS_BLOCKER_QLOG_H
 #define DNS_BLOCKER_QLOG_H
 
+#include "config.h"
 #include "wire.h"
 
 #include <stdbool.h>
@@ -25,7 +26,7 @@
 #define QLOG_OUTCOME_FAILED    "failed"
 #define QLOG_OUTCOME_MALFORMED "malformed"
 
-#if defined(FEATURE_QUERY_LOG) && FEATURE_QUERY_LOG
+#if FEATURE_QUERY_LOG
 
 void QueryLogLine(bool bOverTcp, const WireQuestion *question,
                   const char *outcome, uint16_t rcode);

@@ -85,7 +85,10 @@ void UpstreamPoolInit(UpstreamPool *pool, uint32_t nowMs)
     memset(pool, 0, sizeof *pool);
 
     for(size_t i = 0; i < CFG_MAX_UPSTREAMS; i++)
+    {
         pool->members[i].srttMs = UPSTREAM_RTT_NONE;
+        LatencyReset(&pool->members[i].latency);
+    }
 
 #if defined(PROFILE_ENCRYPTED)
     /* A zeroed descriptor is stdin, and a slot that is closed without ever
@@ -260,6 +263,10 @@ void UpstreamPoolSample(UpstreamPool *pool, size_t index, uint32_t rttMs)
         member->srttMs = rttMs;
     else
         member->srttMs = member->srttMs - (member->srttMs >> 3) + (rttMs >> 3);
+
+    /* Status histograms share a microsecond scale */
+    LatencyAdd(&member->latency, (rttMs > UINT32_MAX / 1000u)
+                                 ? UINT32_MAX : rttMs * 1000u);
 
     member->consecutiveFailures = 0;
     member->bDown               = false;

@@ -29,6 +29,41 @@ uint32_t ServerNowMilliseconds(void)
     return (uint32_t)(now.tv_sec * 1000 + now.tv_nsec / 1000000);
 }
 
+uint64_t ServerNowMicroseconds(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000u + (uint64_t)(now.tv_nsec / 1000);
+}
+
+#if FEATURE_LATENCY_STATS
+static uint64_t ServiceStartUs(void)
+{
+    return ServerNowMicroseconds();
+}
+
+static void ServiceMeasure(Server *server, uint64_t startUs)
+{
+    if(server == NULL || startUs == 0)
+        return;
+
+    uint64_t nowUs = ServerNowMicroseconds();
+    if(nowUs < startUs)
+        return;
+
+    uint64_t tookUs = nowUs - startUs;
+    LatencyAdd(&server->serviceLatency,
+               (tookUs > UINT32_MAX) ? UINT32_MAX : (uint32_t)tookUs);
+}
+#else
+static uint64_t ServiceStartUs(void)
+{
+    return 0;
+}
+
+  #define ServiceMeasure(server, startUs) ((void)(server), (void)(startUs))
+#endif
+
 static bool Elapsed(uint32_t nowMs, uint32_t deadlineMs)
 {
     return (int32_t)(nowMs - deadlineMs) >= 0;
@@ -238,6 +273,8 @@ void ServerClose(Server *server)
 static void Deliver(Server *server, const ClientRef *client,
                     const uint8_t *reply, size_t replyLen)
 {
+    ServiceMeasure(server, client->startUs);
+
     if(!client->bOverTcp)
     {
         sendto(client->listenFd, reply, replyLen, 0,
@@ -980,10 +1017,14 @@ static void ServiceUdp(Server *server, int fd)
     if(got < 0)
         return;
 
+    client.startUs = ServiceStartUs();
+
+    /* Deferred replies keep startUs in the transaction */
     if(HandleQuery(server, query, (size_t)got, reply, sizeof reply, &replyLen,
                    &client) != Handled_Reply)
         return;
 
+    ServiceMeasure(server, client.startUs);
     sendto(fd, reply, replyLen, 0,
            (struct sockaddr *)&client.from, client.fromLen);
 }
@@ -1093,6 +1134,7 @@ static void ServiceConnection(Server *server, Connection *conn, size_t index)
     client.bOverTcp       = true;
     client.connIndex      = index;
     client.connGeneration = conn->generation;
+    client.startUs        = ServiceStartUs();
 
     Handled outcome = HandleQuery(server, conn->buf + 2, conn->want,
                                   reply, sizeof reply, &replyLen, &client);

@@ -39,7 +39,7 @@ CFLAGS_COMMON := \
 	-std=c11 -O2 -flto \
 	-fstack-protector-strong \
 	-fno-unwind-tables -fno-asynchronous-unwind-tables \
-	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
+	-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wundef \
 	-Isrc
 
 # 32-bit ARM musl has no -static-pie. gcc accepts the flag and emits a dynamic
@@ -94,11 +94,10 @@ endif
 # license text
 LICENSE_FILES := $(BUILD)/THIRD_PARTY_LICENSES.md
 
-# On by default. The query stream is the daemon's largest and most sensitive
-# output, so setting this to 0 removes the call sites rather than leaving a
-# branch a misconfiguration can flip
-FEATURES += -DFEATURE_QUERY_LOG=1
-
+# Feature defaults live in src/config.h. Override one for a build:
+#
+#   make FEATURES=-DFEATURE_QUERY_LOG=0
+#
 # Off by default on purpose
 # FEATURES += -DFEATURE_DGA_FILTER=1
 # FEATURES += -DFEATURE_IO_URING=1     # opt-in only, pulls in liburing
@@ -172,7 +171,7 @@ $(MBEDTLS_MARKER): tools/build-mbedtls.sh | $(BUILD)
 # built with the shipped flags, and it links the stub rather than its own output
 tools: $(BUILD)/mkblocklist
 $(BUILD)/mkblocklist: tools/mkblocklist.c src/blocklist.c src/wire.c src/embedded.c $(HDR) tools/trieimage.h tools/listline.h | $(BUILD)
-	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Isrc -Itools $(filter %.c,$^) -o $@
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wundef -Isrc -Itools $(filter %.c,$^) -o $@
 
 # One of the two definitions of G_EMBEDDED_TRIE reaches the link: the stub, or
 # the array mkblocklist writes from the selected list
@@ -239,11 +238,10 @@ endif
 
 # Host tests. Sanitizers are incompatible with -static-pie, so these do not
 # share CFLAGS with the shipped binary
-# $(FEATURES) is included so a test builds the same feature set as the shipped
-# binary. Without it a compile-time feature is never exercised by any test
+# Tests use the same feature overrides as the binary
 TEST_CFLAGS := -std=c11 -O1 -g \
 	-fsanitize=address,undefined -fno-omit-frame-pointer \
-	-Wall -Wextra -Wpedantic -Wshadow -Wconversion \
+	-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wundef \
 	-Isrc $(FEATURES)
 
 ifeq ($(PROFILE),encrypted)
@@ -252,7 +250,7 @@ else
   ENCRYPTED_TESTS :=
 endif
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/status_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
+test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/latency_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/status_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -260,6 +258,7 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/blocklist_test
 	@$(BUILD)/listline_test
 	@$(BUILD)/hosts_test
+	@$(BUILD)/latency_test
 	@$(BUILD)/upstream_test
 	@$(BUILD)/fetch_test
 	@$(BUILD)/sync_test
@@ -297,9 +296,13 @@ $(BUILD)/listline_test: tests/listline_test.c tools/listline.h | $(BUILD)
 $(BUILD)/hosts_test: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
+# Assert histogram bucket edges directly
+$(BUILD)/latency_test: tests/latency_test.c src/latency.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
 # Selection, ranking and health. No sockets, so the policy is tested apart from
 # the transport that carries it
-$(BUILD)/upstream_test: tests/upstream_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) | $(BUILD)
+$(BUILD)/upstream_test: tests/upstream_test.c src/upstream.c src/latency.c src/msg.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # The release response parser. Attacker-controlled bytes, so it is tested apart
@@ -309,7 +312,7 @@ $(BUILD)/fetch_test: tests/fetch_test.c src/fetch.c $(HDR) | $(BUILD)
 
 # Staging and the rename. Touches the filesystem, so it runs against a
 # temporary directory rather than the configured path
-$(BUILD)/status_test: tests/status_test.c src/status.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
+$(BUILD)/status_test: tests/status_test.c src/status.c src/blocklist.c src/latency.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/sync_test: tests/sync_test.c src/sync.c src/fetch.c $(HDR) | $(BUILD)
@@ -325,14 +328,14 @@ $(BUILD)/fetch_tls_test: tests/fetch_tls_test.c src/fetch.c $(HDR) $(TLS_DEPS) |
 $(BUILD)/sync_driver_test: tests/sync_driver_test.c src/sync.c src/fetch.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
 
-$(BUILD)/upstream_dot_test: tests/upstream_dot_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+$(BUILD)/upstream_dot_test: tests/upstream_dot_test.c src/upstream.c src/latency.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@
 
 $(BUILD)/tls_backend_test: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
 
 # Binds loopback sockets and drives a real query through the whole path
-$(BUILD)/server_test: tests/server_test.c src/server.c src/qlog.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) tools/trieimage.h | $(BUILD)
+$(BUILD)/server_test: tests/server_test.c src/server.c src/qlog.c src/upstream.c src/latency.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) tools/trieimage.h | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -Itools -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
 $(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)
@@ -352,7 +355,7 @@ test-static: $(XTEST)
 test-static-run: $(XTEST)
 	@for t in $(XTEST); do $(RUNNER) $$t || exit 1; done
 
-$(BUILD)/status_test_native: tests/status_test.c src/status.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
+$(BUILD)/status_test_native: tests/status_test.c src/status.c src/blocklist.c src/latency.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/wire_test_native: tests/wire_test.c src/wire.c $(HDR) | $(BUILD)
