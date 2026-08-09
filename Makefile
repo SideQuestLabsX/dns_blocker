@@ -379,7 +379,7 @@ $(BUILD)/hosts_test_native: tests/hosts_test.c src/hosts.c src/wire.c src/arena.
 $(BUILD)/fetch_test_native: tests/fetch_test.c src/fetch.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
-$(BUILD)/upstream_dot_test_native: tests/upstream_dot_test.c src/upstream.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+$(BUILD)/upstream_dot_test_native: tests/upstream_dot_test.c src/upstream.c src/latency.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
 $(BUILD)/tls_backend_test_native: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
