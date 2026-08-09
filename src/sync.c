@@ -11,6 +11,9 @@
 
 static const char G_SUFFIX[] = ".new";
 
+_Static_assert(CFG_SYNC_RELEASE_TAG_BYTES + 1 <= CFG_SYNC_DIGEST_BYTES,
+               "locator body exceeds its buffer");
+
 bool SyncStagingPath(char *out, size_t cap, const char *path)
 {
     if(out == NULL || path == NULL || cap == 0)
@@ -118,7 +121,135 @@ SyncInstall SyncCommit(int stagingFd, const char *stagingPath,
     return SyncInstall_Ok;
 }
 
+static bool IsDigit(uint8_t value)
+{
+    return value >= '0' && value <= '9';
+}
+
+static bool DecimalFieldIsValid(const uint8_t *data, size_t begin, size_t end)
+{
+    if(begin == end || data[begin] == '0')
+        return false;
+
+    for(size_t i = begin; i < end; i++)
+    {
+        if(!IsDigit(data[i]))
+            return false;
+    }
+
+    return true;
+}
+
+static bool LocatorTagIsValid(const uint8_t *data, size_t len)
+{
+    static const char prefix[] = "blocklist-";
+    if(data == NULL || len < 24 || memcmp(data, prefix, sizeof prefix - 1) != 0)
+        return false;
+
+    for(size_t i = 10; i < 14; i++)
+    {
+        if(!IsDigit(data[i]))
+            return false;
+    }
+
+    if(data[14] != '-' || !IsDigit(data[15]) || !IsDigit(data[16])
+       || data[17] != '-' || !IsDigit(data[18]) || !IsDigit(data[19])
+       || data[20] != '-')
+        return false;
+
+    unsigned year = (unsigned)(data[10] - '0') * 1000u
+                  + (unsigned)(data[11] - '0') * 100u
+                  + (unsigned)(data[12] - '0') * 10u
+                  + (unsigned)(data[13] - '0');
+    unsigned month = (unsigned)(data[15] - '0') * 10u
+                   + (unsigned)(data[16] - '0');
+    unsigned day = (unsigned)(data[18] - '0') * 10u
+                 + (unsigned)(data[19] - '0');
+    static const uint8_t days[] = {
+        31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+    };
+
+    if(year == 0 || month == 0 || month > 12)
+        return false;
+
+    unsigned maxDay = days[month - 1];
+    bool bLeap = (year % 4u == 0 && year % 100u != 0) || year % 400u == 0;
+    if(month == 2 && bLeap)
+        maxDay++;
+    if(day == 0 || day > maxDay)
+        return false;
+
+    size_t separator = 21;
+    while(separator < len && IsDigit(data[separator]))
+        separator++;
+
+    if(separator >= len || data[separator] != '-'
+       || !DecimalFieldIsValid(data, 21, separator)
+       || !DecimalFieldIsValid(data, separator + 1, len))
+        return false;
+
+    return true;
+}
+
+bool SyncParseLocator(const uint8_t *data, size_t len, char *releaseTag,
+                      size_t releaseTagCap)
+{
+    if(releaseTag == NULL || releaseTagCap == 0)
+        return false;
+    releaseTag[0] = '\0';
+
+    if(data == NULL || len == 0)
+        return false;
+
+    size_t tagLen = len;
+    if(data[tagLen - 1] == '\n')
+    {
+        tagLen--;
+        if(tagLen > 0 && data[tagLen - 1] == '\r')
+            tagLen--;
+    }
+
+    if(tagLen + 1 > releaseTagCap || !LocatorTagIsValid(data, tagLen))
+        return false;
+
+    memcpy(releaseTag, data, tagLen);
+    releaseTag[tagLen] = '\0';
+    return true;
+}
+
+bool SyncBuildReleaseUrl(char *out, size_t cap, const char *releaseTag,
+                         const char *asset)
+{
+    if(out == NULL || cap == 0)
+        return false;
+    out[0] = '\0';
+
+    if(releaseTag == NULL || asset == NULL)
+        return false;
+
+    size_t tagLen = strnlen(releaseTag, CFG_SYNC_RELEASE_TAG_BYTES);
+    size_t assetLen = strnlen(asset, CFG_FETCH_URL_BYTES);
+    size_t baseLen = sizeof CFG_BLOCKLIST_RELEASE_BASE_URL - 1;
+    if(tagLen == CFG_SYNC_RELEASE_TAG_BYTES || assetLen == 0
+       || assetLen == CFG_FETCH_URL_BYTES
+       || !LocatorTagIsValid((const uint8_t *)releaseTag, tagLen)
+       || baseLen + tagLen + 1 + assetLen + 1 > cap)
+        return false;
+
+    memcpy(out, CFG_BLOCKLIST_RELEASE_BASE_URL, baseLen);
+    memcpy(out + baseLen, releaseTag, tagLen);
+    out[baseLen + tagLen] = '/';
+    memcpy(out + baseLen + tagLen + 1, asset, assetLen);
+    out[baseLen + tagLen + 1 + assetLen] = '\0';
+    return true;
+}
+
 #if defined(PROFILE_ENCRYPTED)
+
+_Static_assert(sizeof CFG_BLOCKLIST_RELEASE_BASE_URL
+               + CFG_SYNC_RELEASE_TAG_BYTES + sizeof CFG_BLOCKLIST_ASSET
+               <= CFG_FETCH_URL_BYTES,
+               "blocklist release URL exceeds the fetch buffer");
 
 static bool CopyString(char *out, size_t cap, const char *text)
 {
@@ -134,6 +265,28 @@ static bool CopyString(char *out, size_t cap, const char *text)
     return true;
 }
 
+static bool BuildPhaseUrl(const SyncJob *job, char *out, size_t cap)
+{
+    if(job->phase == SyncPhase_Locator)
+        return CopyString(out, cap, CFG_BLOCKLIST_LOCATOR_URL);
+
+    const char *asset = (job->phase == SyncPhase_Digest)
+                      ? CFG_BLOCKLIST_DIGEST_ASSET : CFG_BLOCKLIST_ASSET;
+    return SyncBuildReleaseUrl(out, cap, job->releaseTag, asset);
+}
+
+static bool SetPhaseUrl(SyncJob *job)
+{
+    char urlText[CFG_FETCH_URL_BYTES];
+    FetchUrl url;
+    if(!BuildPhaseUrl(job, urlText, sizeof urlText)
+       || !FetchParseUrl(urlText, &url))
+        return false;
+
+    job->job.url = url;
+    return true;
+}
+
 bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path)
 {
     if(job == NULL || backend == NULL || path == NULL)
@@ -142,32 +295,26 @@ bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path)
     memset(job, 0, sizeof *job);
     job->backend   = backend;
     job->stagingFd = -1;
-    job->phase     = SyncPhase_Digest;
+    job->phase     = SyncPhase_Locator;
 
     if(!CopyString(job->path, sizeof job->path, path)
        || !SyncStagingPath(job->staging, sizeof job->staging, job->path))
         return false;
 
-    /* The URL is parsed now so a bad one fails at the call rather than after a
-       resolution has already been spent on it */
-    FetchUrl url;
-    if(!FetchParseUrl(CFG_BLOCKLIST_DIGEST_URL, &url))
+    if(!SetPhaseUrl(job))
+    {
+        job->state = SyncState_Failed;
+        job->fail  = SyncFail_Url;
         return false;
+    }
 
-    job->job.url = url;
-    job->state   = SyncState_Resolve;
+    job->state = SyncState_Resolve;
     return true;
 }
 
 const char *SyncHost(const SyncJob *job)
 {
     return (job != NULL) ? job->job.url.host : NULL;
-}
-
-static const char *PhaseUrl(const SyncJob *job)
-{
-    return (job->phase == SyncPhase_Digest)
-         ? CFG_BLOCKLIST_DIGEST_URL : CFG_BLOCKLIST_URL;
 }
 
 bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
@@ -181,25 +328,39 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
     {
         bStarted = FetchFollow(&job->job, job->backend, addr, addrLen);
     }
-    else if(job->phase == SyncPhase_Digest)
-    {
-        bStarted = FetchBeginToMemory(&job->job, job->backend, PhaseUrl(job),
-                                      addr, addrLen, job->digestText,
-                                      sizeof job->digestText);
-    }
     else
     {
-        job->stagingFd = SyncOpenStaging(job->staging);
-        if(job->stagingFd < 0)
+        char urlText[CFG_FETCH_URL_BYTES];
+        if(!BuildPhaseUrl(job, urlText, sizeof urlText))
         {
             job->state = SyncState_Failed;
-            job->fail  = SyncFail_Staging;
+            job->fail  = SyncFail_Url;
             return false;
         }
 
-        bStarted = FetchBegin(&job->job, job->backend, PhaseUrl(job), addr,
-                              addrLen, job->stagingFd,
-                              CFG_BLOCKLIST_MAX_BYTES);
+        if(job->phase != SyncPhase_Asset)
+        {
+            size_t cap = (job->phase == SyncPhase_Locator)
+                       ? CFG_SYNC_RELEASE_TAG_BYTES + 1
+                       : sizeof job->metadataText;
+            bStarted = FetchBeginToMemory(&job->job, job->backend, urlText,
+                                          addr, addrLen, job->metadataText,
+                                          cap);
+        }
+        else
+        {
+            job->stagingFd = SyncOpenStaging(job->staging);
+            if(job->stagingFd < 0)
+            {
+                job->state = SyncState_Failed;
+                job->fail  = SyncFail_Staging;
+                return false;
+            }
+
+            bStarted = FetchBegin(&job->job, job->backend, urlText, addr,
+                                  addrLen, job->stagingFd,
+                                  CFG_BLOCKLIST_MAX_BYTES);
+        }
     }
 
     if(!bStarted)
@@ -229,9 +390,39 @@ int SyncFd(const SyncJob *job)
     return job->job.fd;
 }
 
+static SyncStep StartPhase(SyncJob *job, SyncPhase phase)
+{
+    /* Each phase resolves its own release URL after the last transfer's redirects */
+    FetchEnd(&job->job);
+    job->phase      = phase;
+    job->bFollowing = false;
+    if(!SetPhaseUrl(job))
+    {
+        job->state = SyncState_Failed;
+        job->fail  = SyncFail_Url;
+        return SyncStep_Failed;
+    }
+
+    job->state = SyncState_Resolve;
+    return SyncStep_NeedAddress;
+}
+
+static SyncStep FinishLocator(SyncJob *job)
+{
+    if(!SyncParseLocator(job->metadataText, FetchBodyLength(&job->job),
+                         job->releaseTag, sizeof job->releaseTag))
+    {
+        job->state = SyncState_Failed;
+        job->fail  = SyncFail_Locator;
+        return SyncStep_Failed;
+    }
+
+    return StartPhase(job, SyncPhase_Digest);
+}
+
 static SyncStep FinishDigest(SyncJob *job)
 {
-    if(!FetchFindDigest(job->digestText, FetchBodyLength(&job->job),
+    if(!FetchFindDigest(job->metadataText, FetchBodyLength(&job->job),
                         CFG_BLOCKLIST_ASSET, job->want))
     {
         job->state = SyncState_Failed;
@@ -239,24 +430,8 @@ static SyncStep FinishDigest(SyncJob *job)
         return SyncStep_Failed;
     }
 
-    job->bHaveWant  = true;
-    job->phase      = SyncPhase_Asset;
-    job->bFollowing = false;
-    FetchEnd(&job->job);
-
-    /* The asset lives on the same host as the listing, but it is resolved
-       again rather than assumed, because a redirect moved the last one */
-    FetchUrl url;
-    if(!FetchParseUrl(CFG_BLOCKLIST_URL, &url))
-    {
-        job->state = SyncState_Failed;
-        job->fail  = SyncFail_Transfer;
-        return SyncStep_Failed;
-    }
-
-    job->job.url = url;
-    job->state   = SyncState_Resolve;
-    return SyncStep_NeedAddress;
+    job->bHaveWant = true;
+    return StartPhase(job, SyncPhase_Asset);
 }
 
 static SyncStep FinishAsset(SyncJob *job)
@@ -328,8 +503,14 @@ SyncStep SyncProgress(SyncJob *job)
         return SyncStep_Failed;
     }
 
-    return (job->phase == SyncPhase_Digest) ? FinishDigest(job)
-                                            : FinishAsset(job);
+    switch(job->phase)
+    {
+        case SyncPhase_Locator: return FinishLocator(job);
+        case SyncPhase_Digest:  return FinishDigest(job);
+        case SyncPhase_Asset:   return FinishAsset(job);
+    }
+
+    return SyncStep_Failed;
 }
 
 const char *SyncPhaseText(const SyncJob *job)
@@ -337,7 +518,14 @@ const char *SyncPhaseText(const SyncJob *job)
     if(job == NULL)
         return "no run";
 
-    return (job->phase == SyncPhase_Digest) ? "digest listing" : "trie";
+    switch(job->phase)
+    {
+        case SyncPhase_Locator: return "release locator";
+        case SyncPhase_Digest:  return "digest listing";
+        case SyncPhase_Asset:   return "trie";
+    }
+
+    return "unknown";
 }
 
 const char *SyncFailText(const SyncJob *job)
@@ -353,6 +541,8 @@ const char *SyncFailText(const SyncJob *job)
         case SyncFail_Listing:  return "the listing names no " CFG_BLOCKLIST_ASSET;
         case SyncFail_Digest:   return "the digest did not match";
         case SyncFail_Install:  return "the install failed";
+        case SyncFail_Locator:  return "the locator names no valid release";
+        case SyncFail_Url:      return "the release URL is invalid";
     }
 
     return "unknown";

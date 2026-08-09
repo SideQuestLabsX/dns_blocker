@@ -15,11 +15,42 @@ tier=${1:?usage: fetch-embed-list.sh <tier> <output.trie>}
 output=${2:?usage: fetch-embed-list.sh <tier> <output.trie>}
 config=${CONFIG_HEADER:-src/config.h}
 
-# The daemon's own base URL, so an embedded list and a synced one come from the
-# same release
-base=$(sed -n 's/^ *#define CFG_BLOCKLIST_BASE_URL *"\(.*\)".*/\1/p' "$config")
-if [ -z "$base" ]; then
-    printf 'fetch-embed-list: no CFG_BLOCKLIST_BASE_URL in %s\n' "$config" >&2
+configValue()
+{
+    awk -v name="$1" '
+        $1 == "#define" && $2 == name {
+            if (match($0, /"[^"]*"/)) {
+                print substr($0, RSTART + 1, RLENGTH - 2)
+                exit
+            }
+            if (getline > 0 && match($0, /"[^"]*"/)) {
+                print substr($0, RSTART + 1, RLENGTH - 2)
+                exit
+            }
+        }
+    ' "$config"
+}
+
+configNumber()
+{
+    awk -v name="$1" '
+        $1 == "#define" && $2 == name && $3 ~ /^[0-9]+$/ {
+            print $3
+            exit
+        }
+    ' "$config"
+}
+
+locator=$(configValue CFG_BLOCKLIST_LOCATOR_URL)
+releaseBase=$(configValue CFG_BLOCKLIST_RELEASE_BASE_URL)
+releaseTagBytes=$(configNumber CFG_SYNC_RELEASE_TAG_BYTES)
+case "$releaseTagBytes" in
+    *[!0-9]*|'') releaseTagBytes=0 ;;
+esac
+if [ -z "$locator" ] || [ -z "$releaseBase" ] \
+   || [ "$releaseTagBytes" -lt 2 ]
+then
+    printf 'fetch-embed-list: invalid release configuration in %s\n' "$config" >&2
     exit 1
 fi
 
@@ -29,20 +60,67 @@ work="$output.work"
 rm -rf "$work"
 mkdir -p "$work"
 
-# No --retry-all-errors: a 404 here is a tier the release does not carry, and
-# asking four times does not change that
+# A missing locator or tier will not appear during repeated HTTP-error retries
 get()
 {
     if ! curl --proto '=https' --tlsv1.2 -fsSL \
         --retry 3 --connect-timeout 30 --max-time 600 \
-        --max-filesize 134217728 "$1" -o "$2"
+        --max-filesize "${3:-134217728}" "$1" -o "$2"
     then
         printf 'fetch-embed-list: cannot download %s\n' "$1" >&2
-        printf '  a 404 means the release carries no tier named %s\n' "$tier" >&2
         exit 1
     fi
 }
 
+locatorIsValid()
+{
+    awk '
+        NR == 1 {
+            if ($0 !~ /^blocklist-[0-9][0-9][0-9][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])-[1-9][0-9]*-[1-9][0-9]*$/)
+                exit 1
+
+            split($0, field, "-")
+            year = field[2] + 0
+            month = field[3] + 0
+            day = field[4] + 0
+            days[1] = 31
+            days[2] = 28
+            days[3] = 31
+            days[4] = 30
+            days[5] = 31
+            days[6] = 30
+            days[7] = 31
+            days[8] = 31
+            days[9] = 30
+            days[10] = 31
+            days[11] = 30
+            days[12] = 31
+            if (year == 0)
+                exit 1
+            if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0))
+                days[2]++
+            if (day > days[month])
+                exit 1
+            valid = 1
+        }
+        END {
+            if (NR != 1 || !valid)
+                exit 1
+        }
+    ' "$1"
+}
+
+get "$locator" "$work/locator" "$releaseTagBytes"
+tag=$(sed -n '1p' "$work/locator")
+if [ "$(wc -l < "$work/locator")" -ne 1 ] \
+   || [ "$(wc -c < "$work/locator")" -ne $((${#tag} + 1)) ] \
+   || ! locatorIsValid "$work/locator"
+then
+    printf 'fetch-embed-list: invalid release locator\n' >&2
+    exit 1
+fi
+
+base="${releaseBase}${tag}/"
 get "$base$asset" "$work/$asset"
 get "${base}dns_blocker-blocklist.sha256" "$work/digest"
 

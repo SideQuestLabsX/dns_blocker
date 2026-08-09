@@ -52,6 +52,72 @@ static void WriteFile(const char *path, const char *text)
     fclose(file);
 }
 
+static void TestLocator(void)
+{
+    static const char valid[] = "blocklist-2026-08-09-31286198180-1";
+    char tag[CFG_SYNC_RELEASE_TAG_BYTES];
+    char url[CFG_FETCH_URL_BYTES];
+
+    CHECK(SyncParseLocator((const uint8_t *)valid, strlen(valid), tag,
+                           sizeof tag));
+    CHECK(strcmp(tag, valid) == 0);
+
+    static const char lf[] = "blocklist-2026-08-09-31286198180-1\n";
+    CHECK(SyncParseLocator((const uint8_t *)lf, strlen(lf), tag, sizeof tag));
+
+    static const char crlf[] = "blocklist-2024-02-29-1-2\r\n";
+    CHECK(SyncParseLocator((const uint8_t *)crlf, strlen(crlf), tag,
+                           sizeof tag));
+
+    static const char *invalid[] = {
+        "",
+        "release-2026-08-09-1-1",
+        "blocklist-0000-08-09-1-1",
+        "blocklist-2026-00-09-1-1",
+        "blocklist-2026-13-09-1-1",
+        "blocklist-2026-02-29-1-1",
+        "blocklist-2026-08-32-1-1",
+        "blocklist-2026-08-09-0-1",
+        "blocklist-2026-08-09-01-1",
+        "blocklist-2026-08-09-1-0",
+        "blocklist-2026-08-09-1-01",
+        "blocklist-2026-08-09-1-1/asset",
+        "blocklist-2026-08-09-1-1\nextra",
+        "blocklist-2026-08-09-1-1\n\n"
+    };
+
+    for(size_t i = 0; i < sizeof invalid / sizeof invalid[0]; i++)
+    {
+        memset(tag, 'x', sizeof tag);
+        CHECK(!SyncParseLocator((const uint8_t *)invalid[i], strlen(invalid[i]),
+                                tag, sizeof tag));
+        CHECK(tag[0] == '\0');
+    }
+
+    static const uint8_t embeddedNul[] = {
+        'b','l','o','c','k','l','i','s','t','-',
+        '2','0','2','6','-','0','8','-','0','9','-',
+        '1','\0','-','1'
+    };
+    CHECK(!SyncParseLocator(embeddedNul, sizeof embeddedNul, tag, sizeof tag));
+    CHECK(!SyncParseLocator(NULL, 0, tag, sizeof tag));
+    CHECK(!SyncParseLocator((const uint8_t *)valid, strlen(valid), NULL,
+                            sizeof tag));
+    CHECK(!SyncParseLocator((const uint8_t *)valid, strlen(valid), tag, 0));
+    CHECK(!SyncParseLocator((const uint8_t *)valid, strlen(valid), tag,
+                            strlen(valid)));
+
+    CHECK(SyncBuildReleaseUrl(url, sizeof url, valid,
+                              CFG_BLOCKLIST_DIGEST_ASSET));
+    CHECK(strcmp(url,
+                 CFG_BLOCKLIST_RELEASE_BASE_URL
+                 "blocklist-2026-08-09-31286198180-1/"
+                 CFG_BLOCKLIST_DIGEST_ASSET) == 0);
+    CHECK(!SyncBuildReleaseUrl(url, 8, valid, CFG_BLOCKLIST_ASSET));
+    CHECK(!SyncBuildReleaseUrl(url, sizeof url, "bad/tag", CFG_BLOCKLIST_ASSET));
+    CHECK(!SyncBuildReleaseUrl(NULL, sizeof url, valid, CFG_BLOCKLIST_ASSET));
+}
+
 static void TestStagingPath(void)
 {
     char path[64];
@@ -277,6 +343,7 @@ int main(void)
     }
 
     TestStagingPath();
+    TestLocator();
     TestPrepareDirectory(dir);
     TestCommitPromotes(dir);
     TestCommitRefusesMismatch(dir);

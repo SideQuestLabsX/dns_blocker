@@ -213,6 +213,7 @@ static SyncStep Run(SyncJob *job, unsigned budget, unsigned *resolves)
 static const char G_LISTING[] =
     "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  " CFG_BLOCKLIST_ASSET "\n"
     "8d4a70100bf861ea3f9dcd701938a183e89c300932ad6ac6b35fa5c8fe4979f9  dns_blocker-blocklist-other.trie\n";
+static const char G_LOCATOR[] = "blocklist-2026-08-09-31286198180-1\n";
 
 static bool Exists(const char *path)
 {
@@ -237,15 +238,15 @@ static void TestHappyPath(const char *dir)
     CHECK(SyncStagingPath(staging, sizeof staging, target));
 
     ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
 
     CHECK(SyncBegin(&job, &G_BACKEND, target));
-    CHECK(strcmp(SyncHost(&job), "github.com") == 0);
+    CHECK(strcmp(SyncHost(&job), "raw.githubusercontent.com") == 0);
     CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
 
-    /* One for the listing, one for the asset */
-    CHECK(resolves == 2);
+    CHECK(resolves == 3);
     CHECK(Exists(target));
     CHECK(SizeOf(target) == 6);
     CHECK(!Exists(staging));
@@ -265,6 +266,8 @@ static void TestRedirects(const char *dir)
     snprintf(target, sizeof target, "%s/redirected.trie", dir);
 
     ScriptReset();
+    ReplyRedirect("https://objects.example/locator");
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyRedirect("https://objects.example/listing");
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyRedirect("https://objects.example/asset");
@@ -272,7 +275,7 @@ static void TestRedirects(const char *dir)
 
     CHECK(SyncBegin(&job, &G_BACKEND, target));
     CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
-    CHECK(resolves == 4);
+    CHECK(resolves == 6);
     CHECK(SizeOf(target) == 6);
 
     SyncEnd(&job);
@@ -294,6 +297,7 @@ static void TestDigestMismatchKeepsTheOldList(const char *dir)
     fclose(old);
 
     ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("tampered\n", 9);
 
@@ -324,8 +328,8 @@ static void TestListingWithoutTheAsset(const char *dir)
         "8d4a70100bf861ea3f9dcd701938a183e89c300932ad6ac6b35fa5c8fe4979f9  something-else.txt\n";
 
     ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(other, strlen(other));
-    ReplyBody("hello\n", 6);
 
     CHECK(SyncBegin(&job, &G_BACKEND, target));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
@@ -349,6 +353,7 @@ static void TestTransferFailureCleansUp(const char *dir)
     CHECK(SyncStagingPath(staging, sizeof staging, target));
 
     ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(G_LISTING, strlen(G_LISTING));
     Reply("HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n", "short", 5);
 
@@ -372,6 +377,7 @@ static void TestServerError(const char *dir)
     snprintf(target, sizeof target, "%s/error.trie", dir);
 
     ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     Reply("HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n", NULL, 0);
 
     CHECK(SyncBegin(&job, &G_BACKEND, target));
@@ -411,6 +417,7 @@ static void TestFailuresNameThemselves(const char *dir)
 
     /* A directory that does not exist cannot hold a staging file */
     ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
     CHECK(SyncBegin(&job, &G_BACKEND, "/nonexistent/dns_blocker/blocklist.trie"));
@@ -421,6 +428,34 @@ static void TestFailuresNameThemselves(const char *dir)
     CHECK(strcmp(SyncFailText(NULL), "no run") == 0);
     CHECK(strcmp(SyncPhaseText(NULL), "no run") == 0);
     CHECK(strcmp(FetchFailText(NULL), "no transfer") == 0);
+
+    ScriptReset();
+    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    job.phase = SyncPhase_Digest;
+    memcpy(job.releaseTag, "bad/tag", sizeof "bad/tag");
+    CHECK(!Answer(&job));
+    CHECK(job.fail == SyncFail_Url);
+    CHECK(strcmp(SyncFailText(&job), "the release URL is invalid") == 0);
+    SyncEnd(&job);
+}
+
+static void TestInvalidLocator(const char *dir)
+{
+    SyncJob job;
+    char    target[256];
+
+    snprintf(target, sizeof target, "%s/invalid-locator.trie", dir);
+
+    ScriptReset();
+    ReplyBody("blocklist-latest\n", strlen("blocklist-latest\n"));
+    CHECK(SyncBegin(&job, &G_BACKEND, target));
+    CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
+    CHECK(job.fail == SyncFail_Locator);
+    CHECK(strcmp(SyncPhaseText(&job), "release locator") == 0);
+    CHECK(strcmp(SyncFailText(&job), "the locator names no valid release") == 0);
+    CHECK(!Exists(target));
+
+    SyncEnd(&job);
 }
 
 static void TestRefusals(const char *dir)
@@ -440,7 +475,7 @@ static void TestRefusals(const char *dir)
     CHECK(!SyncBegin(&job, &G_BACKEND, oversize));
 
     ScriptReset();
-    ReplyBody(G_LISTING, strlen(G_LISTING));
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     CHECK(SyncBegin(&job, &G_BACKEND, target));
 
     /* An address is only meaningful while the driver is waiting for one */
@@ -481,6 +516,7 @@ int main(void)
     TestTransferFailureCleansUp(dir);
     TestServerError(dir);
     TestFailuresNameThemselves(dir);
+    TestInvalidLocator(dir);
     TestRefusals(dir);
 
     close(listener);

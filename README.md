@@ -111,13 +111,16 @@ where the size goes.
 
 Point `CFG_BLOCKLIST_PATH` at the result.
 
-The weekly workflow publishes a dated release and republishes the same assets
-under the fixed tag `blocklist-latest`, so these URLs always serve the newest
-build:
+The weekly workflow publishes an immutable dated release. A one-line file on
+the `blocklist-pointer` branch names the current release:
 
 ```text
-https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/<asset>
+https://raw.githubusercontent.com/SideQuestLabsX/dns_blocker/blocklist-pointer/latest
 ```
+
+The daemon reads that file, validates its dated release tag and derives the
+digest and trie URLs from the same tag. The workflow updates the pointer only
+after GitHub reports the dated release as published and immutable.
 
 A release carries one set of assets per tier. A tier is how much the list
 blocks. `tools/build-blocklist-release.sh` declares the sources of each one.
@@ -157,8 +160,9 @@ and you take the combination you want rather than a bundle somebody else chose.
 | `dns_blocker-blocklist.sha256` | A digest for every other asset in the release |
 | `THIRD_PARTY_LICENSES.md` | The license terms the release carries |
 
-`CFG_BLOCKLIST_TIER` selects the tier a build downloads. The asset name and both
-URLs are derived from it, so a build cannot fetch one tier and verify another.
+`CFG_BLOCKLIST_TIER` selects the tier a build downloads. The same asset name is
+used for the download and digest lookup, so a build cannot fetch one tier and
+verify another.
 
 To install one by hand, download the trie and the digest into a staging
 directory on the same tmpfs as `CFG_BLOCKLIST_PATH`, check that one line, then
@@ -250,12 +254,15 @@ The encrypted transport setting is:
 | `CFG_ENCRYPTED_USE_DOH=1` | DoH on `CFG_DOH_PORT`, the default |
 | `CFG_ENCRYPTED_USE_DOH=0` | DoT on `CFG_DOT_PORT` |
 
-`CFG_TLS_CA_DER_PATH` names a DER trust bundle that validates the configured
-resolvers. Concatenate multiple DER certificates in that file when the
-resolvers use different roots. The file is mapped read-only at startup and must
-stay within `CFG_TLS_CA_MAX_BYTES`. DoH sends HTTP/1.1 POST requests with a
-bounded response header. Three encrypted exchanges can run at once. Another
-query gets `SERVFAIL` when those fixed slots are busy.
+`CFG_TLS_CA_DER_PATH` names the DER trust bundle for the configured resolvers
+and blocklist sync. The default sync connects to `raw.githubusercontent.com`,
+`github.com`, `objects.githubusercontent.com` and
+`release-assets.githubusercontent.com`. Concatenate their root certificates
+and the resolver roots in that file. The file is mapped read-only at startup
+and must stay within `CFG_TLS_CA_MAX_BYTES`. DoH sends HTTP/1.1 POST requests
+with a bounded response header. Six encrypted exchanges can run at once. A
+query waits in its transaction slot when all six are busy and gets `SERVFAIL`
+only if its deadline expires.
 
 ## Local names
 

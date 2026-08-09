@@ -33,6 +33,7 @@ jobs:
           cat dns_blocker-blocklist.sha256
 
       - name: Publish release assets
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -59,34 +60,45 @@ jobs:
             "That manifest and that archive together are its corresponding source. See THIRD_PARTY_LICENSES.md.")
 
           gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" \
-            --title "$title" --notes "$notes" --draft
+            --title "$title" --notes "$notes" --draft --latest=false
           gh release edit "$tag" --draft=false --latest=false
 
-          # The daemon downloads from this fixed tag, so its asset URLs never
-          # change. Upload before edit, so a reader never sees the new notes
-          # against the old assets
-          stable="blocklist-latest"
-          stableNotes=$(printf '%s\n\n%s\n' \
-            "The current blocklists, republished every week. This tag is what the daemon downloads, and CFG_BLOCKLIST_TIER picks the asset." \
-            "Immutable dated copy of this build: ${tag}")
-          if gh release view "$stable" >/dev/null 2>&1; then
-            gh release upload "$stable" "${assets[@]}" --clobber
-
-            while read -r oldAsset; do
-              keep=false
-              for asset in "${assets[@]}"; do
-                if [[ "$oldAsset" == "$asset" ]]; then
-                  keep=true
-                  break
-                fi
-              done
-              if [[ "$keep" == false ]]; then
-                gh release delete-asset "$stable" "$oldAsset" --yes
-              fi
-            done < <(gh release view "$stable" --json assets --jq '.assets[].name')
-
-            gh release edit "$stable" --title "Blocklist (latest)" --notes "$stableNotes" --latest=false
-          else
-            gh release create "$stable" "${assets[@]}" --target "$GITHUB_SHA" \
-              --title "Blocklist (latest)" --notes "$stableNotes" --latest=false
+          publishedTag=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+            --jq 'select(.draft == false and .immutable == true) | .tag_name')
+          if [ "$publishedTag" != "$tag" ]; then
+            echo "::error::Published release is not immutable"
+            exit 1
           fi
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Update release pointer
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          blob=$(printf '%s\n' "$RELEASE_TAG" | git hash-object -w --stdin)
+          tree=$(printf '100644 blob %s\tlatest\n' "$blob" | git mktree)
+
+          if git ls-remote --exit-code --heads origin \
+            refs/heads/blocklist-pointer >/dev/null
+          then
+            git fetch --no-tags --depth=1 origin \
+              refs/heads/blocklist-pointer
+            commit=$(printf 'Point to %s\n' "$RELEASE_TAG" |
+              git commit-tree "$tree" -p FETCH_HEAD)
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              exit "$status"
+            fi
+            commit=$(printf 'Point to %s\n' "$RELEASE_TAG" |
+              git commit-tree "$tree")
+          fi
+
+          git push origin "${commit}:refs/heads/blocklist-pointer"

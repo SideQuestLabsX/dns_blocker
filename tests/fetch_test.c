@@ -25,10 +25,11 @@ static void TestUrl(void)
 {
     FetchUrl url;
 
-    CHECK(FetchParseUrl(CFG_BLOCKLIST_URL, &url));
-    CHECK(strcmp(url.host, "github.com") == 0);
+    CHECK(FetchParseUrl(CFG_BLOCKLIST_LOCATOR_URL, &url));
+    CHECK(strcmp(url.host, "raw.githubusercontent.com") == 0);
     CHECK(url.port == 443);
-    CHECK(strncmp(url.path, "/SideQuestLabsX/dns_blocker/releases/", 37) == 0);
+    CHECK(strcmp(url.path,
+                 "/SideQuestLabsX/dns_blocker/blocklist-pointer/latest") == 0);
 
     CHECK(FetchParseUrl("https://example.com", &url));
     CHECK(strcmp(url.path, "/") == 0);

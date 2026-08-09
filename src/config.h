@@ -246,24 +246,21 @@
   #define CFG_TLS_REUSE_TIMEOUT_MS 1000
 #endif
 
-/* Blocklist download. The release redirects twice and lands on a signed CDN
-   URL of about 1.4KB, so the URL and header buffers are sized from the measured
-   responses rather than from a round number. The body never lands in memory.
-
-   The release carries one asset per tier and one digest file covering all of
-   them. The tier is the only knob: the asset name and both URLs are derived
-   from it, so a build cannot ask for one asset and verify another. The release
-   script declares the tiers and their sources */
+/* Blocklist download. A locator branch names one immutable dated release. The
+   daemon accepts only the release tag and derives both asset URLs itself */
 #ifndef CFG_BLOCKLIST_TIER
   #define CFG_BLOCKLIST_TIER    "standard"
 #endif
-#ifndef CFG_BLOCKLIST_BASE_URL
-  #define CFG_BLOCKLIST_BASE_URL "https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/"
+#ifndef CFG_BLOCKLIST_LOCATOR_URL
+  #define CFG_BLOCKLIST_LOCATOR_URL \
+      "https://raw.githubusercontent.com/SideQuestLabsX/dns_blocker/blocklist-pointer/latest"
 #endif
+#ifndef CFG_BLOCKLIST_RELEASE_BASE_URL
+  #define CFG_BLOCKLIST_RELEASE_BASE_URL \
+      "https://github.com/SideQuestLabsX/dns_blocker/releases/download/"
+#endif
+#define CFG_BLOCKLIST_DIGEST_ASSET "dns_blocker-blocklist.sha256"
 #define CFG_BLOCKLIST_ASSET     "dns_blocker-blocklist-" CFG_BLOCKLIST_TIER ".trie"
-#define CFG_BLOCKLIST_URL       CFG_BLOCKLIST_BASE_URL CFG_BLOCKLIST_ASSET
-#define CFG_BLOCKLIST_DIGEST_URL \
-    CFG_BLOCKLIST_BASE_URL "dns_blocker-blocklist.sha256"
 #define CFG_FETCH_URL_BYTES     2048
 #define CFG_FETCH_HOST_BYTES    CFG_TLS_HOSTNAME_BYTES
 #define CFG_FETCH_PATH_BYTES    1024
@@ -274,6 +271,7 @@
 /* Sized from the path and host caps. The signed CDN path is 905 bytes */
 #define CFG_FETCH_REQUEST_BYTES (CFG_FETCH_PATH_BYTES + CFG_FETCH_HOST_BYTES + 128)
 
+#define CFG_SYNC_RELEASE_TAG_BYTES 96
 /* The 99-line digest is 11649 bytes with the current tier names */
 #define CFG_SYNC_DIGEST_BYTES   16384
 #define CFG_SYNC_PATH_BYTES     256

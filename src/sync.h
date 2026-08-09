@@ -41,6 +41,11 @@ SyncInstall SyncCommit(int stagingFd, const char *stagingPath,
 /* Drops a transfer that failed before it produced a digest. */
 void SyncAbandon(int stagingFd, const char *stagingPath);
 
+bool SyncParseLocator(const uint8_t *data, size_t len, char *releaseTag,
+                      size_t releaseTagCap);
+bool SyncBuildReleaseUrl(char *out, size_t cap, const char *releaseTag,
+                         const char *asset);
+
 #if defined(PROFILE_ENCRYPTED)
 
 typedef enum
@@ -54,6 +59,7 @@ typedef enum
 
 typedef enum
 {
+    SyncPhase_Locator,
     SyncPhase_Digest,
     SyncPhase_Asset
 } SyncPhase;
@@ -73,10 +79,12 @@ typedef enum
     SyncFail_Staging,
     SyncFail_Listing,
     SyncFail_Digest,
-    SyncFail_Install
+    SyncFail_Install,
+    SyncFail_Locator,
+    SyncFail_Url
 } SyncFail;
 
-/* Sequences the two transfers and the install. Nothing here resolves a name:
+/* Sequences the three transfers and the install. Nothing here resolves a name:
    when a host has to become an address the driver stops and asks, which keeps
    the upstream pool and the poll loop out of this file. */
 typedef struct
@@ -88,13 +96,14 @@ typedef struct
 
     char path[CFG_SYNC_PATH_BYTES];
     char staging[CFG_SYNC_PATH_BYTES];
+    char releaseTag[CFG_SYNC_RELEASE_TAG_BYTES];
     int  stagingFd;
 
     /* Set when a redirect moved the target, so the answer to the next address
        request belongs to the new host rather than the original one */
     bool bFollowing;
 
-    uint8_t  digestText[CFG_SYNC_DIGEST_BYTES];
+    uint8_t  metadataText[CFG_SYNC_DIGEST_BYTES];
     uint8_t  want[FETCH_DIGEST_BYTES];
     bool     bHaveWant;
     SyncFail fail;

@@ -230,8 +230,17 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
 
         if(!SyncBegin(run->job, run->tls, run->path))
         {
-            fprintf(stderr, "sync: cannot start against %s, retrying in %us\n",
-                    run->path, CFG_SYNC_RETRY_MS / 1000u);
+            if(run->job->fail == SyncFail_None)
+            {
+                fprintf(stderr,
+                        "sync: cannot start against %s, retrying in %us\n",
+                        run->path, CFG_SYNC_RETRY_MS / 1000u);
+            }
+            else
+            {
+                fprintf(stderr, "sync: cannot start, %s, retrying in %us\n",
+                        SyncFailText(run->job), CFG_SYNC_RETRY_MS / 1000u);
+            }
             run->dueMs = nowMs + CFG_SYNC_RETRY_MS;
             return;
         }
