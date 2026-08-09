@@ -1,35 +1,245 @@
 #!/bin/sh
 set -eu
 
-sourceList=${1:-blocklists/sources.txt}
+# Compiles one tier, or every tier when given none.
+#
+#   build-blocklist-release.sh [tier] [outputDir]
+#
+# A tier publishes one asset, its trie. Everything else a release needs is one
+# asset for the whole release however many tiers there are: the manifest naming
+# every source and the composition of every tier, the archive of the fetched
+# lists, the digest and the licenses.
+
+tier=${1:-}
 outputDir=${2:-build/blocklist-release}
 mkblocklist=${MKBLOCKLIST:-build/x86_64-minimal/mkblocklist}
-combined="$outputDir/combined.txt"
-asset="$outputDir/dns_blocker-blocklist.trie"
-checksum="$outputDir/dns_blocker-blocklist.trie.sha256"
+checksum="$outputDir/dns_blocker-blocklist.sha256"
 manifest="$outputDir/dns_blocker-blocklist.sources"
-# GPL-3.0 sources require the compiler input beside the compiled trie
-domains="$outputDir/dns_blocker-blocklist.domains.txt.gz"
+archive="$outputDir/dns_blocker-blocklist-sources.tar.gz"
 licenses="$outputDir/THIRD_PARTY_LICENSES.md"
 
-mkdir -p "$outputDir/sources"
+# The sources, the base tiers and the categories combined onto them.
+#
+#   source   <name> <minimum accepted names> <https URL>
+#   base     <name> <source>...
+#   category <name> <base> <source>...
+#
+# A base decides how hard ads and trackers are blocked. A category is one more
+# thing to block, and every subset of the categories is published against every
+# base, so an operator takes exactly the combination they want and never a
+# bundle somebody else chose. The tier name is the base followed by its
+# categories in the order declared here.
+#
+# A category names its own sources per base, because the publishers offer sizes
+# and the large adult list on a compact base would spend most of the file on
+# that axis alone.
+#
+# The count is the product: bases times two to the power of categories. Adding a
+# category doubles the release.
+#
+# The minimum rejects a truncated source or a format change before it reaches a
+# release. Every source is a plain hosts file or a domain-per-line list.
+#
+# Each source carries its own license and a compiled trie is a combined work
+# under all of them. Record a new source in THIRD_PARTY_LICENSES.md before it
+# ships.
+TIERS=${TIERS:-'
+source stevenblack   90000  https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
+source hagezi-lite   35000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt
+source hagezi-pro    190000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt
+source hagezi-max    240000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/ultimate-onlydomains.txt
+source oisd-small    50000  https://small.oisd.nl/domainswild
+source oisd-big      220000 https://big.oisd.nl/domainswild
+
+source adult-small   70000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt
+source adult-big     400000 https://nsfw.oisd.nl/domainswild
+
+source tif-small     120000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt
+source tif-mid       250000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt
+source tif-big       1500000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
+
+source gambling-small 65000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.mini-onlydomains.txt
+source gambling-mid   100000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt
+source gambling-big   280000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt
+
+source piracy        27000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
+source bypass        12000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt
+
+base compact    stevenblack hagezi-lite
+base standard   stevenblack hagezi-pro oisd-small
+base aggressive stevenblack hagezi-max oisd-big
+
+category nsfw     compact    adult-small
+category nsfw     standard   adult-big
+category nsfw     aggressive adult-big
+
+category tif      compact    tif-small
+category tif      standard   tif-mid
+category tif      aggressive tif-big
+
+category gambling compact    gambling-small
+category gambling standard   gambling-mid
+category gambling aggressive gambling-big
+
+category piracy   compact    piracy
+category piracy   standard   piracy
+category piracy   aggressive piracy
+
+category bypass   compact    bypass
+category bypass   standard   bypass
+category bypass   aggressive bypass
+'}
+
+# Materialises every base against every subset of the categories, as the
+# `tier <name> <source>...` lines the rest of this script reads.
+materialise()
+{
+    printf '%s\n' "$TIERS" | awk '
+        $1 == "source"   { print; next }
+        $1 == "base"     { bases[++nb] = $0; next }
+        $1 == "category" {
+            if (!($2 in seen)) { seen[$2] = ++nc; order[nc] = $2 }
+            for (i = 4; i <= NF; i++)
+                add[$2 "\0" $3] = add[$2 "\0" $3] " " $i
+            next
+        }
+        END {
+            for (b = 1; b <= nb; b++)
+            {
+                split(bases[b], f, /[ \t]+/)
+                name = f[2]
+                sources = ""
+                for (i = 3; i in f; i++)
+                    sources = sources " " f[i]
+
+                for (mask = 0; mask < 2 ^ nc; mask++)
+                {
+                    tier = name
+                    extra = ""
+                    for (c = 1; c <= nc; c++)
+                    {
+                        if (int(mask / 2 ^ (c - 1)) % 2 == 0)
+                            continue
+
+                        key = order[c] "\0" name
+                        if (!(key in add))
+                        {
+                            printf "category %s names no source for base %s\n", \
+                                order[c], name > "/dev/stderr"
+                            exit 1
+                        }
+
+                        tier = tier "-" order[c]
+                        extra = extra add[key]
+                    }
+
+                    print "tier", tier, sources extra
+                }
+            }
+        }
+    '
+}
+
+names()
+{
+    materialise | awk '$1 == "tier" { print $2 }'
+}
+
+if [ -z "$tier" ]; then
+    mkdir -p "$outputDir"
+    names > "$outputDir/tiers"
+
+    if [ ! -s "$outputDir/tiers" ]; then
+        printf 'blocklist release: no tiers declared\n' >&2
+        exit 1
+    fi
+
+    : > "$outputDir/manifest.tiers"
+    : > "$outputDir/manifest.sources"
+
+    while read -r name; do
+        sh "$0" "$name" "$outputDir"
+    done < "$outputDir/tiers"
+
+    cp THIRD_PARTY_LICENSES.md "$licenses"
+
+    # One manifest for the release: every source with the bytes and digest of
+    # what was fetched, then the composition of every tier. With the archive it
+    # is the corresponding source of every trie here
+    {
+        printf '# source <name> <sha256> <bytes> <accepted names> <url>\n'
+        sort "$outputDir/manifest.sources"
+        printf '\n# tier <name> <source>...\n'
+        sort "$outputDir/manifest.tiers"
+    } > "$manifest"
+
+    tar -czf "$archive" -C "$outputDir/cache" .
+
+    : > "$checksum"
+    for published in $(cd "$outputDir" && ls dns_blocker-blocklist-*.trie \
+        dns_blocker-blocklist-sources.tar.gz dns_blocker-blocklist.sources \
+        THIRD_PARTY_LICENSES.md)
+    do
+        digest=$(sha256sum "$outputDir/$published")
+        printf '%s  %s\n' "${digest%% *}" "$published" >> "$checksum"
+    done
+    (cd "$outputDir" && sha256sum -c dns_blocker-blocklist.sha256 > /dev/null)
+
+    printf 'blocklist release: %s tier(s), %s of assets\n' \
+        "$(wc -l < "$outputDir/tiers")" \
+        "$(cat "$outputDir"/dns_blocker-blocklist-*.trie "$archive" \
+            | wc -c | awk '{ printf "%.0f MB", $1 / 1048576 }')"
+    exit 0
+fi
+
+combined="$outputDir/combined-$tier.txt"
+asset="$outputDir/dns_blocker-blocklist-$tier.trie"
+
+case "$tier" in
+    *[!a-z0-9-]*|'')
+        printf 'blocklist release: tier is not a lowercase name: %s\n' "$tier" >&2
+        exit 1
+        ;;
+esac
+
+mkdir -p "$outputDir/sources" "$outputDir/cache"
 : > "$combined"
-: > "$manifest"
+
+# Resolves the tier to the name, minimum and URL of each source it draws on. An
+# undeclared source stops the build, because a tier that quietly loses one
+# publishes as though it never had it
+expand="$outputDir/sources/$tier.expanded"
+
+materialise | awk -v want="$tier" '
+    $1 == "source" {
+        if ($2 in minimum) { printf "duplicate source %s\n", $2 > "/dev/stderr"; exit 1 }
+        minimum[$2] = $3
+        url[$2]     = $4
+        next
+    }
+    $1 == "tier" && $2 == want {
+        found = 1
+        for (i = 3; i <= NF; i++)
+        {
+            if (!(($i) in url)) { printf "no such source: %s\n", $i > "/dev/stderr"; exit 1 }
+            print $i, minimum[$i], url[$i]
+        }
+    }
+    END {
+        if (!found) { printf "no such tier: %s\n", want > "/dev/stderr"; exit 1 }
+    }
+' > "$expand"
 
 count=0
-while read -r minimum url extra || [ -n "${minimum:-}" ]; do
-    case "${minimum:-}" in
-        ''|'#'*) continue ;;
+used=""
+
+while read -r sname minimum url; do
+    case "$minimum" in
         *[!0-9]*)
             printf 'blocklist release: invalid minimum: %s\n' "$minimum" >&2
             exit 1
             ;;
     esac
-
-    if [ -n "${extra:-}" ]; then
-        printf 'blocklist release: extra source fields: %s\n' "$extra" >&2
-        exit 1
-    fi
 
     case "$url" in
         https://*) ;;
@@ -39,65 +249,75 @@ while read -r minimum url extra || [ -n "${minimum:-}" ]; do
             ;;
     esac
 
+    # Every tier asks for the same handful of URLs, so a release fetches each
+    # one once. Inside the output directory, so it lives exactly as long as one
+    # build and can never serve a stale list
     count=$((count + 1))
-    target="$outputDir/sources/source-$count.txt"
-    temp="$target.tmp"
-    curl --proto '=https' --tlsv1.2 -fsSL \
-        --retry 3 --retry-all-errors --connect-timeout 30 --max-time 300 \
-        --max-filesize 67108864 "$url" -o "$temp"
+    used="$used $sname"
+    target="$outputDir/cache/$sname.txt"
 
-    if [ ! -s "$temp" ]; then
-        printf 'blocklist release: empty source: %s\n' "$url" >&2
-        exit 1
-    fi
+    if [ ! -s "$target" ]; then
+        temp="$target.tmp"
+        curl --proto '=https' --tlsv1.2 -fsSL \
+            --retry 3 --retry-all-errors --connect-timeout 30 --max-time 300 \
+            --max-filesize 134217728 "$url" -o "$temp"
 
-    mv "$temp" "$target"
-
-    result=$("$mkblocklist" "$target.trie" "$target" 2>&1) || {
-        printf '%s\n' "$result" >&2
-        exit 1
-    }
-    printf '%s\n' "$result" >&2
-    accepted=${result#mkblocklist: }
-    accepted=${accepted%% names,*}
-    case "$accepted" in
-        ''|*[!0-9]*)
-            printf 'blocklist release: cannot read accepted count\n' >&2
+        if [ ! -s "$temp" ]; then
+            printf 'blocklist release: empty source: %s\n' "$url" >&2
             exit 1
-            ;;
-    esac
-    if [ "$accepted" -lt "$minimum" ]; then
-        printf 'blocklist release: %s accepted names from %s, minimum %s\n' \
-            "$accepted" "$url" "$minimum" >&2
-        exit 1
+        fi
+
+        mv "$temp" "$target"
     fi
 
-    sourceHash=$(sha256sum "$target")
-    sourceHash=${sourceHash%% *}
-    sourceBytes=$(wc -c < "$target")
-    printf '%s  %s  %s  %s\n' "$sourceHash" "$sourceBytes" \
-        "$accepted" "$url" >> "$manifest"
+    # A source appears in many tiers and its accepted count does not depend on
+    # which one, so the check runs once a release rather than once a tier
+    if [ ! -s "$target.accepted" ]; then
+        result=$("$mkblocklist" "$target.trie" "$target" 2>&1) || {
+            printf '%s\n' "$result" >&2
+            exit 1
+        }
+        accepted=${result#mkblocklist: }
+        accepted=${accepted%% names,*}
+
+        case "$accepted" in
+            ''|*[!0-9]*)
+                printf 'blocklist release: cannot read accepted count\n' >&2
+                exit 1
+                ;;
+        esac
+
+        if [ "$accepted" -lt "$minimum" ]; then
+            printf 'blocklist release: %s accepted names from %s, minimum %s\n' \
+                "$accepted" "$url" "$minimum" >&2
+            exit 1
+        fi
+
+        printf '%s' "$accepted" > "$target.accepted"
+        rm -f "$target.trie"
+
+        sourceHash=$(sha256sum "$target")
+        printf 'source %s %s %s %s %s\n' "$sname" "${sourceHash%% *}" \
+            "$(wc -c < "$target")" "$accepted" "$url" \
+            >> "$outputDir/manifest.sources"
+    fi
 
     cat "$target" >> "$combined"
     printf '\n' >> "$combined"
-done < "$sourceList"
+done < "$expand"
 
 if [ "$count" -eq 0 ]; then
-    printf 'blocklist release: no sources in %s\n' "$sourceList" >&2
+    printf 'blocklist release: tier %s names no sources\n' "$tier" >&2
     exit 1
 fi
 
-"$mkblocklist" "$asset" "$combined"
-gzip -9 -c "$combined" > "$domains"
-cp THIRD_PARTY_LICENSES.md "$licenses"
+"$mkblocklist" "$asset" "$combined" >/dev/null 2>&1
+rm -f "$combined"
 
-: > "$checksum"
-for published in dns_blocker-blocklist.trie dns_blocker-blocklist.sources \
-    dns_blocker-blocklist.domains.txt.gz THIRD_PARTY_LICENSES.md
-do
-    digest=$(sha256sum "$outputDir/$published")
-    printf '%s  %s\n' "${digest%% *}" "$published" >> "$checksum"
-done
-(cd "$outputDir" && sha256sum -c dns_blocker-blocklist.trie.sha256)
+printf 'tier %s%s\n' "$tier" "$used" >> "$outputDir/manifest.tiers"
 
-printf 'blocklist release: %s source(s), %s\n' "$count" "$asset"
+# mkblocklist reads CFG_BLOCKLIST_MAX_BYTES from the same header the daemon
+# does and refuses a list above it, so a tier that would not map cannot reach a
+# release
+printf 'blocklist release: tier %s, %s source(s), %s bytes\n' \
+    "$tier" "$count" "$(wc -c < "$asset")"

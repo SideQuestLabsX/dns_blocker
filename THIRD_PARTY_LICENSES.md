@@ -9,7 +9,7 @@ a copy of it.
 |---|---|---|
 | `dns_blocker`, `minimal` profile | musl libc | MIT |
 | `dns_blocker`, `encrypted` profile | musl libc, Mbed TLS with Everest and p256-m | MIT, Apache-2.0 |
-| `dns_blocker-blocklist.trie` | StevenBlack `hosts`, hagezi `dns-blocklists`, oisd small | MIT, GPL-3.0 |
+| `dns_blocker-blocklist-<tier>.trie` | StevenBlack `hosts`, hagezi `dns-blocklists`, oisd | MIT, GPL-3.0 |
 
 The daemon reads the blocklist asset as data at runtime. The binary contains no
 part of it, so the terms on the asset apply only to the asset.
@@ -451,22 +451,28 @@ obstacle to adoption, that text has been removed.
 
 ## Blocklist release asset
 
-`blocklists/sources.txt` names the upstream lists. The weekly pipeline fetches
-them, concatenates them and compiles the result with `tools/mkblocklist.c` into
-`dns_blocker-blocklist.trie`.
+`tools/build-blocklist-release.sh` names the upstream lists and the tiers built
+from them. The weekly pipeline fetches them, concatenates them and compiles each
+tier with `tools/mkblocklist.c` into `dns_blocker-blocklist-<tier>.trie`.
 
-| Source | License |
-|---|---|
-| [StevenBlack/hosts](https://github.com/StevenBlack/hosts) | MIT |
-| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) | GPL-3.0 |
-| [oisd](https://oisd.nl/) small | GPL-3.0 |
+| Source | Used for | License |
+|---|---|---|
+| [StevenBlack/hosts](https://github.com/StevenBlack/hosts) | every tier | MIT |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) light, pro, ultimate | the three base tiers | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) nsfw | the compact `nsfw` category | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) tif.mini, tif.medium, tif | the `tif` category | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) gambling, gambling.medium, gambling.mini | the `gambling` category | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) anti.piracy | the `piracy` category | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) doh-vpn-proxy-bypass | the `bypass` category | GPL-3.0 |
+| [oisd](https://oisd.nl/) small, big | the standard and aggressive bases | GPL-3.0 |
+| [oisd](https://oisd.nl/) nsfw | the standard and aggressive `nsfw` category | GPL-3.0 |
 
-Two sources are GPL-3.0, so the compiled trie is a combined work under GPL-3.0.
-Each release publishes the corresponding source beside the trie as
-`dns_blocker-blocklist.domains.txt.gz`, the exact input the compiler read.
-`dns_blocker-blocklist.sources` records the URL, byte count and SHA-256 digest
-of each fetched list. `tools/mkblocklist.c` is in this repository under The
-Unlicense.
+Every tier includes a GPL-3.0 source, so every compiled trie is a combined work
+under GPL-3.0. The release publishes `dns_blocker-blocklist.sources`, which
+records each fetched list and every tier's composition. It also publishes the
+fetched lists in `dns_blocker-blocklist-sources.tar.gz`. Together they provide
+the corresponding source for each trie. `tools/mkblocklist.c` is in this
+repository under The Unlicense.
 
 ### StevenBlack/hosts
 

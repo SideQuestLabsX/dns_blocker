@@ -14,13 +14,14 @@
  * are lowercased.
  *
  * With -c the same bytes are written as a C array the daemon links into
- * .rodata, which is the fallback for a cold boot with no network.
+ * .rodata, for a device that never syncs.
  */
 
 #define _POSIX_C_SOURCE 200809L
 
 #include "blocklist.h"
 #include "listline.h"
+#include "trieimage.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +42,16 @@ struct Node
     size_t   count;
     size_t   capacity;
     uint32_t offset;
+
+    /* Built only once a node grows past EDGE_INDEX_MIN children. Most nodes
+       never do, and scanning a handful of edges beats hashing them. Slots hold
+       an edge index plus one, so zero is empty. Indices rather than pointers,
+       because the edge array is reallocated as it grows */
+    uint32_t *index;
+    size_t    indexMask;
 };
+
+#define EDGE_INDEX_MIN 16
 
 static void Fatal(const char *what)
 {
@@ -63,8 +73,6 @@ static Node *NodeNew(void)
     return Alloc(sizeof(Node));
 }
 
-/* Ordered by length then bytes, the same order the daemon's binary search
-   assumes. Getting these two out of step makes lookups miss silently. */
 static int CompareLabel(const char *a, const char *b)
 {
     size_t la = strlen(a);
@@ -76,17 +84,71 @@ static int CompareLabel(const char *a, const char *b)
     return memcmp(a, b, la);
 }
 
-static int CompareEdge(const void *a, const void *b)
+/* Accumulates in uint64_t and narrows once. A size_t here is 32 bits on the
+   board and silently truncates both constants, which has happened before. */
+static uint64_t LabelHash(const char *label)
 {
-    return CompareLabel(((const Edge *)a)->label, ((const Edge *)b)->label);
+    uint64_t hash = 14695981039346656037ULL;
+
+    for(const unsigned char *p = (const unsigned char *)label; *p != '\0'; p++)
+    {
+        hash ^= *p;
+        hash *= 1099511628211ULL;
+    }
+
+    return hash;
 }
 
+static void IndexInsert(Node *node, uint32_t edgeIndex)
+{
+    size_t slot = (size_t)LabelHash(node->edges[edgeIndex].label) & node->indexMask;
+
+    while(node->index[slot] != 0)
+        slot = (slot + 1) & node->indexMask;
+
+    node->index[slot] = edgeIndex + 1;
+}
+
+static void IndexRebuild(Node *node)
+{
+    size_t want = 32;
+
+    while(want < node->count * 2)
+        want *= 2;
+
+    free(node->index);
+    node->index     = Alloc(want * sizeof *node->index);
+    node->indexMask = want - 1;
+
+    for(size_t i = 0; i < node->count; i++)
+        IndexInsert(node, (uint32_t)i);
+}
+
+/* Every insert calls this, so a linear scan is quadratic in the children of one
+   node, and `com` alone holds 46350 of them at 105369 names. */
 static Edge *EdgeFind(Node *node, const char *label)
 {
-    for(size_t i = 0; i < node->count; i++)
+    if(node->index == NULL)
     {
-        if(CompareLabel(node->edges[i].label, label) == 0)
-            return &node->edges[i];
+        for(size_t i = 0; i < node->count; i++)
+        {
+            if(CompareLabel(node->edges[i].label, label) == 0)
+                return &node->edges[i];
+        }
+
+        return NULL;
+    }
+
+    size_t slot = (size_t)LabelHash(label) & node->indexMask;
+
+    while(node->index[slot] != 0)
+    {
+        Edge *edge = &node->edges[node->index[slot] - 1];
+
+        if(strcmp(edge->label, label) == 0)
+            return edge;
+
+        slot = (slot + 1) & node->indexMask;
     }
 
     return NULL;
@@ -115,6 +177,18 @@ static Edge *EdgeAdd(Node *node, const char *label)
 
     if(edge->label == NULL)
         Fatal("out of memory");
+
+    if(node->index != NULL)
+    {
+        if(node->count * 2 > node->indexMask + 1)
+            IndexRebuild(node);
+        else
+            IndexInsert(node, (uint32_t)(node->count - 1));
+    }
+    else if(node->count >= EDGE_INDEX_MIN)
+    {
+        IndexRebuild(node);
+    }
 
     return edge;
 }
@@ -166,358 +240,13 @@ static bool Insert(Node *root, char *name)
     return true;
 }
 
-/* Offsets are assigned in the order Emit will walk, so the two cannot drift.
-   Sorting happens here as well, in the order the daemon's binary search
-   assumes. */
-static void Assign(Node *node, uint32_t *cursor)
-{
-    qsort(node->edges, node->count, sizeof(Edge), CompareEdge);
-
-    node->offset = *cursor;
-    *cursor += 4 + (uint32_t)node->count * BLOCKLIST_CHILD_BYTES;
-
-    for(size_t i = 0; i < node->count; i++)
-    {
-        if(node->edges[i].child != NULL)
-            Assign(node->edges[i].child, cursor);
-    }
-}
-
-typedef struct
-{
-    const char *label;
-    uint32_t    offset;
-    bool        bUsed;
-} PoolSlot;
-
-typedef struct
-{
-    uint8_t  *nodes;
-    uint8_t  *pool;
-    uint32_t  poolUsed;
-    uint32_t  poolSize;
-
-    /* Labels repeat heavily across a blocklist, so the pool is deduplicated.
-       A scan of the whole pool for every label would be quadratic on a real
-       list, so the offsets go in a hash table instead. */
-    PoolSlot *slots;
-    size_t    slotCount;
-} Output;
-
-static void PutU32(uint8_t *at, uint32_t value)
-{
-    at[0] = (uint8_t)(value & 0xFFu);
-    at[1] = (uint8_t)((value >> 8) & 0xFFu);
-    at[2] = (uint8_t)((value >> 16) & 0xFFu);
-    at[3] = (uint8_t)((value >> 24) & 0xFFu);
-}
-
-/* The FNV constants need 64 bits. In a size_t they truncate on a 32-bit build
-   host, which still hashes but no longer as FNV */
-static size_t HashLabel(const char *label)
-{
-    uint64_t hash = 1469598103934665603u;
-
-    for(const char *c = label; *c != '\0'; c++)
-    {
-        hash ^= (unsigned char)*c;
-        hash *= 1099511628211u;
-    }
-
-    return (size_t)hash;
-}
-
-static uint32_t PoolAdd(Output *out, const char *label)
-{
-    size_t mask = out->slotCount - 1;
-    size_t at   = HashLabel(label) & mask;
-
-    while(out->slots[at].bUsed)
-    {
-        if(strcmp(out->slots[at].label, label) == 0)
-            return out->slots[at].offset;
-
-        at = (at + 1) & mask;
-    }
-
-    size_t len = strlen(label);
-    if(out->poolUsed + len > out->poolSize)
-        Fatal("label pool overflow");
-
-    uint32_t offset = out->poolUsed;
-    memcpy(out->pool + offset, label, len);
-    out->poolUsed += (uint32_t)len;
-
-    out->slots[at].label  = label;
-    out->slots[at].offset = offset;
-    out->slots[at].bUsed  = true;
-    return offset;
-}
-
-static void Emit(Node *node, Output *out)
-{
-    PutU32(out->nodes + node->offset, (uint32_t)node->count);
-
-    for(size_t i = 0; i < node->count; i++)
-    {
-        Edge    *edge  = &node->edges[i];
-        uint8_t *entry = out->nodes + node->offset + 4
-                       + i * BLOCKLIST_CHILD_BYTES;
-
-        PutU32(entry, PoolAdd(out, edge->label));
-        PutU32(entry + 4, (edge->child != NULL) ? edge->child->offset : 0u);
-        entry[8]  = (uint8_t)strlen(edge->label);
-        entry[9]  = edge->bTerminal ? BLOCKLIST_FLAG_TERMINAL : 0u;
-        entry[10] = 0;
-        entry[11] = 0;
-    }
-
-    for(size_t i = 0; i < node->count; i++)
-    {
-        if(node->edges[i].child != NULL)
-            Emit(node->edges[i].child, out);
-    }
-}
-
-static size_t CountEdges(Node *node)
-{
-    size_t total = node->count;
-
-    for(size_t i = 0; i < node->count; i++)
-    {
-        if(node->edges[i].child != NULL)
-            total += CountEdges(node->edges[i].child);
-    }
-
-    return total;
-}
-
-/* Measurement only, behind -m. Answers whether a character DAFSA over the
-   reversed names is small enough at real list size to be worth building into
-   the daemon. Nothing here writes a file or changes the trie. */
-
-typedef struct DafsaState DafsaState;
-
-typedef struct
-{
-    DafsaState *target;
-    uint8_t     symbol;
-    bool        bTerminal;
-} DafsaEdge;
-
-struct DafsaState
-{
-    DafsaEdge  *edges;
-    size_t      count;
-    size_t      capacity;
-    DafsaState *hashNext;
-    size_t      index;
-    bool        bVisited;
-};
-
-#define DAFSA_BUCKETS (1u << 20)
-
-static DafsaState **g_dafsaRegister;
-static size_t       g_dafsaStates;
-static size_t       g_dafsaTransitions;
-
-static DafsaState *DafsaStateNew(void)
-{
-    return Alloc(sizeof(DafsaState));
-}
-
-static DafsaEdge *DafsaLastEdge(DafsaState *state)
-{
-    return (state->count == 0) ? NULL : &state->edges[state->count - 1];
-}
-
-static void DafsaAppend(DafsaState *state, uint8_t symbol, bool bTerminal,
-                        DafsaState *target)
-{
-    if(state->count == state->capacity)
-    {
-        state->capacity = (state->capacity == 0) ? 2 : state->capacity * 2;
-        state->edges = realloc(state->edges,
-                               state->capacity * sizeof(DafsaEdge));
-        if(state->edges == NULL)
-            Fatal("out of memory");
-    }
-
-    state->edges[state->count].symbol    = symbol;
-    state->edges[state->count].bTerminal = bTerminal;
-    state->edges[state->count].target    = target;
-    state->count++;
-}
-
-/* A state is its outgoing transitions and nothing else, because the terminal
-   mark rides on the transition rather than on the state */
-static size_t DafsaHash(const DafsaState *state)
-{
-    uint64_t hash = 1469598103934665603u;
-
-    for(size_t i = 0; i < state->count; i++)
-    {
-        uint64_t parts[3] = { state->edges[i].symbol,
-                              (uint64_t)state->edges[i].bTerminal,
-                              (uint64_t)(uintptr_t)state->edges[i].target };
-
-        for(size_t p = 0; p < 3; p++)
-        {
-            hash ^= parts[p];
-            hash *= 1099511628211u;
-        }
-    }
-
-    return (size_t)hash;
-}
-
-static bool DafsaEqual(const DafsaState *a, const DafsaState *b)
-{
-    if(a->count != b->count)
-        return false;
-
-    for(size_t i = 0; i < a->count; i++)
-    {
-        if(a->edges[i].symbol != b->edges[i].symbol
-           || a->edges[i].bTerminal != b->edges[i].bTerminal
-           || a->edges[i].target != b->edges[i].target)
-            return false;
-    }
-
-    return true;
-}
-
-static DafsaState *DafsaRegisterFind(DafsaState *state)
-{
-    size_t bucket = DafsaHash(state) & (DAFSA_BUCKETS - 1);
-
-    for(DafsaState *at = g_dafsaRegister[bucket]; at != NULL; at = at->hashNext)
-    {
-        if(DafsaEqual(at, state))
-            return at;
-    }
-
-    return NULL;
-}
-
-static void DafsaRegisterAdd(DafsaState *state)
-{
-    size_t bucket = DafsaHash(state) & (DAFSA_BUCKETS - 1);
-
-    state->hashNext          = g_dafsaRegister[bucket];
-    g_dafsaRegister[bucket]  = state;
-}
-
-/* Daciuk incremental minimization. The input has to be sorted, so the only
-   state that can still change is the one at the end of the last word. */
-static void DafsaReplaceOrRegister(DafsaState *state)
-{
-    DafsaEdge *last = DafsaLastEdge(state);
-    if(last == NULL || last->target == NULL)
-        return;
-
-    if(last->target->count != 0)
-        DafsaReplaceOrRegister(last->target);
-
-    DafsaState *found = DafsaRegisterFind(last->target);
-    if(found != NULL)
-    {
-        free(last->target->edges);
-        free(last->target);
-        last->target = found;
-    }
-    else
-    {
-        DafsaRegisterAdd(last->target);
-    }
-}
-
-static size_t DafsaCommonPrefix(const char *word, const char *previous)
-{
-    size_t at = 0;
-    while(word[at] != '\0' && word[at] == previous[at])
-        at++;
-
-    return at;
-}
-
-static void DafsaAddWord(DafsaState *root, const char *word,
-                         const char *previous)
-{
-    size_t      common = DafsaCommonPrefix(word, previous);
-    DafsaState *state  = root;
-
-    for(size_t i = 0; i < common; i++)
-    {
-        DafsaEdge *edge = DafsaLastEdge(state);
-
-        /* The previous word ended here, and this one carries on past it.
-           A terminal transition keeps its mark and gains a target */
-        if(edge->target == NULL)
-            edge->target = DafsaStateNew();
-
-        state = edge->target;
-    }
-
-    if(state->count != 0)
-        DafsaReplaceOrRegister(state);
-
-    for(size_t i = common; word[i] != '\0'; i++)
-    {
-        bool bLast = (word[i + 1] == '\0');
-        DafsaState *next = bLast ? NULL : DafsaStateNew();
-
-        DafsaAppend(state, (uint8_t)word[i], bLast, next);
-        if(!bLast)
-            state = next;
-    }
-}
-
-static DafsaState **g_dafsaOrder;
-
-static void DafsaCount(DafsaState *state)
-{
-    if(state == NULL || state->bVisited)
-        return;
-
-    state->bVisited = true;
-    g_dafsaStates++;
-    g_dafsaTransitions += state->count;
-
-    for(size_t i = 0; i < state->count; i++)
-        DafsaCount(state->edges[i].target);
-}
-
-/* Second pass, once the counts are known, so the list can be an exact array */
-static void DafsaCollect(DafsaState *state, size_t *at)
-{
-    if(state == NULL || !state->bVisited)
-        return;
-
-    state->bVisited = false;
-    g_dafsaOrder[*at] = state;
-    (*at)++;
-
-    for(size_t i = 0; i < state->count; i++)
-        DafsaCollect(state->edges[i].target, at);
-}
-
-static size_t BitsFor(size_t values)
-{
-    size_t bits = 1;
-    while((size_t)1 << bits < values)
-        bits++;
-
-    return bits;
-}
-
 static int CompareString(const void *a, const void *b)
 {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* Reverses the whole name rather than the label order, because the lookup this
-   would replace walks a query backwards one character at a time. */
+/* The whole name, not its label order: the file is a character trie and the
+   daemon walks a query backwards one character at a time. */
 static char *ReverseName(const char *name)
 {
     size_t len = strlen(name);
@@ -580,168 +309,6 @@ static void CollectTerminals(Node *node, char **labels, size_t depth)
             CollectTerminals(node->edges[i].child, labels, depth + 1);
         }
     }
-}
-
-/* A broken minimizer reports a smaller structure, which is exactly the answer
-   this measurement is here to decide. So the walk is checked before the size
-   is believed. */
-static bool DafsaAccepts(DafsaState *state, const char *word)
-{
-    for(size_t i = 0; word[i] != '\0'; i++)
-    {
-        DafsaEdge *edge = NULL;
-        for(size_t e = 0; e < state->count; e++)
-        {
-            if(state->edges[e].symbol == (uint8_t)word[i])
-            {
-                edge = &state->edges[e];
-                break;
-            }
-        }
-
-        if(edge == NULL)
-            return false;
-
-        if(word[i + 1] == '\0')
-            return edge->bTerminal;
-
-        if(edge->target == NULL)
-            return false;
-
-        state = edge->target;
-    }
-
-    return false;
-}
-
-static size_t RankBytes(size_t bits)
-{
-    return ((bits + 511) / 512) * 4 + ((bits + 63) / 64) * 2;
-}
-
-/* One encoding priced the same way: a degree bitvector with its rank index, one
-   symbol byte per character, one terminal bit per edge, and whatever an edge
-   has to carry to name its target. A tree needs no target, because the
-   bitvector position is the child. A DAG does, because a state is shared. */
-static void ReportEncoding(const char *name, size_t states, size_t edges,
-                           size_t symbolBytes, size_t edgeBits,
-                           size_t trieBytes)
-{
-    size_t bits      = states + edges;
-    size_t bitvector = (bits + 7) / 8;
-    size_t rank      = RankBytes(bits);
-    size_t terminals = (edges + 7) / 8;
-    size_t targets   = (edges * edgeBits + 7) / 8;
-    size_t total     = BLOCKLIST_HEADER_BYTES + bitvector + rank + symbolBytes
-                     + terminals + targets;
-
-    fprintf(stderr,
-            "mkblocklist: %-16s %8zu bytes, %4.1f a name, %zu states, "
-            "%zu edges  (bits %zu, rank %zu, symbols %zu, terminals %zu, "
-            "targets %zu)  trie %zu\n",
-            name, total, (double)total / (double)g_terminalCount, states, edges,
-            bitvector, rank, symbolBytes, terminals, targets, trieBytes);
-}
-
-static void MeasureDafsa(Node *root, size_t trieBytes)
-{
-    char *labels[128];
-
-    CollectTerminals(root, labels, 0);
-    qsort(g_terminals, g_terminalCount, sizeof(char *), CompareString);
-
-    g_dafsaRegister = Alloc(DAFSA_BUCKETS * sizeof(DafsaState *));
-
-    DafsaState *dafsaRoot = DafsaStateNew();
-    const char *previous  = "";
-
-    for(size_t i = 0; i < g_terminalCount; i++)
-    {
-        DafsaAddWord(dafsaRoot, g_terminals[i], previous);
-        previous = g_terminals[i];
-    }
-
-    DafsaReplaceOrRegister(dafsaRoot);
-    DafsaCount(dafsaRoot);
-
-    size_t missing  = 0;
-    size_t admitted = 0;
-    for(size_t i = 0; i < g_terminalCount; i++)
-    {
-        if(!DafsaAccepts(dafsaRoot, g_terminals[i]))
-            missing++;
-
-        char extended[512];
-        snprintf(extended, sizeof extended, "%sx", g_terminals[i]);
-        if(DafsaAccepts(dafsaRoot, extended))
-            admitted++;
-    }
-
-    if(missing != 0)
-        Fatal("the measured dafsa lost names, so its size means nothing");
-
-    /* The unminimized trie over the same reversed names. It is a tree, so LOUDS
-       positions locate a child and no transition has to name its target. */
-    size_t treeEdges = 0;
-    previous = "";
-    for(size_t i = 0; i < g_terminalCount; i++)
-    {
-        treeEdges += strlen(g_terminals[i])
-                   - DafsaCommonPrefix(g_terminals[i], previous);
-        previous = g_terminals[i];
-    }
-
-    size_t treeStates = treeEdges + 1;
-
-    /* Chains that path compression would collapse. A state on a chain has one
-       way in, one way out and no word ending on it. */
-    g_dafsaOrder = Alloc(g_dafsaStates * sizeof(DafsaState *));
-    size_t ordered = 0;
-    DafsaCollect(dafsaRoot, &ordered);
-
-    for(size_t i = 0; i < ordered; i++)
-        g_dafsaOrder[i]->index = i;
-
-    size_t *inDegree   = Alloc(ordered * sizeof(size_t));
-    bool   *bEndsThere = Alloc(ordered * sizeof(bool));
-
-    for(size_t i = 0; i < ordered; i++)
-    {
-        DafsaState *state = g_dafsaOrder[i];
-        for(size_t e = 0; e < state->count; e++)
-        {
-            DafsaState *target = state->edges[e].target;
-            if(target == NULL)
-                continue;
-
-            inDegree[target->index]++;
-            bEndsThere[target->index] = state->edges[e].bTerminal;
-        }
-    }
-
-    size_t merges = 0;
-    for(size_t i = 1; i < ordered; i++)
-    {
-        if(inDegree[i] == 1 && g_dafsaOrder[i]->count == 1 && !bEndsThere[i])
-            merges++;
-    }
-
-    size_t chainStates = g_dafsaStates - merges;
-    size_t chainEdges  = g_dafsaTransitions - merges;
-
-    fprintf(stderr,
-            "mkblocklist: dafsa %zu names, %zu states, %zu transitions, "
-            "%zu of them also accept one more character\n",
-            g_terminalCount, g_dafsaStates, g_dafsaTransitions, admitted);
-
-    ReportEncoding("trie, louds", treeStates, treeEdges, treeEdges, 0,
-                   trieBytes);
-    ReportEncoding("dafsa, targets", g_dafsaStates, g_dafsaTransitions,
-                   g_dafsaTransitions, BitsFor(g_dafsaStates), trieBytes);
-    ReportEncoding("dafsa, chains", chainStates, chainEdges,
-                   g_dafsaTransitions,
-                   BitsFor(chainStates) + BitsFor(g_dafsaTransitions),
-                   trieBytes);
 }
 
 /* Every accepted name, kept so the file can be checked against the daemon's
@@ -848,6 +415,40 @@ static void SelfCheck(const uint8_t *bytes, size_t size)
     }
 }
 
+static uint8_t *ReadWhole(const char *path, size_t *outSize)
+{
+    FILE *file = fopen(path, "rb");
+    if(file == NULL)
+        Fatal("cannot open the trie");
+
+    if(fseek(file, 0, SEEK_END) != 0)
+        Fatal("cannot measure the trie");
+
+    long end = ftell(file);
+    if(end <= 0 || fseek(file, 0, SEEK_SET) != 0)
+        Fatal("cannot measure the trie");
+
+    size_t   size  = (size_t)end;
+    uint8_t *image = Alloc(size);
+
+    if(fread(image, 1, size, file) != size)
+        Fatal("cannot read the trie");
+
+    fclose(file);
+    *outSize = size;
+    return image;
+}
+
+static void SelfCheckHeader(const uint8_t *bytes, size_t size)
+{
+    Blocklist list;
+
+    memset(&list, 0, sizeof list);
+
+    if(!BlocklistParseHeader(&list, bytes, size))
+        Fatal("that file is not a trie this daemon can read");
+}
+
 static void WriteTrie(const char *path, const uint8_t *image, size_t size)
 {
     FILE *file = fopen(path, "wb");
@@ -915,16 +516,16 @@ static void ReadList(Node *root, FILE *in, size_t *accepted, size_t *skipped)
 
 int main(int argc, char **argv)
 {
-    bool bCArray  = false;
-    bool bMeasure = false;
-    int  first    = 1;
+    bool bCArray = false;
+    bool bWrap   = false;
+    int  first   = 1;
 
     while(first < argc && argv[first][0] == '-' && argv[first][1] != '\0')
     {
         if(strcmp(argv[first], "-c") == 0)
             bCArray = true;
-        else if(strcmp(argv[first], "-m") == 0)
-            bMeasure = true;
+        else if(strcmp(argv[first], "-t") == 0)
+            bWrap = true;
         else
             break;
 
@@ -933,12 +534,32 @@ int main(int argc, char **argv)
 
     if(argc <= first)
     {
-        fprintf(stderr, "usage: mkblocklist [-c] [-m] out [list ...]\n");
+        fprintf(stderr, "usage: mkblocklist [-c] out [list ...]\n"
+                        "       mkblocklist -t out.c in.trie\n");
         return 1;
     }
 
     const char *outPath   = argv[first];
     int         firstList = first + 1;
+
+    /* A published trie is already what .rodata wants, so an embedded build
+       wraps the release asset rather than compiling the lists again. The header
+       is checked here, because a download that arrived wrong should stop the
+       build and not become a binary that filters nothing. */
+    if(bWrap)
+    {
+        if(argc != firstList + 1)
+            Fatal("-t takes one trie");
+
+        size_t   size  = 0;
+        uint8_t *image = ReadWhole(argv[firstList], &size);
+
+        SelfCheckHeader(image, size);
+        WriteCArray(outPath, image, size);
+        fprintf(stderr, "mkblocklist: wrapped %s, %zu bytes\n",
+                argv[firstList], size);
+        return 0;
+    }
 
     Node  *root     = NodeNew();
     size_t accepted = 0;
@@ -967,36 +588,33 @@ int main(int argc, char **argv)
     if(root->count == 0)
         Fatal("no usable domains");
 
-    uint32_t nodeBytes = 0;
-    Assign(root, &nodeBytes);
+    /* The label trie decided which names survive, so the reversed forms it
+       yields are exactly what the file has to hold */
+    char *labels[128];
+    CollectTerminals(root, labels, 0);
+    qsort(g_terminals, g_terminalCount, sizeof(char *), CompareString);
 
-    size_t edges = CountEdges(root);
-    size_t slots = 16;
-    while(slots < edges * 2)
-        slots *= 2;
+    TrieImage   build;
+    const char *previous = "";
 
-    Output out;
-    out.nodes     = Alloc(nodeBytes);
-    out.poolSize  = (uint32_t)(edges * 64 + 64);
-    out.pool      = Alloc(out.poolSize);
-    out.poolUsed  = 0;
-    out.slots     = Alloc(slots * sizeof(PoolSlot));
-    out.slotCount = slots;
+    TrieImageInit(&build, CFG_MAX_NAME_BYTES);
 
-    Emit(root, &out);
+    for(size_t i = 0; i < g_terminalCount; i++)
+    {
+        if(!TrieImageAdd(&build, g_terminals[i], previous))
+            Fatal(build.reason);
 
-    size_t   imageSize = BLOCKLIST_HEADER_BYTES + nodeBytes + out.poolUsed;
+        previous = g_terminals[i];
+    }
+
+    size_t   imageSize = 0;
+    uint8_t *image     = TrieImageFinish(&build, &imageSize);
+
+    if(image == NULL)
+        Fatal(build.reason);
+
     if(!bCArray && imageSize > CFG_BLOCKLIST_MAX_BYTES)
         Fatal("compiled list exceeds CFG_BLOCKLIST_MAX_BYTES");
-
-    uint8_t *image     = Alloc(imageSize);
-
-    memcpy(image, BLOCKLIST_MAGIC, 4);
-    PutU32(image + 4, nodeBytes);
-    PutU32(image + 8, out.poolUsed);
-    PutU32(image + 12, root->offset);
-    memcpy(image + BLOCKLIST_HEADER_BYTES, out.nodes, nodeBytes);
-    memcpy(image + BLOCKLIST_HEADER_BYTES + nodeBytes, out.pool, out.poolUsed);
 
     SelfCheck(image, imageSize);
 
@@ -1007,9 +625,6 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "mkblocklist: %zu names, %zu skipped, %zu bytes, checked\n",
             accepted, skipped, imageSize);
-
-    if(bMeasure)
-        MeasureDafsa(root, imageSize);
 
     return 0;
 }

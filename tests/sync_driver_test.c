@@ -208,9 +208,11 @@ static SyncStep Run(SyncJob *job, unsigned budget, unsigned *resolves)
     return SyncStep_Again;
 }
 
+/* The listing covers every tier in the release, and the driver has to take the
+   line for the asset this build asks for */
 static const char G_LISTING[] =
-    "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  dns_blocker-blocklist.trie\n"
-    "8d4a70100bf861ea3f9dcd701938a183e89c300932ad6ac6b35fa5c8fe4979f9  dns_blocker-blocklist.sources\n";
+    "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  " CFG_BLOCKLIST_ASSET "\n"
+    "8d4a70100bf861ea3f9dcd701938a183e89c300932ad6ac6b35fa5c8fe4979f9  dns_blocker-blocklist-other.trie\n";
 
 static bool Exists(const char *path)
 {

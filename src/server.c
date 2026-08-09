@@ -222,8 +222,8 @@ void ServerClose(Server *server)
             server->upstreams->bProbing = false;
         }
 
-        /* The transactions above released their channels rather than closing
-           them, which is the point of holding one open */
+        /* The transactions above released their channels, they did not close
+           them */
         UpstreamPoolCloseChannels(server->upstreams);
     }
 

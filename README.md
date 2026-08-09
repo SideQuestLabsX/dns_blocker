@@ -104,11 +104,10 @@ An entry blocks the name and every name below it, so `doubleclick.net` also
 covers `ad.doubleclick.net`. The generator reloads its own output through the
 daemon's lookup and fails if anything it inserted does not match.
 
-`mkblocklist -m` also reports what the same list would cost in three denser
-encodings: a LOUDS trie over the reversed names, a minimized DAFSA with explicit
-targets, and that DAFSA with single-character chains collapsed. It builds the
-DAFSA, checks that every stored name still matches, prints the sizes and writes
-nothing extra. The daemon reads neither the flag nor any of those formats.
+The file is a succinct trie over the reversed names: nodes are numbered
+breadth-first, each degree is written in unary and each character is packed into
+as few bits as the list's alphabet needs. Nothing in it is an offset, which is
+where the size goes.
 
 Point `CFG_BLOCKLIST_PATH` at the result.
 
@@ -120,22 +119,56 @@ build:
 https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/<asset>
 ```
 
+A release carries one set of assets per tier. A tier is how much the list
+blocks. `tools/build-blocklist-release.sh` declares the sources of each one.
+
+A base tier decides how hard ads and trackers are blocked:
+
+| Base | Blocks |
+|---|---|
+| `compact` | The common ad and tracker names, and small enough to link into the binary |
+| `standard` | Ads and trackers, and is not expected to break a site. The default |
+| `aggressive` | Every rung the publishers offer. Blocks more, breaks more |
+
+A base blocks ads and trackers and nothing else. Everything beyond that is a
+category you choose. The more aggressive tiers breaks more legitimate use cases.
+
+Categories are independent of the base and of each other. Every combination of
+these five categories is published against every base:
+
+| Category | Adds |
+|---|---|
+| `nsfw` | Adult domains |
+| `tif` | Malware, phishing and command-and-control domains from threat-intelligence feeds |
+| `gambling` | Betting and casino domains |
+| `piracy` | File sharing and streaming piracy domains |
+| `bypass` | Public resolvers, VPNs, proxies and Tor entry points, which a client can otherwise use to go around this daemon |
+
+The name is the base followed by the categories in that order, so
+`standard-nsfw-tif-gambling` is a tier and so is `aggressive-piracy` and so is
+plain `compact`. Three bases against thirty-two subsets is 96 published lists,
+and you take the combination you want rather than a bundle somebody else chose.
+
 | Asset | Contents |
 |---|---|
-| `dns_blocker-blocklist.trie` | The compiled list the daemon maps |
-| `dns_blocker-blocklist.trie.sha256` | A digest for every other asset |
-| `dns_blocker-blocklist.sources` | Each source URL, size, accepted-name count and SHA-256 digest |
-| `dns_blocker-blocklist.domains.txt.gz` | The exact domain list the trie was compiled from |
+| `dns_blocker-blocklist-<tier>.trie` | The compiled list the daemon maps, one a tier |
+| `dns_blocker-blocklist.sources` | Every source with its URL, size, accepted-name count and digest, then the composition of every tier |
+| `dns_blocker-blocklist-sources.tar.gz` | The fetched lists themselves |
+| `dns_blocker-blocklist.sha256` | A digest for every other asset in the release |
 | `THIRD_PARTY_LICENSES.md` | The license terms the release carries |
 
-Download the whole release into a staging directory on the same tmpfs as
-`CFG_BLOCKLIST_PATH`, then verify and install it. The digest file names every
-asset, so `sha256sum -c` fails if any of them is missing:
+`CFG_BLOCKLIST_TIER` selects the tier a build downloads. The asset name and both
+URLs are derived from it, so a build cannot fetch one tier and verify another.
+
+To install one by hand, download the trie and the digest into a staging
+directory on the same tmpfs as `CFG_BLOCKLIST_PATH`, check that one line, then
+rename it into place:
 
 ```sh
-(cd /run/dns_blocker/update && sha256sum -c dns_blocker-blocklist.trie.sha256)
-mv /run/dns_blocker/update/dns_blocker-blocklist.trie \
-  /run/dns_blocker/blocklist.trie
+cd /run/dns_blocker/update
+grep '  dns_blocker-blocklist-standard.trie$' dns_blocker-blocklist.sha256 \
+  | sha256sum -c
+mv dns_blocker-blocklist-standard.trie /run/dns_blocker/blocklist.trie
 ```
 
 Rename the trie to `CFG_BLOCKLIST_PATH` only after verification. The rename
@@ -144,15 +177,31 @@ the embedded list when the mapped file is absent or its header is invalid. It
 bounds every lookup inside a mapped body, but checksum verification is what
 rejects body corruption.
 
-The binary also carries a list of its own. `EMBED_LIST` names the source and
-defaults to `blocklists/embedded.txt`. The build compiles it with
-`mkblocklist -c`, which writes the trie as a C array, and links that into
-`.rodata`.
+The binary can carry a list of its own, for a device that never syncs. This is
+the immutable build: the compiled-in list is the whole policy and changing it
+means writing a new image. The build compiles the list with `mkblocklist -c`,
+which writes the trie as a C array and links that into `.rodata`.
+
+`EMBED_TIER` picks a published tier. The build downloads that tier's compiled
+trie, checks it against the release digest and wraps it, so what gets linked is
+the exact asset the release published:
+
+```sh
+make EMBED_TIER=compact
+```
+
+`EMBED_LIST` points at a domain list instead and wins over `EMBED_TIER`. A
+`.gz` is expanded:
 
 ```sh
 make EMBED_LIST=my-list.txt
-make EMBED_LIST=
 ```
+
+Any tier can be embedded. The `compact` base is the one sized for it.
+
+Both knobs are empty by default: a unit that syncs takes its list from a
+release, and a list small enough to link without thinking about it blocks too
+little to be worth trusting.
 
 `CFG_BLOCKLIST_PATH` decides what that list is for. With a path, the mapped file
 wins whenever it is there, and the compiled-in list covers a boot that has no
@@ -392,8 +441,9 @@ uptime      2 s
 queries     4, hits 1, blocked 0, local 0, forwarded 3, failed 0
 refused     malformed 0, truncated 0, connections 0, evicted 0, retries 0
 cache       hits 1, misses 3, inserts 3, evictions 0, refused 0
-blocklist   mapped, 6543894 bytes
-sync        idle, next in 3600 s, installed 6543894 bytes
+channels    opened 1, reused 2, stale 0
+blocklist   mapped, 2717008 bytes
+sync        idle, next in 3600 s, installed 2717008 bytes
 upstream    1.1.1.1:53 plain, 27 ms, queries 3, failures 0, rejected 0, probes 0
 upstream    9.9.9.9:53 plain, unmeasured, queries 0, failures 0, rejected 0, probes 0
 ```

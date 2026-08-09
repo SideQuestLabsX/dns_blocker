@@ -4,6 +4,9 @@
 #include "wire.h"
 
 #include "dnsbuild.h"
+#include "trieimage.h"
+
+#include "config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,100 +42,55 @@ static int G_FAILURES;
         }                                                                  \
     } while(0)
 
-/* Builds a trie by hand, in the layout the generator produces. Keeping this
-   independent of the generator means a change to either one that breaks the
-   agreement shows up here. */
-typedef struct
+/* Builds a trie from a list of names with the encoder the generator uses, so
+   the test cannot pass against a format the shipped tool does not write. What
+   this file checks is the semantics of a lookup and the refusal of a corrupt
+   file, which is the daemon's side of the agreement. */
+static uint8_t *BuildFrom(const char *const *names, size_t count,
+                          Blocklist *list, size_t *sizeOut)
 {
-    uint8_t  buf[4096];
-    uint32_t nodeBytes;
-    uint8_t  pool[512];
-    uint32_t poolUsed;
-} Builder2;
+    TrieImage   build;
+    char      **reversed = malloc(count * sizeof(char *));
+    const char *previous = "";
 
-static void Put32(uint8_t *at, uint32_t v)
-{
-    at[0] = (uint8_t)v;
-    at[1] = (uint8_t)(v >> 8);
-    at[2] = (uint8_t)(v >> 16);
-    at[3] = (uint8_t)(v >> 24);
-}
+    TrieImageInit(&build, CFG_MAX_NAME_BYTES);
 
-static uint32_t PoolPut(Builder2 *b, const char *label)
-{
-    uint32_t at = b->poolUsed;
-    size_t   n  = strlen(label);
+    for(size_t i = 0; i < count; i++)
+        reversed[i] = TrieReverse(names[i]);
 
-    memcpy(b->pool + at, label, n);
-    b->poolUsed += (uint32_t)n;
-    return at;
-}
+    qsort(reversed, count, sizeof(char *), TrieCompareString);
 
-/* One node with count children. Children must be given in the order the
-   daemon searches: by length, then bytes. */
-static uint32_t NodePut(Builder2 *b, size_t count)
-{
-    uint32_t at = b->nodeBytes;
+    for(size_t i = 0; i < count; i++)
+    {
+        CHECK(TrieImageAdd(&build, reversed[i], previous));
+        previous = reversed[i];
+    }
 
-    Put32(b->buf + at, (uint32_t)count);
-    b->nodeBytes += 4 + (uint32_t)count * BLOCKLIST_CHILD_BYTES;
-    return at;
-}
-
-static void ChildPut(Builder2 *b, uint32_t node, size_t index,
-                     const char *label, uint32_t childOffset, bool bTerminal)
-{
-    uint8_t *entry = b->buf + node + 4 + index * BLOCKLIST_CHILD_BYTES;
-
-    Put32(entry, PoolPut(b, label));
-    Put32(entry + 4, childOffset);
-    entry[8]  = (uint8_t)strlen(label);
-    entry[9]  = bTerminal ? BLOCKLIST_FLAG_TERMINAL : 0u;
-    entry[10] = 0;
-    entry[11] = 0;
-}
-
-static uint8_t *Finish(Builder2 *b, Blocklist *list, size_t *sizeOut)
-{
-    size_t   total = BLOCKLIST_HEADER_BYTES + b->nodeBytes + b->poolUsed;
-    uint8_t *file  = malloc(total);
-
-    memcpy(file, BLOCKLIST_MAGIC, 4);
-    Put32(file + 4, b->nodeBytes);
-    Put32(file + 8, b->poolUsed);
-    Put32(file + 12, 0);
-    memcpy(file + BLOCKLIST_HEADER_BYTES, b->buf, b->nodeBytes);
-    memcpy(file + BLOCKLIST_HEADER_BYTES + b->nodeBytes, b->pool, b->poolUsed);
+    uint8_t *file = TrieImageFinish(&build, sizeOut);
+    CHECK(file != NULL);
 
     memset(list, 0, sizeof *list);
     list->base   = file;
-    list->size   = total;
+    list->size   = *sizeOut;
     list->source = BlocklistSource_Mapped;
 
-    CHECK(BlocklistParseHeader(list, file, total));
-    *sizeOut = total;
+    CHECK(BlocklistParseHeader(list, file, *sizeOut));
+
+    TrieImageRelease(&build);
+
+    for(size_t i = 0; i < count; i++)
+        free(reversed[i]);
+
+    free(reversed);
     return file;
 }
 
-/* com -> { doubleclick(terminal), example -> ads(terminal) } */
+/* doubleclick.com and ads.example.com, which every case below reads against */
 static uint8_t *BuildSample(Blocklist *list, size_t *sizeOut)
 {
-    static Builder2 b;
-    memset(&b, 0, sizeof b);
+    static const char *const names[] = { "doubleclick.com", "ads.example.com" };
 
-    uint32_t root    = NodePut(&b, 1);
-    uint32_t com     = NodePut(&b, 2);
-    uint32_t example = NodePut(&b, 1);
-
-    ChildPut(&b, root, 0, "com", com, false);
-
-    /* "example" is longer than "doubleclick"? No: sorted by length first. */
-    ChildPut(&b, com, 0, "example", example, false);
-    ChildPut(&b, com, 1, "doubleclick", 0, true);
-
-    ChildPut(&b, example, 0, "ads", 0, true);
-
-    return Finish(&b, list, sizeOut);
+    return BuildFrom(names, sizeof names / sizeof names[0], list, sizeOut);
 }
 
 static void TestExactAndSuffix(void)
@@ -205,7 +163,7 @@ static void TestEmbeddedList(void)
         {
             CHECK(bLoaded);
             CHECK(list.source == BlocklistSource_Embedded);
-            CHECK(list.nodeBytes > 0);
+            CHECK(list.nodeCount > 0);
             CHECK_BLOCKED(&list, "definitely-not-in-any-list-12345.example",
                           false);
         }
@@ -229,15 +187,15 @@ static void TestCorruptHeaderRefused(void)
     CHECK(!BlocklistParseHeader(&list, copy, size));
 
     memcpy(copy, file, size);
-    Put32(copy + 4, 0xFFFFFFFFu);
+    TriePutU32(copy + 4, 0xFFFFFFFFu);
     CHECK(!BlocklistParseHeader(&list, copy, size));
 
     memcpy(copy, file, size);
-    Put32(copy + 8, 0xFFFFFFFFu);
+    TriePutU32(copy + 8, 0xFFFFFFFFu);
     CHECK(!BlocklistParseHeader(&list, copy, size));
 
     memcpy(copy, file, size);
-    Put32(copy + 12, 0xFFFFFFFFu);
+    TriePutU32(copy + 12, 0xFFFFFFFFu);
     CHECK(!BlocklistParseHeader(&list, copy, size));
 
     for(size_t n = 0; n < BLOCKLIST_HEADER_BYTES; n++)
@@ -296,20 +254,13 @@ static void TestCorruptBodyIsBounded(void)
     free(file);
 }
 
-/* net -> tracker(terminal). Distinguishable from BuildSample, so a swap that
-   did not happen shows up as the wrong name being blocked. */
+/* Distinguishable from BuildSample, so a swap that did not happen shows up as
+   the wrong name being blocked. */
 static uint8_t *BuildOther(Blocklist *list, size_t *sizeOut)
 {
-    static Builder2 b;
-    memset(&b, 0, sizeof b);
+    static const char *const names[] = { "tracker.net" };
 
-    uint32_t root = NodePut(&b, 1);
-    uint32_t net  = NodePut(&b, 1);
-
-    ChildPut(&b, root, 0, "net", net, false);
-    ChildPut(&b, net, 0, "tracker", 0, true);
-
-    return Finish(&b, list, sizeOut);
+    return BuildFrom(names, sizeof names / sizeof names[0], list, sizeOut);
 }
 
 static bool WriteTrie(const char *path, const uint8_t *file, size_t size)

@@ -9,6 +9,9 @@
 #include "wire.h"
 
 #include "dnsbuild.h"
+#include "trieimage.h"
+
+#include "config.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -188,59 +191,30 @@ static int ConnectLoopback(uint16_t port, int type)
 
 /* A trie holding one name, so the server fixture can exercise the blocked
    path. Built by hand in the on-disk layout, the same as blocklist_test. */
-static uint8_t G_TRIE[256];
+static uint8_t *G_TRIE;
 
-static void TriePut32(uint8_t *at, uint32_t v)
-{
-    at[0] = (uint8_t)v;
-    at[1] = (uint8_t)(v >> 8);
-    at[2] = (uint8_t)(v >> 16);
-    at[3] = (uint8_t)(v >> 24);
-}
-
-/* com -> example -> blocked(terminal) */
+/* blocked.example.com, built with the encoder the generator uses */
 static void TrieBuild(Blocklist *list)
 {
-    static const char *labels[] = { "com", "example", "blocked" };
+    static const char *const names[] = { "blocked.example.com" };
 
-    uint8_t *nodes = G_TRIE + BLOCKLIST_HEADER_BYTES;
-    uint32_t offsets[3];
-    uint32_t at = 0;
+    TrieImage build;
+    size_t    size = 0;
 
-    for(size_t i = 0; i < 3; i++)
-    {
-        offsets[i] = at;
-        TriePut32(nodes + at, 1);
-        at += 4 + BLOCKLIST_CHILD_BYTES;
-    }
+    TrieImageInit(&build, CFG_MAX_NAME_BYTES);
 
-    uint32_t poolAt   = 0;
-    uint8_t *poolStart = nodes + at;
+    char *reversed = TrieReverse(names[0]);
+    if(!TrieImageAdd(&build, reversed, ""))
+        return;
 
-    for(size_t i = 0; i < 3; i++)
-    {
-        uint8_t *entry = nodes + offsets[i] + 4;
-        size_t   len   = strlen(labels[i]);
-        bool     bLast = (i == 2);
-
-        memcpy(poolStart + poolAt, labels[i], len);
-        TriePut32(entry, poolAt);
-        TriePut32(entry + 4, bLast ? 0u : offsets[i + 1]);
-        entry[8]  = (uint8_t)len;
-        entry[9]  = bLast ? BLOCKLIST_FLAG_TERMINAL : 0u;
-        entry[10] = 0;
-        entry[11] = 0;
-        poolAt += (uint32_t)len;
-    }
-
-    memcpy(G_TRIE, BLOCKLIST_MAGIC, 4);
-    TriePut32(G_TRIE + 4, at);
-    TriePut32(G_TRIE + 8, poolAt);
-    TriePut32(G_TRIE + 12, 0);
+    free(G_TRIE);
+    G_TRIE = TrieImageFinish(&build, &size);
+    TrieImageRelease(&build);
+    free(reversed);
 
     memset(list, 0, sizeof *list);
     list->base   = G_TRIE;
-    list->size   = BLOCKLIST_HEADER_BYTES + at + poolAt;
+    list->size   = size;
     list->source = BlocklistSource_Mapped;
     BlocklistParseHeader(list, list->base, list->size);
 }

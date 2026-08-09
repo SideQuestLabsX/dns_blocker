@@ -15,9 +15,23 @@ CC      ?= gcc
 HOSTCC  ?= gcc
 MBEDTLS_DIR ?= $(BUILD)/mbedtls
 
-# Domain list compiled into .rodata as the cold-boot fallback. Set it empty to
-# link the zero-length stub and ship without one
-EMBED_LIST ?= blocklists/embedded.txt
+# The list compiled into .rodata, for a device that never syncs. Both are empty
+# by default: a unit that syncs takes its list from a release, and a list small
+# enough to link without thinking about it blocks too little to be worth
+# trusting.
+#
+# EMBED_TIER names a published tier. The build downloads that tier's compiled
+# trie, checks it against the release digest and wraps it, so what gets linked is
+# the exact asset the release published. EMBED_LIST points at a domain list
+# instead and wins, and a .gz is expanded.
+#
+#   make EMBED_TIER=compact
+#   make EMBED_LIST=my-list.txt
+#
+# The list lands in .rodata, so the tier decides how much the binary grows. The
+# release notes carry the current size of each one.
+EMBED_TIER ?=
+EMBED_LIST ?=
 
 # -fstack-protector-strong is mandatory, the binary parses attacker-controlled
 # length-prefixed data
@@ -157,28 +171,54 @@ $(MBEDTLS_MARKER): tools/build-mbedtls.sh | $(BUILD)
 # Compiles domain lists into the trie the daemon maps. Host tool, so it is not
 # built with the shipped flags, and it links the stub rather than its own output
 tools: $(BUILD)/mkblocklist
-$(BUILD)/mkblocklist: tools/mkblocklist.c src/blocklist.c src/wire.c src/embedded.c $(HDR) | $(BUILD)
-	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Isrc $(filter %.c,$^) -o $@
+$(BUILD)/mkblocklist: tools/mkblocklist.c src/blocklist.c src/wire.c src/embedded.c $(HDR) tools/trieimage.h tools/listline.h | $(BUILD)
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Isrc -Itools $(filter %.c,$^) -o $@
 
 # One of the two definitions of G_EMBEDDED_TRIE reaches the link: the stub, or
-# the array mkblocklist writes from EMBED_LIST
-ifeq ($(strip $(EMBED_LIST)),)
+# the array mkblocklist writes from the selected list
+ifneq ($(strip $(EMBED_LIST)),)
+  EMBED_INPUT := $(BUILD)/embed-list.txt
+else ifneq ($(strip $(EMBED_TIER)),)
+  EMBED_INPUT := $(BUILD)/embed-$(strip $(EMBED_TIER)).trie
+else
+  EMBED_INPUT :=
+endif
+
+ifneq ($(strip $(EMBED_LIST)),)
+$(BUILD)/embed-list.txt: $(EMBED_LIST) | $(BUILD)
+	@case '$(EMBED_LIST)' in \
+	  *.gz) gunzip -c '$(EMBED_LIST)' > $@ ;; \
+	  *)    cp '$(EMBED_LIST)' $@ ;; \
+	esac
+endif
+
+ifneq ($(strip $(EMBED_TIER)),)
+$(BUILD)/embed-$(strip $(EMBED_TIER)).trie: tools/fetch-embed-list.sh src/config.h | $(BUILD)
+	sh tools/fetch-embed-list.sh $(strip $(EMBED_TIER)) $@
+endif
+
+ifeq ($(strip $(EMBED_INPUT)),)
   EMBED_SRC := src/embedded.c
 else
   EMBED_SRC := $(BUILD)/embedded_gen.c
 
-$(BUILD)/embedded_gen.c: $(EMBED_LIST) $(BUILD)/mkblocklist | $(BUILD)
-	$(BUILD)/mkblocklist -c $@ $(EMBED_LIST)
+# A tier arrives compiled, so it is wrapped. A domain list is compiled first.
+$(BUILD)/embedded_gen.c: $(EMBED_INPUT) $(BUILD)/mkblocklist | $(BUILD)
+ifneq ($(strip $(EMBED_LIST)),)
+	$(BUILD)/mkblocklist -c $@ $(EMBED_INPUT)
+else
+	$(BUILD)/mkblocklist -t $@ $(EMBED_INPUT)
+endif
 endif
 
 # Which source compiles depends on a variable, and an object file cannot show
-# that. Without the stamp, EMBED_LIST= links the previous list and reports it as
-# the fallback, so a build that meant to ship none ships one.
+# that. Without the stamp, clearing the knob links the previous list and reports
+# it, so a build that meant to ship none ships one.
 # FORCE runs the recipe every build, and the file only moves when the value did
 FORCE:
 
 $(BUILD)/embedded.stamp: FORCE | $(BUILD)
-	@printf '%s\n' '$(strip $(EMBED_LIST))' > $@.new
+	@printf '%s\n' '$(strip $(EMBED_LIST)) $(strip $(EMBED_TIER))' > $@.new
 	@if cmp -s $@.new $@; then rm -f $@.new; else mv $@.new $@; fi
 
 $(BUILD)/embedded.o: $(EMBED_SRC) $(BUILD)/embedded.stamp | $(BUILD)
@@ -246,8 +286,8 @@ $(BUILD)/msg_test: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD)
 $(BUILD)/verify_test: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
-$(BUILD)/blocklist_test: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
-	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+$(BUILD)/blocklist_test: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) tools/trieimage.h | $(BUILD)
+	$(CC) $(TEST_CFLAGS) -Itools $(filter %.c,$^) -o $@
 
 # The generator's line parsing. Header-only, so the tool and the test read the
 # same code rather than two copies of one format
@@ -292,8 +332,8 @@ $(BUILD)/tls_backend_test: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
 
 # Binds loopback sockets and drives a real query through the whole path
-$(BUILD)/server_test: tests/server_test.c src/server.c src/qlog.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) | $(BUILD)
-	$(CC) $(TEST_CFLAGS) -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
+$(BUILD)/server_test: tests/server_test.c src/server.c src/qlog.c src/upstream.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) tools/trieimage.h | $(BUILD)
+	$(CC) $(TEST_CFLAGS) -Itools -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
 $(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
@@ -327,8 +367,8 @@ $(BUILD)/msg_test_native: tests/msg_test.c src/msg.c src/wire.c $(HDR) | $(BUILD
 $(BUILD)/verify_test_native: tests/verify_test.c src/verify.c src/wire.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
 
-$(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) | $(BUILD)
-	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+$(BUILD)/blocklist_test_native: tests/blocklist_test.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) tools/trieimage.h | $(BUILD)
+	$(CC) $(CFLAGS) -Itools $(filter %.c,$^) -o $@
 
 $(BUILD)/hosts_test_native: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@

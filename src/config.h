@@ -31,15 +31,30 @@
 
 /* Blocklist. Mapped separately from the arena at boot and sized from the
    compiled file. The cap bounds a hostile or accidentally huge list on a 512MB
-   board. A list above it is refused and the embedded fallback is used.
+   board. A list above it is refused and any linked-in list is used.
 
    NULL consults no file, which leaves the list linked into .rodata as the whole
-   policy. That is the air-gapped build, where a list is changed by re-flashing
-   and by nothing else. */
+   policy. That is the build for a device that never syncs, where a list changes
+   by writing a new image and by nothing else. */
 #ifndef CFG_BLOCKLIST_PATH
   #define CFG_BLOCKLIST_PATH    "/run/dns_blocker/blocklist.trie"
 #endif
-#define CFG_BLOCKLIST_MAX_BYTES MIB(16)
+/* Guarded like the rest, so a measurement can raise it. Without the guard a -D
+   override is silently discarded and the run reports the shipped cap.
+
+   **The cap is a memory limit, not an address space limit.** CFG_BLOCKLIST_PATH
+   is on a tmpfs, so the file's pages are RAM whether anything maps them or not,
+   and the sync holds the staging copy and the live one at once. 32MB therefore
+   costs up to 64MB of a 426MB board while a sync runs. Mapping the file is what
+   keeps a lookup from copying it, and it does not make the bytes free.
+
+   Two more reasons it cannot simply be removed: `st_size` is assigned to a
+   size_t, which is 32 bits on the board, and the daemon must refuse a hostile
+   list rather than discover its size by running out. A device with more memory
+   raises this knob. */
+#ifndef CFG_BLOCKLIST_MAX_BYTES
+  #define CFG_BLOCKLIST_MAX_BYTES MIB(32)
+#endif
 
 /* Read-only state for anything that wants to look, beside the list it shares a
    directory with. NULL publishes nothing. The interval bounds the write rate:
@@ -191,10 +206,9 @@
 #define CFG_MAX_UPSTREAMS       4
 
 /* A slot is held for a whole exchange, and an exchange that has to handshake
-   costs 350 to 430ms on ARM1176. Three slots capped the board under ten queries
-   a second and refused 14% of a real LAN's traffic, because one device waking up
-   asks for six names at once. Six slots and the queue in server.c cover that
-   burst. The record buffers have to stay within ARENA_TLS_BYTES, which is sized
+   costs 350 to 430ms on ARM1176. Six covers the burst one device makes when it
+   wakes up and asks for six names at once, together with the queue in server.c.
+   The record buffers have to stay within ARENA_TLS_BYTES, which is sized
    alongside this. */
 #define CFG_TLS_SLOTS           6
 #define CFG_TLS_HOSTNAME_BYTES  128
@@ -210,8 +224,8 @@
 
    The idle timeout is the client's own, well under the 60 to 75s an HTTP server
    usually keeps a connection for, so this side closes first and a query rarely
-   meets a channel the server has already dropped. 0 for the reuse switch closes
-   every channel after one exchange, which is the behavior before this existed. */
+   meets a channel the server has already dropped. 0 closes every channel after
+   one exchange. */
 #ifndef CFG_TLS_REUSE
   #define CFG_TLS_REUSE         1
 #endif
@@ -223,9 +237,8 @@
    drops an idle TCP mapping and sends nothing, so the write succeeds into
    nowhere and no answer or close ever arrives. A reused exchange that has
    received nothing therefore gives up early and goes out again on a fresh
-   channel, instead of spending CFG_UPSTREAM_TIMEOUT_MS on a connection that
-   cannot answer. Measured: a channel idle for seven minutes cost 2238ms and a
-   failure against a resolver that was working.
+   channel. Measured: a channel idle for seven minutes cost 2238ms and a failure
+   against a resolver that was working.
 
    Keep this above a healthy reused round trip, which is the upstream RTT with no
    handshake in it, or a slow answer is abandoned for a second one. */
@@ -235,14 +248,22 @@
 
 /* Blocklist download. The release redirects twice and lands on a signed CDN
    URL of about 1.4KB, so the URL and header buffers are sized from the measured
-   responses rather than from a round number. The body never lands in memory. */
-#ifndef CFG_BLOCKLIST_URL
-  #define CFG_BLOCKLIST_URL "https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/dns_blocker-blocklist.trie"
+   responses rather than from a round number. The body never lands in memory.
+
+   The release carries one asset per tier and one digest file covering all of
+   them. The tier is the only knob: the asset name and both URLs are derived
+   from it, so a build cannot ask for one asset and verify another. The release
+   script declares the tiers and their sources */
+#ifndef CFG_BLOCKLIST_TIER
+  #define CFG_BLOCKLIST_TIER    "standard"
 #endif
-#ifndef CFG_BLOCKLIST_DIGEST_URL
-  #define CFG_BLOCKLIST_DIGEST_URL "https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/dns_blocker-blocklist.trie.sha256"
+#ifndef CFG_BLOCKLIST_BASE_URL
+  #define CFG_BLOCKLIST_BASE_URL "https://github.com/SideQuestLabsX/dns_blocker/releases/download/blocklist-latest/"
 #endif
-#define CFG_BLOCKLIST_ASSET     "dns_blocker-blocklist.trie"
+#define CFG_BLOCKLIST_ASSET     "dns_blocker-blocklist-" CFG_BLOCKLIST_TIER ".trie"
+#define CFG_BLOCKLIST_URL       CFG_BLOCKLIST_BASE_URL CFG_BLOCKLIST_ASSET
+#define CFG_BLOCKLIST_DIGEST_URL \
+    CFG_BLOCKLIST_BASE_URL "dns_blocker-blocklist.sha256"
 #define CFG_FETCH_URL_BYTES     2048
 #define CFG_FETCH_HOST_BYTES    CFG_TLS_HOSTNAME_BYTES
 #define CFG_FETCH_PATH_BYTES    1024
@@ -253,9 +274,8 @@
 /* Sized from the path and host caps. The signed CDN path is 905 bytes */
 #define CFG_FETCH_REQUEST_BYTES (CFG_FETCH_PATH_BYTES + CFG_FETCH_HOST_BYTES + 128)
 
-/* The published digest listing names every asset in the release, so this holds
-   the whole file rather than one line. Four assets is 382 bytes today. */
-#define CFG_SYNC_DIGEST_BYTES   2048
+/* The 99-line digest is 11649 bytes with the current tier names */
+#define CFG_SYNC_DIGEST_BYTES   16384
 #define CFG_SYNC_PATH_BYTES     256
 
 /* The first attempt happens after the daemon is already serving, because the

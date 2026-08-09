@@ -203,12 +203,13 @@ static void TestLargeRedirectHeader(void)
     CHECK(headerEnd == at);
 }
 
-/* The real digest file names four assets. Picking the wrong line installs a
-   trie that was never verified. */
+/* Exact matching keeps a base from taking a variation's digest */
 static const char G_DIGESTS[] =
-    "25b93f9c8b855b0e995741207aec6ab979ece317d5bed1327991da54a4382f4c  dns_blocker-blocklist.trie\n"
+    "25b93f9c8b855b0e995741207aec6ab979ece317d5bed1327991da54a4382f4c  dns_blocker-blocklist-standard.trie\n"
     "8d4a70100bf861ea3f9dcd701938a183e89c300932ad6ac6b35fa5c8fe4979f9  dns_blocker-blocklist.sources\n"
-    "c86452db645ad1c0a6467bde3ac6b4dda539b479186259fa6bfde17523fa771d  dns_blocker-blocklist.domains.txt.gz\n"
+    "c86452db645ad1c0a6467bde3ac6b4dda539b479186259fa6bfde17523fa771d  dns_blocker-blocklist-sources.tar.gz\n"
+    "3f1c0f5f7fd2a1b4e6c8d9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0  dns_blocker-blocklist-standard-nsfw.trie\n"
+    "4e2d1e6e8ae3b2c5f7d9eab1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1  dns_blocker-blocklist-aggressive.trie\n"
     "1dffc3ee0dd92d950596eff74d0a112033f0a2f4e90030ef5ac0000f38d8ba38  THIRD_PARTY_LICENSES.md\n";
 
 static void TestDigest(void)
@@ -218,6 +219,13 @@ static void TestDigest(void)
     CHECK(FetchFindDigest((const uint8_t *)G_DIGESTS, strlen(G_DIGESTS),
                           CFG_BLOCKLIST_ASSET, digest));
     CHECK(digest[0] == 0x25 && digest[1] == 0xb9 && digest[31] == 0x4c);
+
+    CHECK(FetchFindDigest((const uint8_t *)G_DIGESTS, strlen(G_DIGESTS),
+                          "dns_blocker-blocklist-standard-nsfw.trie", digest));
+    CHECK(digest[0] == 0x3f && digest[31] == 0xc0);
+    CHECK(FetchFindDigest((const uint8_t *)G_DIGESTS, strlen(G_DIGESTS),
+                          "dns_blocker-blocklist-aggressive.trie", digest));
+    CHECK(digest[0] == 0x4e && digest[31] == 0xd1);
 
     CHECK(FetchFindDigest((const uint8_t *)G_DIGESTS, strlen(G_DIGESTS),
                           "THIRD_PARTY_LICENSES.md", digest));

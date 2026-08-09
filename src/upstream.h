@@ -140,8 +140,8 @@ typedef struct UpstreamPool
 
     uint64_t channelOpens;
     uint64_t channelReuses;
-    /* Reused channels the server had already closed. Latency, not loss: the
-       query goes out again on a fresh one */
+    /* Reused channels the server had already closed. The query goes out
+       again on a fresh one, so this counts latency */
     uint64_t channelStale;
 } UpstreamPool;
 

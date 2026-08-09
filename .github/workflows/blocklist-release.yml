@@ -16,33 +16,47 @@ jobs:
   publish:
     name: Compile and publish
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
       - name: Build compiler
         run: make tools PROFILE=minimal
 
-      - name: Compile release blocklist
+      - name: Compile every tier
         run: sh tools/build-blocklist-release.sh
+
+      - name: Report what was built
+        run: |
+          cd build/blocklist-release
+          ls -l dns_blocker-blocklist-*.trie
+          cat dns_blocker-blocklist.sha256
 
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          cd build/blocklist-release
           tag="blocklist-$(date -u +%Y-%m-%d)-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           title="Blocklist $(date -u +%Y-%m-%d)"
-          notes=$(printf '%s\n\n%s %s\n' \
-            "Compiled from blocklists/sources.txt at ${GITHUB_SHA}." \
-            "Two upstream sources are GPL-3.0, so the trie is a combined work" \
-            "under GPL-3.0. dns_blocker-blocklist.domains.txt.gz is its corresponding source. See THIRD_PARTY_LICENSES.md.")
+
+          # One trie a tier, and one set of metadata however many tiers there are
           assets=(
-            build/blocklist-release/dns_blocker-blocklist.trie
-            build/blocklist-release/dns_blocker-blocklist.trie.sha256
-            build/blocklist-release/dns_blocker-blocklist.sources
-            build/blocklist-release/dns_blocker-blocklist.domains.txt.gz
-            build/blocklist-release/THIRD_PARTY_LICENSES.md
+            dns_blocker-blocklist.sha256
+            dns_blocker-blocklist.sources
+            dns_blocker-blocklist-sources.tar.gz
+            THIRD_PARTY_LICENSES.md
           )
+          while read -r tier; do
+            assets+=("dns_blocker-blocklist-${tier}.trie")
+          done < tiers
+
+          notes=$(printf '%s\n\n%s\n%s\n\n%s %s\n' \
+            "Compiled at ${GITHUB_SHA}. One trie a tier, $(wc -l < tiers) of them." \
+            "dns_blocker-blocklist.sources names every source and the composition of every tier." \
+            "dns_blocker-blocklist-sources.tar.gz holds the fetched lists themselves." \
+            "Upstream sources are GPL-3.0, so every trie is a combined work under GPL-3.0." \
+            "That manifest and that archive together are its corresponding source. See THIRD_PARTY_LICENSES.md.")
 
           gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" \
             --title "$title" --notes "$notes" --draft
@@ -53,10 +67,24 @@ jobs:
           # against the old assets
           stable="blocklist-latest"
           stableNotes=$(printf '%s\n\n%s\n' \
-            "The current blocklist, republished every week. This tag is what the daemon downloads." \
+            "The current blocklists, republished every week. This tag is what the daemon downloads, and CFG_BLOCKLIST_TIER picks the asset." \
             "Immutable dated copy of this build: ${tag}")
           if gh release view "$stable" >/dev/null 2>&1; then
             gh release upload "$stable" "${assets[@]}" --clobber
+
+            while read -r oldAsset; do
+              keep=false
+              for asset in "${assets[@]}"; do
+                if [[ "$oldAsset" == "$asset" ]]; then
+                  keep=true
+                  break
+                fi
+              done
+              if [[ "$keep" == false ]]; then
+                gh release delete-asset "$stable" "$oldAsset" --yes
+              fi
+            done < <(gh release view "$stable" --json assets --jq '.assets[].name')
+
             gh release edit "$stable" --title "Blocklist (latest)" --notes "$stableNotes" --latest=false
           else
             gh release create "$stable" "${assets[@]}" --target "$GITHUB_SHA" \
