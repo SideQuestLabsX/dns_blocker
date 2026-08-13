@@ -423,7 +423,11 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
         return false;
 
     bool bStarted;
-    if(job->bFollowing)
+    if(job->job.fail == FetchFail_Read)
+    {
+        bStarted = FetchRetry(&job->job, job->backend, addr, addrLen);
+    }
+    else if(job->bFollowing)
     {
         bStarted = FetchFollow(&job->job, job->backend, addr, addrLen);
     }
@@ -493,8 +497,9 @@ static SyncStep StartPhase(SyncJob *job, SyncPhase phase)
 {
     /* Each phase resolves its own release URL after the last transfer's redirects */
     FetchEnd(&job->job);
-    job->phase      = phase;
-    job->bFollowing = false;
+    job->phase       = phase;
+    job->bFollowing  = false;
+    job->readRetries = 0;
     if(!SetPhaseUrl(job))
     {
         job->state = SyncState_Failed;
@@ -587,13 +592,23 @@ SyncStep SyncProgress(SyncJob *job)
     {
         /* FetchFollow needs an address for the host the redirect named, and
            this file does not resolve one */
-        job->bFollowing = true;
-        job->state      = SyncState_Resolve;
+        job->bFollowing  = true;
+        job->readRetries = 0;
+        job->state       = SyncState_Resolve;
         return SyncStep_NeedAddress;
     }
 
     if(step == FetchStep_Failed)
     {
+        if(job->job.fail == FetchFail_Read
+           && job->readRetries < CFG_FETCH_READ_RETRIES)
+        {
+            FetchEnd(&job->job);
+            job->readRetries++;
+            job->state = SyncState_Resolve;
+            return SyncStep_NeedAddress;
+        }
+
         if(job->stagingFd >= 0)
         {
             SyncAbandon(job->stagingFd, job->staging);

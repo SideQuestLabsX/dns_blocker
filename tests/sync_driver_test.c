@@ -27,6 +27,11 @@ static int G_FAILURES;
    entry is one server reply, consumed in order as the driver reconnects. */
 #define MAX_REPLIES 8
 
+_Static_assert(CFG_FETCH_READ_RETRIES > 0,
+               "the sync must retry a transient response close");
+_Static_assert(CFG_FETCH_READ_RETRIES <= MAX_REPLIES - 2,
+               "the scripted reply table must hold every read retry");
+
 static uint8_t G_REPLY[MAX_REPLIES][4096];
 static size_t  G_REPLY_LEN[MAX_REPLIES];
 static size_t  G_REPLIES;
@@ -56,6 +61,12 @@ static void ReplyBody(const void *body, size_t bodyLen)
     snprintf(head, sizeof head,
              "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\n\r\n", bodyLen);
     Reply(head, body, bodyLen);
+}
+
+static void ReplyClose(void)
+{
+    G_REPLY_LEN[G_REPLIES] = 0;
+    G_REPLIES++;
 }
 
 static void ReplyRedirect(const char *location)
@@ -280,6 +291,50 @@ static void TestRedirects(const char *dir)
 
     SyncEnd(&job);
     unlink(target);
+}
+
+static void TestResponseCloseIsRetried(const char *dir)
+{
+    SyncJob  job;
+    char     target[256];
+    unsigned resolves = 0;
+
+    snprintf(target, sizeof target, "%s/retried.trie", dir);
+
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyClose();
+    ReplyBody(G_LISTING, strlen(G_LISTING));
+    ReplyBody("hello\n", 6);
+
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
+    CHECK(resolves == 4);
+    CHECK(SizeOf(target) == 6);
+
+    SyncEnd(&job);
+    unlink(target);
+}
+
+static void TestResponseCloseRetryIsBounded(const char *dir)
+{
+    SyncJob job;
+    char    target[256];
+
+    snprintf(target, sizeof target, "%s/retry-limit.trie", dir);
+
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    for(unsigned i = 0; i <= CFG_FETCH_READ_RETRIES; i++)
+        ReplyClose();
+
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
+    CHECK(job.phase == SyncPhase_Digest);
+    CHECK(job.job.fail == FetchFail_Read);
+    CHECK(!Exists(target));
+
+    SyncEnd(&job);
 }
 
 static void TestDigestMismatchKeepsTheOldList(const char *dir)
@@ -570,6 +625,8 @@ int main(void)
 
     TestHappyPath(dir);
     TestRedirects(dir);
+    TestResponseCloseIsRetried(dir);
+    TestResponseCloseRetryIsBounded(dir);
     TestDigestMismatchKeepsTheOldList(dir);
     TestListingWithoutTheAsset(dir);
     TestTransferFailureCleansUp(dir);

@@ -115,6 +115,7 @@ typedef struct
     /* Set when a redirect moved the target, so the answer to the next address
        request belongs to the new host rather than the original one */
     bool bFollowing;
+    unsigned readRetries;
 
     uint8_t  metadataText[CFG_SYNC_DIGEST_BYTES];
     uint8_t  want[FETCH_DIGEST_BYTES];

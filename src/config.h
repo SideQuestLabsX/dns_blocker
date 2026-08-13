@@ -308,6 +308,12 @@
    949-byte signed Location beside a 2KB Content-Security-Policy */
 #define CFG_FETCH_HEADER_BYTES  16384
 #define CFG_FETCH_MAX_REDIRECTS 4
+/* A peer can close between the request and the complete response header */
+#ifndef CFG_FETCH_READ_RETRIES
+  #define CFG_FETCH_READ_RETRIES 2
+#endif
+_Static_assert(CFG_FETCH_READ_RETRIES > 0,
+               "a fetch must retry a transient response close");
 /* Sized from the path and host caps. The signed CDN path is 905 bytes */
 #define CFG_FETCH_REQUEST_BYTES (CFG_FETCH_PATH_BYTES + CFG_FETCH_HOST_BYTES + 128)
 

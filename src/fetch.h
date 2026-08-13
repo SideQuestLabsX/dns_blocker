@@ -80,9 +80,7 @@ typedef enum
     FetchStep_Failed
 } FetchStep;
 
-/* Why a transfer stopped. A failed download otherwise looks the same from
-   outside whether the certificate was refused, the header block did not fit or
-   the peer hung up, and the daemon only retries on a timer. */
+/* Why a transfer stopped. The daemon uses this for retry policy and logs */
 typedef enum
 {
     FetchFail_None,
@@ -91,6 +89,7 @@ typedef enum
     FetchFail_Socket,
     FetchFail_Tls,
     FetchFail_Write,
+    FetchFail_Read,
     FetchFail_Header,
     FetchFail_Status,
     FetchFail_Body,
@@ -151,6 +150,9 @@ size_t FetchBodyLength(const FetchJob *job);
    address for `job->url.host`. Refuses once the hop count is spent. */
 bool FetchFollow(FetchJob *job, TlsBackend *backend,
                  const struct sockaddr_storage *addr, socklen_t addrLen);
+
+bool FetchRetry(FetchJob *job, TlsBackend *backend,
+                const struct sockaddr_storage *addr, socklen_t addrLen);
 
 short FetchEvents(const FetchJob *job);
 FetchStep FetchProgress(FetchJob *job);

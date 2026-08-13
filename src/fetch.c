@@ -499,6 +499,17 @@ bool FetchFollow(FetchJob *job, TlsBackend *backend,
     return Connect(job, backend, addr, addrLen);
 }
 
+bool FetchRetry(FetchJob *job, TlsBackend *backend,
+                const struct sockaddr_storage *addr, socklen_t addrLen)
+{
+    if(job == NULL || backend == NULL || addr == NULL
+       || job->state != FetchState_Idle || job->fail != FetchFail_Read)
+        return false;
+
+    job->fail = FetchFail_None;
+    return Connect(job, backend, addr, addrLen);
+}
+
 const char *FetchRedirectHost(const FetchJob *job)
 {
     return (job != NULL) ? job->url.host : NULL;
@@ -647,7 +658,7 @@ FetchStep FetchProgress(FetchJob *job)
         if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
             return FetchStep_Again;
         if(got <= 0)
-            return Fail(job, FetchFail_Header);
+            return Fail(job, FetchFail_Read);
 
         job->held += (size_t)got;
 
@@ -699,6 +710,7 @@ const char *FetchFailText(const FetchJob *job)
         case FetchFail_Socket:    return "the connection failed";
         case FetchFail_Tls:       return "the TLS handshake failed";
         case FetchFail_Write:     return "the request could not be sent";
+        case FetchFail_Read:      return "the response connection failed before the header completed";
         case FetchFail_Header:    return "the response header was refused";
         case FetchFail_Status:    return "the response status or framing was refused";
         case FetchFail_Body:      return "the body was truncated or oversized";

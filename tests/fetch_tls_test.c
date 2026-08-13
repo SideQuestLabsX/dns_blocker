@@ -302,6 +302,15 @@ static void TestRefusals(uint16_t port)
 {
     FetchJob job;
 
+    FakeReset();
+    G_READ_RESULT = TlsIo_Closed;
+    CHECK(Start(&job, "https://a.example/x", port, -1, 1024));
+    CHECK(Drive(&job, 32) == FetchStep_Failed);
+    CHECK(job.fail == FetchFail_Read);
+    CHECK(strcmp(FetchFailText(&job),
+                 "the response connection failed before the header completed") == 0);
+    FetchEnd(&job);
+
     /* Closed before the declared length. A short trie must never reach the
        rename, so this is a failure and not a short read */
     FakeReset();
