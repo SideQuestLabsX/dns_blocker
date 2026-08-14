@@ -230,6 +230,15 @@ $(BUILD)/embedded.stamp: FORCE | $(BUILD)
 	@printf '%s\n' '$(strip $(EMBED_LIST)) $(strip $(EMBED_TIER))' > $@.new
 	@if cmp -s $@.new $@; then rm -f $@.new; else mv $@.new $@; fi
 
+$(BUILD)/features.stamp: FORCE | $(BUILD)
+	@printf '%s\n' '$(strip $(FEATURES))' > $@.new
+	@if cmp -s $@.new $@; then rm -f $@.new; else mv $@.new $@; fi
+
+# Stamp as a normal prereq, listed before the compile rules. Rules keep
+# $< = their first declared prereq; only $^ grows, so implicit recipes
+# that use $< stay correct
+$(OBJ): $(BUILD)/features.stamp
+
 $(BUILD)/embedded.o: $(EMBED_SRC) $(BUILD)/embedded.stamp | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -260,7 +269,17 @@ else
   ENCRYPTED_TESTS :=
 endif
 
-test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test $(BUILD)/hosts_test $(BUILD)/latency_test $(BUILD)/upstream_test $(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/status_test $(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/fuzz_quick $(ENCRYPTED_TESTS)
+TEST_BIN := $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test \
+	$(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test \
+	$(BUILD)/hosts_test $(BUILD)/latency_test $(BUILD)/upstream_test \
+	$(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/status_test \
+	$(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/arena_test \
+	$(BUILD)/fuzz_quick \
+	$(ENCRYPTED_TESTS)
+
+$(TEST_BIN): $(BUILD)/features.stamp
+
+test: $(TEST_BIN)
 	@$(BUILD)/wire_test
 	@$(BUILD)/cache_test
 	@$(BUILD)/msg_test
@@ -275,6 +294,7 @@ test: $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test $(BUILD)/verify_t
 	@$(BUILD)/status_test
 	@$(BUILD)/server_test
 	@$(BUILD)/tls_test
+	@$(BUILD)/arena_test
 	@$(BUILD)/fuzz_quick 50000
 ifeq ($(PROFILE),encrypted)
 	@$(BUILD)/upstream_dot_test
@@ -304,6 +324,10 @@ $(BUILD)/listline_test: tests/listline_test.c tools/listline.h | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -Itools $< -o $@
 
 $(BUILD)/hosts_test: tests/hosts_test.c src/hosts.c src/wire.c src/arena.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+# Allocation, alignment, carve partitioning and array overflow
+$(BUILD)/arena_test: tests/arena_test.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # Assert histogram bucket edges directly
@@ -360,6 +384,8 @@ ifeq ($(PROFILE),encrypted)
   XTEST += $(BUILD)/upstream_dot_test_native $(BUILD)/tls_backend_test_native
 endif
 
+$(XTEST): $(BUILD)/features.stamp
+
 test-static: $(XTEST)
 
 test-static-run: $(XTEST)
@@ -409,8 +435,9 @@ FUZZ_CC ?= clang
 fuzz: $(BUILD)/fuzz_wire
 	@echo "run: $(BUILD)/fuzz_wire -max_total_time=60"
 
-$(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c src/cache.c src/verify.c src/arena.c $(HDR) | $(BUILD)
-	$(FUZZ_CC) -std=c11 -O1 -g -fsanitize=fuzzer,address,undefined -Isrc $(filter %.c,$^) -o $@
+$(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c src/cache.c src/verify.c src/arena.c $(HDR) $(BUILD)/features.stamp | $(BUILD)
+	$(FUZZ_CC) -std=c11 -O1 -g -fsanitize=fuzzer,address,undefined -Isrc \
+		$(FEATURES) $(filter %.c,$^) -o $@
 
 $(BUILD):
 	@mkdir -p $(BUILD)

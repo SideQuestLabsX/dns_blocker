@@ -18,25 +18,44 @@
 
 /* Core boot arena. Every slice has a compile-time size and never grows, so
    the slices must add up to ARENA_TOTAL_BYTES. A _Static_assert in main.c
-   holds the sum, so one slice cannot grow at the cost of another.
+   holds the sum, so one slice cannot grow at the cost of another. Override
+   any slice with -D; main.c asserts the sum and alignment at compile time.
 
    The blocklist has its own mapping, because a compiled list gives its size at
    boot. See blocklist.h. The supervisor owns output routing, so the daemon
    writes lines and keeps no log buffer. */
-#define ARENA_TOTAL_BYTES       KIB(2272)
-#define ARENA_CACHE_BYTES       KIB(1536)
-#define ARENA_TXTABLE_BYTES     KIB(128)
-#define ARENA_CONN_BYTES        KIB(192)
-#define ARENA_HOSTS_BYTES       KIB(32)
+#ifndef ARENA_TOTAL_BYTES
+  #define ARENA_TOTAL_BYTES     KIB(2272)
+#endif
+#ifndef ARENA_CACHE_BYTES
+  #define ARENA_CACHE_BYTES     KIB(1536)
+#endif
+#ifndef ARENA_TXTABLE_BYTES
+  #define ARENA_TXTABLE_BYTES   KIB(128)
+#endif
+#ifndef ARENA_CONN_BYTES
+  #define ARENA_CONN_BYTES      KIB(192)
+#endif
+#ifndef ARENA_HOSTS_BYTES
+  #define ARENA_HOSTS_BYTES     KIB(32)
+#endif
 
 #if defined(PROFILE_ENCRYPTED)
   /* Backs MBEDTLS_MEMORY_BUFFER_ALLOC_C so the TLS stack never reaches libc.
      64KB a channel, so this follows CFG_TLS_SLOTS */
-  #define ARENA_TLS_BYTES       KIB(384)
-  #define ARENA_SPARE_BYTES     KIB(0)
+  #ifndef ARENA_TLS_BYTES
+    #define ARENA_TLS_BYTES     KIB(384)
+  #endif
+  #ifndef ARENA_SPARE_BYTES
+    #define ARENA_SPARE_BYTES   KIB(0)
+  #endif
 #else
-  #define ARENA_TLS_BYTES       KIB(0)
-  #define ARENA_SPARE_BYTES     KIB(384)
+  #ifndef ARENA_TLS_BYTES
+    #define ARENA_TLS_BYTES     KIB(0)
+  #endif
+  #ifndef ARENA_SPARE_BYTES
+    #define ARENA_SPARE_BYTES   KIB(384)
+  #endif
 #endif
 
 /* Blocklist. Mapped separately from the arena at boot and sized from the

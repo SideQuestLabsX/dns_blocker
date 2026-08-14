@@ -75,6 +75,16 @@ carries the daemon's own faults and is never gated.
 make FEATURES=-DFEATURE_QUERY_LOG=0
 ```
 
+Arena sizes default in `src/config.h` and override with `-D` like every other
+knob. Unspecified slices keep their defaults; `ARENA_SPARE_BYTES` absorbs the
+slack. Sizes must sum to `ARENA_TOTAL_BYTES` and stay aligned to
+`max_align_t`, or compilation fails:
+
+```sh
+make PROFILE=encrypted \
+  FEATURES='-DARENA_TOTAL_BYTES=2719744u -DARENA_TLS_BYTES=786432u'
+```
+
 The daemon serves TCP on port 53. A response that is larger than the UDP
 payload size gets the `TC` bit, and the client sends the query again over TCP.
 

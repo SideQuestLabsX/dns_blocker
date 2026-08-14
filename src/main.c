@@ -21,10 +21,29 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-_Static_assert(ARENA_CACHE_BYTES + ARENA_TXTABLE_BYTES + ARENA_CONN_BYTES +
-               ARENA_HOSTS_BYTES + ARENA_TLS_BYTES + ARENA_SPARE_BYTES
-               == ARENA_TOTAL_BYTES,
+#define ARENA_CARVE_ALIGN _Alignof(max_align_t)
+
+#define ARENA_REM_AFTER_CACHE   (ARENA_TOTAL_BYTES - ARENA_CACHE_BYTES)
+#define ARENA_REM_AFTER_TXTABLE (ARENA_REM_AFTER_CACHE - ARENA_TXTABLE_BYTES)
+#define ARENA_REM_AFTER_CONN    (ARENA_REM_AFTER_TXTABLE - ARENA_CONN_BYTES)
+#define ARENA_REM_AFTER_HOSTS   (ARENA_REM_AFTER_CONN - ARENA_HOSTS_BYTES)
+#define ARENA_REM_AFTER_TLS     (ARENA_REM_AFTER_HOSTS - ARENA_TLS_BYTES)
+
+_Static_assert(ARENA_CACHE_BYTES <= ARENA_TOTAL_BYTES &&
+               ARENA_TXTABLE_BYTES <= ARENA_REM_AFTER_CACHE &&
+               ARENA_CONN_BYTES <= ARENA_REM_AFTER_TXTABLE &&
+               ARENA_HOSTS_BYTES <= ARENA_REM_AFTER_CONN &&
+               ARENA_TLS_BYTES <= ARENA_REM_AFTER_HOSTS &&
+               ARENA_SPARE_BYTES == ARENA_REM_AFTER_TLS,
                "arena slices must sum to ARENA_TOTAL_BYTES");
+_Static_assert(ARENA_CACHE_BYTES % ARENA_CARVE_ALIGN == 0 &&
+               ARENA_TXTABLE_BYTES % ARENA_CARVE_ALIGN == 0 &&
+               ARENA_CONN_BYTES % ARENA_CARVE_ALIGN == 0 &&
+               ARENA_HOSTS_BYTES % ARENA_CARVE_ALIGN == 0 &&
+               ARENA_TLS_BYTES % ARENA_CARVE_ALIGN == 0 &&
+               ARENA_SPARE_BYTES % ARENA_CARVE_ALIGN == 0 &&
+               ARENA_TOTAL_BYTES % ARENA_CARVE_ALIGN == 0,
+               "arena slices must preserve carve alignment");
 
 typedef struct
 {
