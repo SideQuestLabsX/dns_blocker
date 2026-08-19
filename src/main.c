@@ -482,10 +482,14 @@ int main(int argc, char **argv)
 
     /* The list lives on a tmpfs that starts empty, and no supervisor here makes
        the directory. Filtering fails open, so a refusal is reported and the
-       daemon serves anyway */
-    if(CFG_BLOCKLIST_PATH != NULL && !SyncPrepareDirectory(CFG_BLOCKLIST_PATH))
+       daemon serves anyway.
+
+       Through a variable, because the compiler format-checks a branch a null
+       path makes dead and warns about the literal reaching %s */
+    const char *listPath = CFG_BLOCKLIST_PATH;
+    if(listPath != NULL && !SyncPrepareDirectory(listPath))
         fprintf(stderr, "dns_blocker: cannot make the directory for %s\n",
-                CFG_BLOCKLIST_PATH);
+                listPath);
 
     if(!BlocklistLoad(&list, CFG_BLOCKLIST_PATH))
         fputs("dns_blocker: no blocklist available, filtering is disabled\n", stderr);
@@ -540,10 +544,9 @@ int main(int argc, char **argv)
     Status   status      = { NULL, 0 };
     uint32_t statusDueMs = ServerNowMilliseconds();
 
-    if(CFG_STATUS_PATH != NULL
-       && !StatusOpen(&status, CFG_STATUS_PATH, statusDueMs))
-        fprintf(stderr, "dns_blocker: no status segment at %s\n",
-                CFG_STATUS_PATH);
+    const char *statusPath = CFG_STATUS_PATH;
+    if(statusPath != NULL && !StatusOpen(&status, statusPath, statusDueMs))
+        fprintf(stderr, "dns_blocker: no status segment at %s\n", statusPath);
 
     while(!G_STOP)
     {
