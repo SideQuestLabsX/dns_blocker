@@ -155,6 +155,92 @@ static void TestPublishAndRead(const char *path)
     CHECK(status.block == NULL);
 }
 
+/* An expired hold is not a held resolver. Selection takes the member back the
+   moment the deadline passes, and a status that still says `down` sends an
+   operator after a resolver that is already carrying queries. */
+static void TestExpiredHoldIsNotReported(const char *path)
+{
+    Status       status;
+    Server       server;
+    Cache        cache;
+    UpstreamPool pool;
+    Blocklist    list;
+    StatusBlock  block;
+    StatusSync   sync = { 0, 0, 0, 0 };
+
+    FillServer(&server);
+    FillCache(&cache);
+    FillPool(&pool);
+
+    memset(&list, 0, sizeof list);
+
+    CHECK(StatusOpen(&status, path, 1000));
+
+    /* The hold runs to 5000 and nothing has been accepted since, so bDown is
+       still set on the member itself */
+    StatusPublish(&status, &server, &cache, &pool, &list, &sync, NULL, 9000);
+    CHECK(StatusRead(path, &block));
+    CHECK(pool.members[1].bDown);
+    CHECK(block.upstreams[1].bDown == 0);
+    CHECK(block.upstreams[1].downForMs == 0);
+
+    /* Still reported while the hold is genuinely in force */
+    StatusPublish(&status, &server, &cache, &pool, &list, &sync, NULL, 4500);
+    CHECK(StatusRead(path, &block));
+    CHECK(block.upstreams[1].bDown == 1);
+    CHECK(block.upstreams[1].downForMs == 500);
+
+    StatusClose(&status);
+}
+
+/* The last snapshot outlives the daemon, so it must not describe a sync that
+   stopped with the process. */
+static void TestFinalSnapshotReportsNoSync(const char *path)
+{
+    Status       status;
+    Server       server;
+    Cache        cache;
+    UpstreamPool pool;
+    Blocklist    list;
+    StatusBlock  block;
+    StatusSync   running = { 1, 0, 6543894, 0 };
+
+    FillServer(&server);
+    FillCache(&cache);
+    FillPool(&pool);
+
+    memset(&list, 0, sizeof list);
+    list.source = BlocklistSource_Mapped;
+    list.size   = 6543894;
+
+    CHECK(StatusOpen(&status, path, 1000));
+
+    StatusPublish(&status, &server, &cache, &pool, &list, &running, NULL, 4000);
+    CHECK(StatusRead(path, &block));
+    CHECK(block.sync.bActive == 1);
+
+    /* What main() publishes after SyncEnd: the run is over, the list it
+       installed is still on disk */
+    StatusSync stopped = { 0, 0, 6543894, 0 };
+    StatusPublish(&status, &server, &cache, &pool, &list, &stopped, NULL, 5000);
+    CHECK(StatusRead(path, &block));
+    CHECK(block.sync.bActive == 0);
+    CHECK(block.sync.nextDueMs == 0);
+    CHECK(block.sync.installedBytes == 6543894);
+
+    /* A null pointer is the same claim, made by a caller with nothing to say */
+    StatusPublish(&status, &server, &cache, &pool, &list, &running, NULL, 6000);
+    CHECK(StatusRead(path, &block));
+    CHECK(block.sync.bActive == 1);
+
+    StatusPublish(&status, &server, &cache, &pool, &list, NULL, NULL, 7000);
+    CHECK(StatusRead(path, &block));
+    CHECK(block.sync.bActive == 0);
+    CHECK(block.sync.installedBytes == 0);
+
+    StatusClose(&status);
+}
+
 /* Status text is part of the operator interface */
 static void TestPrintRenders(const char *path)
 {
@@ -318,6 +404,8 @@ int main(void)
     snprintf(path, sizeof path, "%s/status", dir);
 
     TestPublishAndRead(path);
+    TestExpiredHoldIsNotReported(path);
+    TestFinalSnapshotReportsNoSync(path);
     TestPrintRenders(path);
     TestTornReadIsRefused(path);
     TestForeignSegmentIsRefused(path);

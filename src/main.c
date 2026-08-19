@@ -523,7 +523,16 @@ int main(int argc, char **argv)
     fflush(stdout);
 
 #if defined(PROFILE_ENCRYPTED)
-    SyncJob  sync;
+    /* StatusPublish reads this from the first pass of the loop, which is long
+       before the first SyncBegin, and a build that syncs nothing never writes
+       to it at all */
+    SyncJob sync;
+    memset(&sync, 0, sizeof sync);
+
+    /* A null path is the immutable build: the compiled-in list is the whole
+       policy and there is no release to follow. Folded at compile time */
+    const bool bSyncEnabled = CFG_BLOCKLIST_PATH != NULL;
+
     SyncRun  run = { &sync, &tls, &server, &list, CFG_BLOCKLIST_PATH, tier,
                      ServerNowMilliseconds() + CFG_SYNC_FIRST_MS, false };
 #endif
@@ -541,21 +550,27 @@ int main(int argc, char **argv)
         uint32_t nowMs = ServerNowMilliseconds();
 
 #if defined(PROFILE_ENCRYPTED)
-        SyncTick(&run, nowMs);
-        ServerWatch(&server, run.bActive ? SyncFd(&sync) : -1,
-                    run.bActive ? SyncEvents(&sync) : 0);
+        if(bSyncEnabled)
+        {
+            SyncTick(&run, nowMs);
+            ServerWatch(&server, run.bActive ? SyncFd(&sync) : -1,
+                        run.bActive ? SyncEvents(&sync) : 0);
+        }
 #endif
 
         if((int32_t)(nowMs - statusDueMs) >= 0)
         {
             StatusSync syncState = { 0, 0, 0, 0 };
 #if defined(PROFILE_ENCRYPTED)
-            syncState.bActive        = run.bActive ? 1u : 0u;
-            syncState.fail           = (uint32_t)sync.fail;
             syncState.installedBytes = (list.source == BlocklistSource_Mapped)
                                      ? list.size : 0;
-            syncState.nextDueMs      = run.bActive
-                                     ? 0 : (uint64_t)(run.dueMs - nowMs);
+            if(bSyncEnabled)
+            {
+                syncState.bActive   = run.bActive ? 1u : 0u;
+                syncState.fail      = (uint32_t)sync.fail;
+                syncState.nextDueMs = run.bActive
+                                    ? 0 : (uint64_t)(run.dueMs - nowMs);
+            }
 #endif
             StatusPublish(&status, &server, &cache, &upstreams, &list,
                           &syncState, tier, nowMs);
@@ -590,8 +605,14 @@ int main(int argc, char **argv)
             (unsigned long long)rejected);
 
     /* The last snapshot stays on the tmpfs, so a reader can still see how a
-       stopped daemon left things */
-    StatusPublish(&status, &server, &cache, &upstreams, &list, NULL, tier,
+       stopped daemon left things. The sync is over either way, but the list it
+       installed is still the one on disk, so that size is reported and the
+       activity fields are not */
+    StatusSync finalSync = { 0, 0, 0, 0 };
+    finalSync.installedBytes = (list.source == BlocklistSource_Mapped)
+                             ? list.size : 0;
+
+    StatusPublish(&status, &server, &cache, &upstreams, &list, &finalSync, tier,
                   ServerNowMilliseconds());
     StatusClose(&status);
 

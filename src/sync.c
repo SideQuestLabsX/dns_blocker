@@ -380,13 +380,19 @@ static bool SetPhaseUrl(SyncJob *job)
 bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
                const char *tier)
 {
-    if(job == NULL || backend == NULL || path == NULL)
+    if(job == NULL)
         return false;
 
+    /* Before the argument checks, not after. The caller reads job->fail to say
+       why a run did not start, so every rejection has to leave a defined job */
     memset(job, 0, sizeof *job);
-    job->backend   = backend;
     job->stagingFd = -1;
     job->phase     = SyncPhase_Locator;
+
+    if(backend == NULL || path == NULL)
+        return false;
+
+    job->backend = backend;
 
     if(!SyncBuildAssetName(job->asset, sizeof job->asset,
                            (tier != NULL) ? tier : CFG_BLOCKLIST_TIER))

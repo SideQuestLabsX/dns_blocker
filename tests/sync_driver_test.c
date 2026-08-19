@@ -580,13 +580,31 @@ static void TestRefusals(const char *dir)
     snprintf(target, sizeof target, "%s/guard.trie", dir);
 
     CHECK(!SyncBegin(NULL, &G_BACKEND, target, NULL));
+
+    /* A refused start still has to leave a defined job. The daemon reads
+       job->fail to report why the run did not begin, and an immutable build
+       passes a null path on every retry, so reading uninitialised bytes here is
+       undefined behaviour on a schedule. 0xA5 stands in for whatever the stack
+       held. */
+    memset(&job, 0xA5, sizeof job);
     CHECK(!SyncBegin(&job, NULL, target, NULL));
+    CHECK(job.fail == SyncFail_None);
+    CHECK(job.state == SyncState_Idle);
+    CHECK(strcmp(SyncFailText(&job), "no failure") == 0);
+
+    memset(&job, 0xA5, sizeof job);
     CHECK(!SyncBegin(&job, &G_BACKEND, NULL, NULL));
+    CHECK(job.fail == SyncFail_None);
+    CHECK(job.state == SyncState_Idle);
+    CHECK(strcmp(SyncFailText(&job), "no failure") == 0);
 
     char oversize[CFG_SYNC_PATH_BYTES + 16];
     memset(oversize, 'a', sizeof oversize);
     oversize[sizeof oversize - 1] = '\0';
+    memset(&job, 0xA5, sizeof job);
     CHECK(!SyncBegin(&job, &G_BACKEND, oversize, NULL));
+    CHECK(job.fail == SyncFail_None);
+    CHECK(job.state == SyncState_Idle);
 
     ScriptReset();
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));

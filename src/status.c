@@ -108,9 +108,13 @@ static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
         const Upstream *from = &pool->members[i];
         StatusUpstream *to   = &block->upstreams[i];
 
+        /* Selection lets a member back the moment its hold expires, so an
+           expired flag here would name a resolver that is already in use */
+        bool bHeld = from->bDown && (int32_t)(from->downUntilMs - nowMs) > 0;
+
         memset(to, 0, sizeof *to);
         to->transport           = (uint8_t)from->transport;
-        to->bDown               = from->bDown ? 1u : 0u;
+        to->bDown               = bHeld ? 1u : 0u;
         to->bUnusable           = from->bUnusable ? 1u : 0u;
         to->srttMs              = from->srttMs;
         to->consecutiveFailures = from->consecutiveFailures;
@@ -120,7 +124,7 @@ static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
         to->probes              = from->probes;
         PublishLatency(&to->latency, &from->latency);
 
-        if(from->bDown && (int32_t)(from->downUntilMs - nowMs) > 0)
+        if(bHeld)
             to->downForMs = from->downUntilMs - nowMs;
 
         if(from->addr.ss_family == AF_INET)
@@ -198,8 +202,12 @@ void StatusPublish(Status *status, const Server *server, const Cache *cache,
     if(server != NULL)
         PublishLatency(&block->service, &server->serviceLatency);
 
+    /* Retaining the last live values would leave the final snapshot of a
+       stopped daemon reporting a sync that is still running */
     if(sync != NULL)
         block->sync = *sync;
+    else
+        memset(&block->sync, 0, sizeof block->sync);
 
     PublishUpstreams(block, pool, nowMs);
 

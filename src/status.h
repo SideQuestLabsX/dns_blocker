@@ -129,7 +129,9 @@ typedef struct
 bool StatusOpen(Status *status, const char *path, uint32_t nowMs);
 void StatusClose(Status *status);
 
-/* One snapshot. `tier` NULL reports the compiled default */
+/* One snapshot. `tier` NULL reports the compiled default. `sync` NULL publishes
+   an inactive sync state, which is what the final snapshot after `SyncEnd`
+   needs: keeping the last live values would report a run that has stopped. */
 void StatusPublish(Status *status, const Server *server, const Cache *cache,
                    const UpstreamPool *pool, const Blocklist *list,
                    const StatusSync *sync, const char *tier, uint32_t nowMs);
