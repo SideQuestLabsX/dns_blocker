@@ -380,7 +380,7 @@ $(BUILD)/fetch_tls_test: tests/fetch_tls_test.c src/fetch.c $(HDR) $(TLS_DEPS) |
 
 # Sequencing: the two transfers, the digest check and the install, driven by
 # scripted replies with the shim supplied by the test
-$(BUILD)/sync_driver_test: tests/sync_driver_test.c src/sync.c src/fetch.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
+$(BUILD)/sync_driver_test: tests/sync_driver_test.c src/sync.c src/fetch.c src/upstream.c src/latency.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(TEST_CFLAGS) -DPROFILE_ENCRYPTED=1 -I$(MBEDTLS_SOURCE_DIR)/include $(filter %.c,$^) -o $@ $(LIBS)
 
 $(BUILD)/upstream_dot_test: tests/upstream_dot_test.c src/upstream.c src/latency.c src/msg.c src/verify.c src/wire.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)

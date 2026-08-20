@@ -201,6 +201,7 @@ static int OpenSink(void)
 #define TEN_SHA   "72399361da6a7754fec986dca5b7cbaf1c810a28ded4abaf56b2106d06cb78b0"
 
 static TlsBackend G_BACKEND;
+static TlsChannel G_CHANNEL;
 
 static bool Start(FetchJob *job, const char *url, uint16_t port, int sink,
                   size_t maxBody)
@@ -210,7 +211,7 @@ static bool Start(FetchJob *job, const char *url, uint16_t port, int sink,
 
     LoopbackAddress(&addr, &addrLen, port);
     return FetchBegin(job, &G_BACKEND, url, &addr, addrLen, sink, maxBody,
-                      G_NOW_MS);
+                      G_NOW_MS, &G_CHANNEL);
 }
 
 static bool Follow(FetchJob *job, uint16_t port)
@@ -294,7 +295,8 @@ static void TestMemorySink(uint16_t port)
     G_READ_CHUNK = 7;
     Script(head, listing, strlen(listing));
     CHECK(FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                             addrLen, body, sizeof body, G_NOW_MS));
+                             addrLen, body, sizeof body, G_NOW_MS,
+                             &G_CHANNEL));
     CHECK(Drive(&job, 256) == FetchStep_Done);
     CHECK(FetchBodyLength(&job) == strlen(listing));
     CHECK(memcmp(body, listing, strlen(listing)) == 0);
@@ -309,15 +311,17 @@ static void TestMemorySink(uint16_t port)
     FakeReset();
     Script("HTTP/1.1 200 OK\r\nContent-Length: 300\r\n\r\n", NULL, 0);
     CHECK(FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                             addrLen, body, sizeof body, G_NOW_MS));
+                             addrLen, body, sizeof body, G_NOW_MS,
+                             &G_CHANNEL));
     CHECK(Drive(&job, 32) == FetchStep_Failed);
     CHECK(FetchBodyLength(&job) == 0);
     FetchEnd(&job);
 
     CHECK(!FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                              addrLen, NULL, sizeof body, G_NOW_MS));
+                              addrLen, NULL, sizeof body, G_NOW_MS,
+                              &G_CHANNEL));
     CHECK(!FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                              addrLen, body, 0, G_NOW_MS));
+                              addrLen, body, 0, G_NOW_MS, &G_CHANNEL));
 }
 
 static void TestRefusals(uint16_t port)
@@ -466,7 +470,7 @@ static void TestPermanentWantReadTimesOut(uint16_t port)
     CHECK(Drive(&job, 1) == FetchStep_Failed);
     CHECK(job.fail == FetchFail_Timeout);
     CHECK(job.fd == -1);
-    CHECK(job.channel.fd == -1);
+    CHECK(job.channel->fd == -1);
     FetchEnd(&job);
 }
 

@@ -103,7 +103,7 @@ typedef enum
    arena. */
 typedef struct
 {
-    TlsChannel channel;
+    TlsChannel *channel;
     FetchState state;
     FetchUrl   url;
 
@@ -132,10 +132,12 @@ typedef struct
 
 /* `addr` is the resolved peer and `nowMs` is monotonic. Nothing in this file
    resolves a name, so the caller decides how `url`'s host became an address.
-   `sink` receives the body and stays the caller's to close */
+   `sink` receives the body and stays the caller's to close. The caller keeps
+   `channel` reserved until FetchEnd */
 bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
                 const struct sockaddr_storage *addr, socklen_t addrLen,
-                int sink, size_t maxBody, uint32_t nowMs);
+                int sink, size_t maxBody, uint32_t nowMs,
+                TlsChannel *channel);
 
 /* Same transfer, with the body kept in `out` instead of written to a
    descriptor. For the digest listing, which is a few hundred bytes. `maxBody`
@@ -143,7 +145,8 @@ bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
    part-way through. */
 bool FetchBeginToMemory(FetchJob *job, TlsBackend *backend, const char *url,
                         const struct sockaddr_storage *addr, socklen_t addrLen,
-                        uint8_t *out, size_t cap, uint32_t nowMs);
+                        uint8_t *out, size_t cap, uint32_t nowMs,
+                        TlsChannel *channel);
 
 /* Bytes written into the memory sink. Valid after FetchStep_Done. */
 size_t FetchBodyLength(const FetchJob *job);

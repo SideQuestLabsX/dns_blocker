@@ -1059,6 +1059,65 @@ static void TestFullPoolRefusesExchange(void)
     CHECK(exchange.fd == -1);
 }
 
+static size_t UsedTlsSlots(const UpstreamPool *pool)
+{
+    size_t used = 0;
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        if(pool->tlsSlots[i].bUsed)
+            used++;
+    }
+    return used;
+}
+
+static void TestPendingFetchDoesNotDisplaceQueries(void)
+{
+    UpstreamPool pool;
+    TlsBackend   backend;
+    TlsChannel  *channel = NULL;
+    size_t       slotIndex = UPSTREAM_NONE;
+
+    PoolOfTwoDoh(&pool, &backend);
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        pool.tlsSlots[i].bUsed  = true;
+        pool.tlsSlots[i].member = 0;
+    }
+
+    CHECK(!UpstreamPoolAcquireFetchChannel(&pool, &slotIndex, &channel));
+    CHECK(slotIndex == UPSTREAM_NONE);
+    CHECK(channel == NULL);
+    CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS);
+    CHECK(pool.members[0].failures == 0);
+
+    pool.tlsSlots[CFG_TLS_SLOTS - 1].bUsed = false;
+    CHECK(!UpstreamPoolAcquireFetchChannel(&pool, &slotIndex, &channel));
+    CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS - 1);
+}
+
+static void TestFetchStartsWithTwoFreeSlots(void)
+{
+    UpstreamPool pool;
+    TlsBackend   backend;
+    TlsChannel  *channel = NULL;
+    size_t       slotIndex = UPSTREAM_NONE;
+
+    PoolOfTwoDoh(&pool, &backend);
+    for(size_t i = 0; i < CFG_TLS_SLOTS - 2; i++)
+    {
+        pool.tlsSlots[i].bUsed  = true;
+        pool.tlsSlots[i].member = 0;
+    }
+
+    CHECK(UpstreamPoolAcquireFetchChannel(&pool, &slotIndex, &channel));
+    CHECK(slotIndex != UPSTREAM_NONE);
+    CHECK(channel == &pool.tlsSlots[slotIndex].channel);
+    CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS - 1);
+
+    UpstreamPoolReleaseFetchChannel(&pool, slotIndex);
+    CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS - 2);
+}
+
 int main(void)
 {
     FakeReset();
@@ -1091,6 +1150,10 @@ int main(void)
     TestFailedProbeReleasesItsSlot();
     FakeReset();
     TestFullPoolRefusesExchange();
+    FakeReset();
+    TestPendingFetchDoesNotDisplaceQueries();
+    FakeReset();
+    TestFetchStartsWithTwoFreeSlots();
     FakeReset();
     TestAnsweredDohChannelIsKeptOpen();
     FakeReset();

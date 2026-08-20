@@ -377,7 +377,7 @@ static bool SetPhaseUrl(SyncJob *job)
     return true;
 }
 
-bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
+bool SyncBegin(SyncJob *job, UpstreamPool *pool, const char *path,
                const char *tier)
 {
     if(job == NULL)
@@ -387,12 +387,13 @@ bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
        why a run did not start, so every rejection has to leave a defined job */
     memset(job, 0, sizeof *job);
     job->stagingFd = -1;
+    job->tlsSlot   = UPSTREAM_NONE;
     job->phase     = SyncPhase_Locator;
 
-    if(backend == NULL || path == NULL)
+    if(pool == NULL || path == NULL)
         return false;
 
-    job->backend = backend;
+    job->pool = pool;
 
     if(!SyncBuildAssetName(job->asset, sizeof job->asset,
                            (tier != NULL) ? tier : CFG_BLOCKLIST_TIER))
@@ -410,6 +411,13 @@ bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
     {
         job->state = SyncState_Failed;
         job->fail  = SyncFail_Url;
+        return false;
+    }
+
+    if(!UpstreamPoolAcquireFetchChannel(pool, &job->tlsSlot, &job->channel))
+    {
+        job->state = SyncState_Failed;
+        job->fail  = SyncFail_Capacity;
         return false;
     }
 
@@ -431,11 +439,11 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
     bool bStarted;
     if(job->job.fail == FetchFail_Read)
     {
-        bStarted = FetchRetry(&job->job, job->backend, addr, addrLen);
+        bStarted = FetchRetry(&job->job, job->pool->tls, addr, addrLen);
     }
     else if(job->bFollowing)
     {
-        bStarted = FetchFollow(&job->job, job->backend, addr, addrLen);
+        bStarted = FetchFollow(&job->job, job->pool->tls, addr, addrLen);
     }
     else
     {
@@ -452,9 +460,9 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
             size_t cap = (job->phase == SyncPhase_Locator)
                        ? CFG_SYNC_RELEASE_TAG_BYTES + 1
                        : sizeof job->metadataText;
-            bStarted = FetchBeginToMemory(&job->job, job->backend, urlText,
+            bStarted = FetchBeginToMemory(&job->job, job->pool->tls, urlText,
                                           addr, addrLen, job->metadataText,
-                                          cap, nowMs);
+                                          cap, nowMs, job->channel);
         }
         else
         {
@@ -466,9 +474,10 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
                 return false;
             }
 
-            bStarted = FetchBegin(&job->job, job->backend, urlText, addr,
+            bStarted = FetchBegin(&job->job, job->pool->tls, urlText, addr,
                                   addrLen, job->stagingFd,
-                                  CFG_BLOCKLIST_MAX_BYTES, nowMs);
+                                  CFG_BLOCKLIST_MAX_BYTES, nowMs,
+                                  job->channel);
         }
     }
 
@@ -666,6 +675,7 @@ const char *SyncFailText(const SyncJob *job)
         case SyncFail_Locator:  return "the locator names no valid release";
         case SyncFail_Url:      return "the release URL is invalid";
         case SyncFail_Tier:     return "the configured tier is not a valid name";
+        case SyncFail_Capacity: return "TLS capacity is reserved for client queries";
     }
 
     return "unknown";
@@ -677,6 +687,10 @@ void SyncEnd(SyncJob *job)
         return;
 
     FetchEnd(&job->job);
+    job->job.channel = NULL;
+
+    if(job->pool != NULL && job->tlsSlot != UPSTREAM_NONE)
+        UpstreamPoolReleaseFetchChannel(job->pool, job->tlsSlot);
 
     if(job->stagingFd >= 0)
     {
@@ -684,7 +698,10 @@ void SyncEnd(SyncJob *job)
         job->stagingFd = -1;
     }
 
-    job->state = SyncState_Idle;
+    job->state   = SyncState_Idle;
+    job->pool    = NULL;
+    job->channel = NULL;
+    job->tlsSlot = UPSTREAM_NONE;
 }
 
 #endif

@@ -186,6 +186,14 @@ static int OpenListener(uint16_t *port)
 
 static uint16_t G_PORT;
 static TlsBackend G_BACKEND;
+static UpstreamPool G_POOL;
+
+static bool Begin(SyncJob *job, const char *path, const char *tier)
+{
+    UpstreamPoolInit(&G_POOL, G_NOW_MS);
+    UpstreamPoolSetTlsBackend(&G_POOL, &G_BACKEND);
+    return SyncBegin(job, &G_POOL, path, tier);
+}
 
 static bool Answer(SyncJob *job)
 {
@@ -257,6 +265,17 @@ static size_t SizeOf(const char *path)
     return (stat(path, &info) == 0) ? (size_t)info.st_size : 0;
 }
 
+static size_t UsedTlsSlots(const UpstreamPool *pool)
+{
+    size_t used = 0;
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        if(pool->tlsSlots[i].bUsed)
+            used++;
+    }
+    return used;
+}
+
 static void TestHappyPath(const char *dir)
 {
     SyncJob  job;
@@ -272,7 +291,7 @@ static void TestHappyPath(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(strcmp(SyncHost(&job), "raw.githubusercontent.com") == 0);
     CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
 
@@ -283,6 +302,93 @@ static void TestHappyPath(const char *dir)
 
     SyncEnd(&job);
     unlink(target);
+}
+
+static void TestSyncCompletesWithTwoFreeSlots(const char *dir)
+{
+    UpstreamPool pool;
+    SyncJob      job;
+    char         target[256];
+    int          fds[2];
+
+    snprintf(target, sizeof target, "%s/shared-slot.trie", dir);
+    UpstreamPoolInit(&pool, G_NOW_MS);
+    UpstreamPoolSetTlsBackend(&pool, &G_BACKEND);
+    for(size_t i = 0; i < CFG_TLS_SLOTS - 2; i++)
+    {
+        pool.tlsSlots[i].bUsed  = true;
+        pool.tlsSlots[i].member = 0;
+    }
+
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyBody(G_LISTING, strlen(G_LISTING));
+    ReplyBody("hello\n", 6);
+
+    CHECK(SyncBegin(&job, &pool, target, NULL));
+    CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS - 1);
+    CHECK(Run(&job, 512, NULL) == SyncStep_Done);
+    CHECK(SizeOf(target) == 6);
+
+    TlsChannel *released = job.channel;
+    SyncEnd(&job);
+    CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS - 2);
+    CHECK(job.job.channel == NULL);
+
+    size_t      slotIndex = UPSTREAM_NONE;
+    TlsChannel *next = NULL;
+    if(!UpstreamPoolAcquireFetchChannel(&pool, &slotIndex, &next))
+    {
+        CHECK(false);
+        unlink(target);
+        return;
+    }
+    CHECK(next == released);
+    if(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0)
+    {
+        CHECK(false);
+        UpstreamPoolReleaseFetchChannel(&pool, slotIndex);
+        unlink(target);
+        return;
+    }
+    next->fd = fds[0];
+
+    SyncEnd(&job);
+    CHECK(next->fd == fds[0]);
+
+    UpstreamPoolReleaseFetchChannel(&pool, slotIndex);
+    close(fds[0]);
+    close(fds[1]);
+    unlink(target);
+}
+
+static void TestRefusedSyncKeepsResolverHealthy(const char *dir)
+{
+    UpstreamPool pool;
+    SyncJob      job;
+    char         target[256];
+
+    snprintf(target, sizeof target, "%s/capacity.trie", dir);
+    UpstreamPoolInit(&pool, G_NOW_MS);
+    UpstreamPoolSetTlsBackend(&pool, &G_BACKEND);
+    CHECK(UpstreamPoolAddDoh(&pool, "127.0.0.1", 443, "resolver.example",
+                             "/dns-query"));
+    for(size_t i = 0; i < CFG_TLS_SLOTS - 1; i++)
+    {
+        pool.tlsSlots[i].bUsed  = true;
+        pool.tlsSlots[i].member = 0;
+    }
+
+    uint64_t failures = pool.members[0].failures;
+    CHECK(!SyncBegin(&job, &pool, target, NULL));
+    CHECK(job.fail == SyncFail_Capacity);
+    CHECK(job.state == SyncState_Failed);
+    CHECK(strcmp(SyncFailText(&job),
+                 "TLS capacity is reserved for client queries") == 0);
+    CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS - 1);
+    CHECK(pool.members[0].failures == failures);
+    CHECK(!pool.members[0].bDown);
+    CHECK(!Exists(target));
 }
 
 /* The live release answers each asset with two hops, so the driver has to ask
@@ -303,7 +409,7 @@ static void TestRedirects(const char *dir)
     ReplyRedirect("https://objects.example/asset");
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
     CHECK(resolves == 6);
     CHECK(SizeOf(target) == 6);
@@ -326,7 +432,7 @@ static void TestResponseCloseIsRetried(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
     CHECK(resolves == 4);
     CHECK(SizeOf(target) == 6);
@@ -347,7 +453,7 @@ static void TestResponseCloseRetryIsBounded(const char *dir)
     for(unsigned i = 0; i <= CFG_FETCH_READ_RETRIES; i++)
         ReplyClose();
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.phase == SyncPhase_Digest);
     CHECK(job.job.fail == FetchFail_Read);
@@ -375,7 +481,7 @@ static void TestDigestMismatchKeepsTheOldList(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("tampered\n", 9);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
 
     /* The list the daemon is serving has to survive a bad download */
@@ -405,7 +511,7 @@ static void TestListingWithoutTheAsset(const char *dir)
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(other, strlen(other));
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
 
     /* Nothing was downloaded, so no staging file was ever opened */
@@ -431,7 +537,7 @@ static void TestTransferFailureCleansUp(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     Reply("HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n", "short", 5);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
 
     /* A partial download must not be left behind for the next run to find */
@@ -441,6 +547,7 @@ static void TestTransferFailureCleansUp(const char *dir)
     CHECK(job.job.fail == FetchFail_Body);
 
     SyncEnd(&job);
+    CHECK(UsedTlsSlots(&G_POOL) == 0);
 }
 
 static void TestPartialBodyTimeoutCleansUp(const char *dir)
@@ -461,7 +568,7 @@ static void TestPartialBodyTimeoutCleansUp(const char *dir)
     Reply(head, "hello\n", 6);
     StallLastReplyAfter(sizeof head);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 64, NULL) == SyncStep_Again);
     CHECK(job.phase == SyncPhase_Asset);
     CHECK(job.job.bodyGot == 1);
@@ -491,7 +598,7 @@ static void TestServerError(const char *dir)
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     Reply("HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n", NULL, 0);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(!Exists(target));
     CHECK(job.fail == SyncFail_Transfer);
@@ -512,7 +619,7 @@ static void TestFailuresNameThemselves(const char *dir)
 
     ScriptReset();
     Reply("HTTP/2 200 OK\r\nContent-Length: 0\r\n\r\n", NULL, 0);
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.job.fail == FetchFail_Header);
     CHECK(strcmp(SyncFailText(&job), "the response header was refused") == 0);
@@ -521,7 +628,7 @@ static void TestFailuresNameThemselves(const char *dir)
     ScriptReset();
     for(unsigned i = 0; i < CFG_FETCH_MAX_REDIRECTS + 1; i++)
         ReplyRedirect("https://cdn.example/asset");
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.job.fail == FetchFail_Redirects);
     SyncEnd(&job);
@@ -531,7 +638,7 @@ static void TestFailuresNameThemselves(const char *dir)
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
-    CHECK(SyncBegin(&job, &G_BACKEND, "/nonexistent/dns_blocker/blocklist.trie", NULL));
+    CHECK(Begin(&job, "/nonexistent/dns_blocker/blocklist.trie", NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.fail == SyncFail_Staging);
     SyncEnd(&job);
@@ -541,7 +648,7 @@ static void TestFailuresNameThemselves(const char *dir)
     CHECK(strcmp(FetchFailText(NULL), "no transfer") == 0);
 
     ScriptReset();
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     job.phase = SyncPhase_Digest;
     memcpy(job.releaseTag, "bad/tag", sizeof "bad/tag");
     CHECK(!Answer(&job));
@@ -569,7 +676,7 @@ static void TestRuntimeTierSelectsTheAsset(const char *dir)
     ReplyBody(listing, strlen(listing));
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, "aggressive-nsfw"));
+    CHECK(Begin(&job, target, "aggressive-nsfw"));
     CHECK(Run(&job, 512, NULL) == SyncStep_Done);
     CHECK(SizeOf(target) == 6);
 
@@ -582,7 +689,7 @@ static void TestRuntimeTierSelectsTheAsset(const char *dir)
     ReplyBody(listing, strlen(listing));
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.fail == SyncFail_Digest);
     CHECK(!Exists(target));
@@ -598,12 +705,12 @@ static void TestInvalidTierIsRefused(const char *dir)
     snprintf(target, sizeof target, "%s/bad-tier.trie", dir);
 
     ScriptReset();
-    CHECK(!SyncBegin(&job, &G_BACKEND, target, "bad/tier"));
+    CHECK(!Begin(&job, target, "bad/tier"));
     CHECK(job.fail == SyncFail_Tier);
     CHECK(strcmp(SyncFailText(&job), "the configured tier is not a valid name")
           == 0);
 
-    CHECK(!SyncBegin(&job, &G_BACKEND, target, ""));
+    CHECK(!Begin(&job, target, ""));
     CHECK(job.fail == SyncFail_Tier);
 
     CHECK(!Exists(target));
@@ -618,7 +725,7 @@ static void TestInvalidLocator(const char *dir)
 
     ScriptReset();
     ReplyBody("blocklist-latest\n", strlen("blocklist-latest\n"));
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
     CHECK(Run(&job, 512, NULL) == SyncStep_Failed);
     CHECK(job.fail == SyncFail_Locator);
     CHECK(strcmp(SyncPhaseText(&job), "release locator") == 0);
@@ -635,7 +742,7 @@ static void TestRefusals(const char *dir)
 
     snprintf(target, sizeof target, "%s/guard.trie", dir);
 
-    CHECK(!SyncBegin(NULL, &G_BACKEND, target, NULL));
+    CHECK(!SyncBegin(NULL, &G_POOL, target, NULL));
 
     /* A refused start still has to leave a defined job. The daemon reads
        job->fail to report why the run did not begin, and an immutable build
@@ -649,7 +756,7 @@ static void TestRefusals(const char *dir)
     CHECK(strcmp(SyncFailText(&job), "no failure") == 0);
 
     memset(&job, 0xA5, sizeof job);
-    CHECK(!SyncBegin(&job, &G_BACKEND, NULL, NULL));
+    CHECK(!SyncBegin(&job, &G_POOL, NULL, NULL));
     CHECK(job.fail == SyncFail_None);
     CHECK(job.state == SyncState_Idle);
     CHECK(strcmp(SyncFailText(&job), "no failure") == 0);
@@ -658,13 +765,13 @@ static void TestRefusals(const char *dir)
     memset(oversize, 'a', sizeof oversize);
     oversize[sizeof oversize - 1] = '\0';
     memset(&job, 0xA5, sizeof job);
-    CHECK(!SyncBegin(&job, &G_BACKEND, oversize, NULL));
+    CHECK(!Begin(&job, oversize, NULL));
     CHECK(job.fail == SyncFail_None);
     CHECK(job.state == SyncState_Idle);
 
     ScriptReset();
     ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
-    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Begin(&job, target, NULL));
 
     /* An address is only meaningful while the driver is waiting for one */
     CHECK(SyncEvents(&job) == 0);
@@ -699,6 +806,8 @@ int main(void)
     G_NOW_MS = 1000;
 
     TestHappyPath(dir);
+    TestSyncCompletesWithTwoFreeSlots(dir);
+    TestRefusedSyncKeepsResolverHealthy(dir);
     TestRedirects(dir);
     TestResponseCloseIsRetried(dir);
     TestResponseCloseRetryIsBounded(dir);

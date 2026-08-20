@@ -377,7 +377,8 @@ static bool BuildRequest(FetchJob *job)
 
 static void ResetChannel(FetchJob *job)
 {
-    TlsChannelClose(&job->channel);
+    if(job->channel != NULL)
+        TlsChannelClose(job->channel);
     if(job->fd >= 0)
         close(job->fd);
     job->fd = -1;
@@ -405,7 +406,7 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
     job->bodyExpected = 0;
     job->memoryLen    = 0;
     job->status       = 0;
-    job->channel.fd   = -1;
+    job->channel->fd  = -1;
 
     int fd = socket(addr->ss_family,
                     SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
@@ -423,11 +424,11 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
         return false;
     }
 
-    if(TlsChannelStart(backend, &job->channel, fd, job->url.host) != TlsIo_Ok)
+    if(TlsChannelStart(backend, job->channel, fd, job->url.host) != TlsIo_Ok)
     {
         close(fd);
-        job->channel.fd = -1;
-        job->fail       = FetchFail_Tls;
+        job->channel->fd = -1;
+        job->fail        = FetchFail_Tls;
         return false;
     }
 
@@ -435,7 +436,7 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
     if(connected == 0)
     {
         job->state        = FetchState_Handshake;
-        job->channel.want = TlsIo_WantWrite;
+        job->channel->want = TlsIo_WantWrite;
     }
 
     return true;
@@ -443,10 +444,11 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
 
 bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
                 const struct sockaddr_storage *addr, socklen_t addrLen,
-                int sink, size_t maxBody, uint32_t nowMs)
+                int sink, size_t maxBody, uint32_t nowMs,
+                TlsChannel *channel)
 {
     if(job == NULL || backend == NULL || !backend->bReady || addr == NULL
-       || maxBody == 0)
+       || channel == NULL || maxBody == 0)
         return false;
 
     memset(job, 0, sizeof *job);
@@ -455,6 +457,7 @@ bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
     job->maxBody    = maxBody;
     job->state      = FetchState_Idle;
     job->deadlineMs = nowMs + CFG_FETCH_TIMEOUT_MS;
+    job->channel    = channel;
 
     if(!FetchParseUrl(url, &job->url))
     {
@@ -467,12 +470,13 @@ bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
 
 bool FetchBeginToMemory(FetchJob *job, TlsBackend *backend, const char *url,
                         const struct sockaddr_storage *addr, socklen_t addrLen,
-                        uint8_t *out, size_t cap, uint32_t nowMs)
+                        uint8_t *out, size_t cap, uint32_t nowMs,
+                        TlsChannel *channel)
 {
     if(out == NULL || cap == 0)
         return false;
 
-    if(!FetchBegin(job, backend, url, addr, addrLen, -1, cap, nowMs))
+    if(!FetchBegin(job, backend, url, addr, addrLen, -1, cap, nowMs, channel))
         return false;
 
     job->memory    = out;
@@ -526,7 +530,7 @@ short FetchEvents(const FetchJob *job)
     if(job->state == FetchState_Connect)
         return POLLOUT;
 
-    return TlsChannelEvents(&job->channel);
+    return TlsChannelEvents(job->channel);
 }
 
 static FetchStep BodyBytes(FetchJob *job, const uint8_t *data, size_t len)
@@ -628,19 +632,19 @@ FetchStep FetchProgress(FetchJob *job, uint32_t nowMs)
 
     if(job->state == FetchState_Handshake)
     {
-        TlsIo result = TlsChannelHandshake(&job->channel);
+        TlsIo result = TlsChannelHandshake(job->channel);
         if(result == TlsIo_WantRead || result == TlsIo_WantWrite)
             return FetchStep_Again;
         if(result != TlsIo_Ok)
             return Fail(job, FetchFail_Tls);
 
         job->state        = FetchState_Write;
-        job->channel.want = TlsIo_WantWrite;
+        job->channel->want = TlsIo_WantWrite;
     }
 
     if(job->state == FetchState_Write)
     {
-        ssize_t wrote = TlsChannelWrite(&job->channel,
+        ssize_t wrote = TlsChannelWrite(job->channel,
                                         job->request + job->sent,
                                         job->requestLen - job->sent);
         if(wrote == TlsIo_WantRead || wrote == TlsIo_WantWrite)
@@ -651,13 +655,13 @@ FetchStep FetchProgress(FetchJob *job, uint32_t nowMs)
         job->sent += (size_t)wrote;
         if(job->sent < job->requestLen)
         {
-            job->channel.want = TlsIo_WantWrite;
+            job->channel->want = TlsIo_WantWrite;
             return FetchStep_Again;
         }
 
         job->state        = FetchState_ReadHeaders;
         job->held         = 0;
-        job->channel.want = TlsIo_WantRead;
+        job->channel->want = TlsIo_WantRead;
     }
 
     if(job->state == FetchState_ReadHeaders)
@@ -665,7 +669,7 @@ FetchStep FetchProgress(FetchJob *job, uint32_t nowMs)
         if(job->held >= sizeof job->buffer)
             return Fail(job, FetchFail_Header);
 
-        ssize_t got = TlsChannelRead(&job->channel, job->buffer + job->held,
+        ssize_t got = TlsChannelRead(job->channel, job->buffer + job->held,
                                      sizeof job->buffer - job->held);
         if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
             return FetchStep_Again;
@@ -688,7 +692,7 @@ FetchStep FetchProgress(FetchJob *job, uint32_t nowMs)
 
     if(job->state == FetchState_ReadBody)
     {
-        ssize_t got = TlsChannelRead(&job->channel, job->buffer,
+        ssize_t got = TlsChannelRead(job->channel, job->buffer,
                                      sizeof job->buffer);
         if(got == TlsIo_WantRead || got == TlsIo_WantWrite)
             return FetchStep_Again;

@@ -160,6 +160,14 @@ bool UpstreamPoolAddDoh(UpstreamPool *pool, const char *address, uint16_t port,
                         const char *hostname, const char *path);
 void UpstreamPoolSetTlsBackend(UpstreamPool *pool, TlsBackend *backend);
 
+#if defined(PROFILE_ENCRYPTED)
+/* Reserves one shared slot for a complete fetch run. Two slots must be
+   available before acquisition, including idle channels that can be closed */
+bool UpstreamPoolAcquireFetchChannel(UpstreamPool *pool, size_t *slotIndex,
+                                     TlsChannel **channel);
+void UpstreamPoolReleaseFetchChannel(UpstreamPool *pool, size_t slotIndex);
+#endif
+
 /* Lowest measured round trip among the upstreams still in service, with the
    configured order breaking a tie. Pass the index of an upstream that has just
    failed as avoid, or UPSTREAM_NONE.

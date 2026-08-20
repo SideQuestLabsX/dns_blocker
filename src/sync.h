@@ -2,6 +2,7 @@
 #define DNS_BLOCKER_SYNC_H
 
 #include "fetch.h"
+#include "upstream.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -91,7 +92,8 @@ typedef enum
     SyncFail_Install,
     SyncFail_Locator,
     SyncFail_Url,
-    SyncFail_Tier
+    SyncFail_Tier,
+    SyncFail_Capacity
 } SyncFail;
 
 /* Sequences the three transfers and the install. Nothing here resolves a name:
@@ -102,7 +104,9 @@ typedef struct
     SyncState   state;
     SyncPhase   phase;
     FetchJob    job;
-    TlsBackend *backend;
+    UpstreamPool *pool;
+    TlsChannel   *channel;
+    size_t        tlsSlot;
 
     char path[CFG_SYNC_PATH_BYTES];
     char staging[CFG_SYNC_PATH_BYTES];
@@ -123,8 +127,9 @@ typedef struct
     SyncFail fail;
 } SyncJob;
 
-/* Prepares a run against `path`. `tier` NULL uses the compiled default */
-bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
+/* Prepares a run against `path` and reserves its shared TLS slot. `tier` NULL
+   uses the compiled default */
+bool SyncBegin(SyncJob *job, UpstreamPool *pool, const char *path,
                const char *tier);
 
 /* The host the driver is waiting on, valid after SyncStep_NeedAddress. */

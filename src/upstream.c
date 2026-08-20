@@ -438,6 +438,9 @@ static bool BeginPlaintext(Upstream *member, const uint8_t *sent,
 }
 
 #if defined(PROFILE_ENCRYPTED)
+_Static_assert(CFG_TLS_SLOTS >= CFG_TLS_FETCH_MIN_FREE_SLOTS,
+               "the fetch reservation cannot exceed the slot count");
+
 static void SlotClose(UpstreamTlsSlot *slot)
 {
     TlsChannelClose(&slot->channel);
@@ -495,6 +498,49 @@ static size_t AcquireTlsSlot(UpstreamPool *pool, size_t member)
     SlotClose(&pool->tlsSlots[spare]);
     pool->tlsSlots[spare].bUsed = true;
     return spare;
+}
+
+bool UpstreamPoolAcquireFetchChannel(UpstreamPool *pool, size_t *slotIndex,
+                                     TlsChannel **channel)
+{
+    if(slotIndex == NULL || channel == NULL)
+        return false;
+
+    *slotIndex = UPSTREAM_NONE;
+    *channel   = NULL;
+
+    if(pool == NULL || pool->tls == NULL || !pool->tls->bReady)
+        return false;
+
+    size_t freeSlots = 0;
+    for(size_t i = 0; i < CFG_TLS_SLOTS; i++)
+    {
+        if(!pool->tlsSlots[i].bUsed)
+            freeSlots++;
+    }
+
+    if(freeSlots < CFG_TLS_FETCH_MIN_FREE_SLOTS)
+        return false;
+
+    size_t acquired = AcquireTlsSlot(pool, UPSTREAM_NONE);
+    if(acquired == UPSTREAM_NONE)
+        return false;
+
+    UpstreamTlsSlot *slot = &pool->tlsSlots[acquired];
+    slot->member = UPSTREAM_NONE;
+    *slotIndex   = acquired;
+    *channel     = &slot->channel;
+    return true;
+}
+
+void UpstreamPoolReleaseFetchChannel(UpstreamPool *pool, size_t slotIndex)
+{
+    if(pool == NULL || slotIndex >= CFG_TLS_SLOTS)
+        return;
+
+    UpstreamTlsSlot *slot = &pool->tlsSlots[slotIndex];
+    if(slot->bUsed && slot->member == UPSTREAM_NONE)
+        SlotClose(slot);
 }
 
 /* The server closed one channel to this upstream, so the others it holds open

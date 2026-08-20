@@ -205,7 +205,6 @@ static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
 typedef struct
 {
     SyncJob     *job;
-    TlsBackend  *tls;
     Server      *server;
     Blocklist   *list;
     const char  *path;
@@ -248,7 +247,7 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
         if(!SyncDue(nowMs, run->dueMs))
             return;
 
-        if(!SyncBegin(run->job, run->tls, run->path, run->tier))
+        if(!SyncBegin(run->job, run->server->upstreams, run->path, run->tier))
         {
             if(run->job->fail == SyncFail_None)
             {
@@ -537,7 +536,7 @@ int main(int argc, char **argv)
        policy and there is no release to follow. Folded at compile time */
     const bool bSyncEnabled = CFG_BLOCKLIST_PATH != NULL;
 
-    SyncRun  run = { &sync, &tls, &server, &list, CFG_BLOCKLIST_PATH, tier,
+    SyncRun  run = { &sync, &server, &list, CFG_BLOCKLIST_PATH, tier,
                      ServerNowMilliseconds() + CFG_SYNC_FIRST_MS, false };
 #endif
 

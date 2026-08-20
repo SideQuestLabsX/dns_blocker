@@ -290,9 +290,10 @@ and blocklist sync. The default sync connects to `raw.githubusercontent.com`,
 `release-assets.githubusercontent.com`. Concatenate their root certificates
 and the resolver roots in that file. The file is mapped read-only at startup
 and must stay within `CFG_TLS_CA_MAX_BYTES`. DoH sends HTTP/1.1 POST requests
-with a bounded response header. Six encrypted exchanges can run at once. A
-query waits in its transaction slot when all six are busy and gets `SERVFAIL`
-only if its deadline expires.
+with a bounded response header. Client exchanges and blocklist fetches share six
+TLS slots. A sync starts only when two slots are available and holds one until
+the run ends. A query waits in its transaction slot when all six are busy and
+gets `SERVFAIL` only if its deadline expires.
 
 ## Local names
 

@@ -259,6 +259,12 @@
    The record buffers have to stay within ARENA_TLS_BYTES, which is sized
    alongside this. */
 #define CFG_TLS_SLOTS           6
+
+/* The sync holds a slot for a whole trie download, minutes on ARM1176, so it is
+   refused below this many free. Its 15 minute retry makes refusal cheap */
+#ifndef CFG_TLS_FETCH_MIN_FREE_SLOTS
+  #define CFG_TLS_FETCH_MIN_FREE_SLOTS 2
+#endif
 #define CFG_TLS_HOSTNAME_BYTES  128
 #define CFG_DOH_PATH_BYTES      64
 #define CFG_DOH_HEADER_BYTES    1024
