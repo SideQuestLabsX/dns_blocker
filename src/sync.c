@@ -423,7 +423,7 @@ const char *SyncHost(const SyncJob *job)
 }
 
 bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
-                        socklen_t addrLen)
+                        socklen_t addrLen, uint32_t nowMs)
 {
     if(job == NULL || addr == NULL || job->state != SyncState_Resolve)
         return false;
@@ -454,7 +454,7 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
                        : sizeof job->metadataText;
             bStarted = FetchBeginToMemory(&job->job, job->backend, urlText,
                                           addr, addrLen, job->metadataText,
-                                          cap);
+                                          cap, nowMs);
         }
         else
         {
@@ -468,7 +468,7 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
 
             bStarted = FetchBegin(&job->job, job->backend, urlText, addr,
                                   addrLen, job->stagingFd,
-                                  CFG_BLOCKLIST_MAX_BYTES);
+                                  CFG_BLOCKLIST_MAX_BYTES, nowMs);
         }
     }
 
@@ -575,7 +575,7 @@ static SyncStep FinishAsset(SyncJob *job)
     return SyncStep_Done;
 }
 
-SyncStep SyncProgress(SyncJob *job)
+SyncStep SyncProgress(SyncJob *job, uint32_t nowMs)
 {
     if(job == NULL)
         return SyncStep_Failed;
@@ -589,7 +589,7 @@ SyncStep SyncProgress(SyncJob *job)
     if(job->state != SyncState_Transfer)
         return SyncStep_Failed;
 
-    FetchStep step = FetchProgress(&job->job);
+    FetchStep step = FetchProgress(&job->job, nowMs);
 
     if(step == FetchStep_Again)
         return SyncStep_Again;

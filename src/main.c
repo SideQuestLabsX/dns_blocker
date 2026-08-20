@@ -268,7 +268,7 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
         run->bActive = true;
     }
 
-    SyncStep step = SyncProgress(run->job);
+    SyncStep step = SyncProgress(run->job, nowMs);
 
     if(step == SyncStep_NeedAddress)
     {
@@ -304,7 +304,7 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
                 memset(&peer, 0, sizeof peer);
                 memcpy(&peer, &v4, sizeof v4);
 
-                if(!SyncProvideAddress(run->job, &peer, sizeof v4))
+                if(!SyncProvideAddress(run->job, &peer, sizeof v4, nowMs))
                     SyncStopOnFailure(run, nowMs);
                 break;
             }

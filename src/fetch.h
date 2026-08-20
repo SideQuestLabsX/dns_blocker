@@ -93,6 +93,7 @@ typedef enum
     FetchFail_Header,
     FetchFail_Status,
     FetchFail_Body,
+    FetchFail_Timeout,
     FetchFail_Redirects
 } FetchFail;
 
@@ -119,6 +120,7 @@ typedef struct
     unsigned  redirects;
     unsigned  status;
     FetchFail fail;
+    uint32_t  deadlineMs;
 
     mbedtls_sha256_context sha;
     bool bShaReady;
@@ -128,12 +130,12 @@ typedef struct
     char    location[CFG_FETCH_URL_BYTES];
 } FetchJob;
 
-/* `addr` is the resolved peer. Nothing in this file resolves a name, so the
-   caller decides how `url`'s host became an address. `sink` receives the body
-   and stays the caller's to close. */
+/* `addr` is the resolved peer and `nowMs` is monotonic. Nothing in this file
+   resolves a name, so the caller decides how `url`'s host became an address.
+   `sink` receives the body and stays the caller's to close */
 bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
                 const struct sockaddr_storage *addr, socklen_t addrLen,
-                int sink, size_t maxBody);
+                int sink, size_t maxBody, uint32_t nowMs);
 
 /* Same transfer, with the body kept in `out` instead of written to a
    descriptor. For the digest listing, which is a few hundred bytes. `maxBody`
@@ -141,7 +143,7 @@ bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
    part-way through. */
 bool FetchBeginToMemory(FetchJob *job, TlsBackend *backend, const char *url,
                         const struct sockaddr_storage *addr, socklen_t addrLen,
-                        uint8_t *out, size_t cap);
+                        uint8_t *out, size_t cap, uint32_t nowMs);
 
 /* Bytes written into the memory sink. Valid after FetchStep_Done. */
 size_t FetchBodyLength(const FetchJob *job);
@@ -155,7 +157,7 @@ bool FetchRetry(FetchJob *job, TlsBackend *backend,
                 const struct sockaddr_storage *addr, socklen_t addrLen);
 
 short FetchEvents(const FetchJob *job);
-FetchStep FetchProgress(FetchJob *job);
+FetchStep FetchProgress(FetchJob *job, uint32_t nowMs);
 
 /* A short reason for the last failure, for a log line. Never NULL. */
 const char *FetchFailText(const FetchJob *job);

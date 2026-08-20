@@ -32,17 +32,22 @@ _Static_assert(CFG_FETCH_READ_RETRIES > 0,
 _Static_assert(CFG_FETCH_READ_RETRIES <= MAX_REPLIES - 2,
                "the scripted reply table must hold every read retry");
 
-static uint8_t G_REPLY[MAX_REPLIES][4096];
-static size_t  G_REPLY_LEN[MAX_REPLIES];
-static size_t  G_REPLIES;
-static size_t  G_REPLY_AT;
-static size_t  G_READ_AT;
+static uint8_t  G_REPLY[MAX_REPLIES][4096];
+static size_t   G_REPLY_LEN[MAX_REPLIES];
+static size_t   G_REPLIES;
+static size_t   G_REPLY_AT;
+static size_t   G_READ_AT;
+static size_t   G_STALL_REPLY;
+static size_t   G_STALL_AFTER;
+static uint32_t G_NOW_MS;
 
 static void ScriptReset(void)
 {
-    G_REPLIES  = 0;
-    G_REPLY_AT = 0;
-    G_READ_AT  = 0;
+    G_REPLIES     = 0;
+    G_REPLY_AT    = 0;
+    G_READ_AT     = 0;
+    G_STALL_REPLY = SIZE_MAX;
+    G_STALL_AFTER = SIZE_MAX;
 }
 
 static void Reply(const char *head, const void *body, size_t bodyLen)
@@ -78,6 +83,12 @@ static void ReplyRedirect(const char *location)
     Reply(head, NULL, 0);
 }
 
+static void StallLastReplyAfter(size_t bytes)
+{
+    G_STALL_REPLY = G_REPLIES - 1;
+    G_STALL_AFTER = bytes;
+}
+
 TlsIo TlsChannelStart(TlsBackend *backend, TlsChannel *channel, int fd,
                       const char *hostname)
 {
@@ -105,12 +116,20 @@ ssize_t TlsChannelRead(TlsChannel *channel, uint8_t *out, size_t cap)
         return TlsIo_Closed;
 
     size_t len = G_REPLY_LEN[G_REPLY_AT];
+    if(G_REPLY_AT == G_STALL_REPLY && G_READ_AT >= G_STALL_AFTER)
+    {
+        channel->want = TlsIo_WantRead;
+        return TlsIo_WantRead;
+    }
     if(G_READ_AT >= len)
         return TlsIo_Closed;
 
     size_t count = len - G_READ_AT;
     if(count > cap)
         count = cap;
+    if(G_REPLY_AT == G_STALL_REPLY
+       && count > G_STALL_AFTER - G_READ_AT)
+        count = G_STALL_AFTER - G_READ_AT;
 
     memcpy(out, G_REPLY[G_REPLY_AT] + G_READ_AT, count);
     G_READ_AT += count;
@@ -182,7 +201,7 @@ static bool Answer(SyncJob *job)
     memset(&addr, 0, sizeof addr);
     memcpy(&addr, &address, sizeof address);
 
-    return SyncProvideAddress(job, &addr, addrLen);
+    return SyncProvideAddress(job, &addr, addrLen, G_NOW_MS);
 }
 
 /* Runs the driver to a terminal step, answering every address request. */
@@ -192,7 +211,7 @@ static SyncStep Run(SyncJob *job, unsigned budget, unsigned *resolves)
 
     for(unsigned i = 0; i < budget; i++)
     {
-        SyncStep step = SyncProgress(job);
+        SyncStep step = SyncProgress(job, G_NOW_MS);
 
         if(step == SyncStep_NeedAddress)
         {
@@ -424,6 +443,43 @@ static void TestTransferFailureCleansUp(const char *dir)
     SyncEnd(&job);
 }
 
+static void TestPartialBodyTimeoutCleansUp(const char *dir)
+{
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n";
+    SyncJob job;
+    char    target[256];
+    char    staging[256];
+
+    snprintf(target, sizeof target, "%s/timeout.trie", dir);
+    CHECK(SyncStagingPath(staging, sizeof staging, target));
+
+    G_NOW_MS = 1000;
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyBody(G_LISTING, strlen(G_LISTING));
+    Reply(head, "hello\n", 6);
+    StallLastReplyAfter(sizeof head);
+
+    CHECK(SyncBegin(&job, &G_BACKEND, target, NULL));
+    CHECK(Run(&job, 64, NULL) == SyncStep_Again);
+    CHECK(job.phase == SyncPhase_Asset);
+    CHECK(job.job.bodyGot == 1);
+    CHECK(SizeOf(staging) == 1);
+
+    G_NOW_MS = job.job.deadlineMs;
+    CHECK(SyncProgress(&job, G_NOW_MS) == SyncStep_Failed);
+    CHECK(job.fail == SyncFail_Transfer);
+    CHECK(job.job.fail == FetchFail_Timeout);
+    CHECK(strcmp(SyncFailText(&job), "the transfer deadline expired") == 0);
+    CHECK(job.job.fd == -1);
+    CHECK(!Exists(staging));
+    CHECK(!Exists(target));
+
+    SyncEnd(&job);
+    G_NOW_MS = 1000;
+}
+
 static void TestServerError(const char *dir)
 {
     SyncJob job;
@@ -612,14 +668,14 @@ static void TestRefusals(const char *dir)
 
     /* An address is only meaningful while the driver is waiting for one */
     CHECK(SyncEvents(&job) == 0);
-    CHECK(SyncProgress(&job) == SyncStep_NeedAddress);
+    CHECK(SyncProgress(&job, G_NOW_MS) == SyncStep_NeedAddress);
     CHECK(Answer(&job));
     CHECK(!Answer(&job));
     CHECK(SyncEvents(&job) != 0);
 
     SyncEnd(&job);
-    CHECK(SyncProgress(&job) == SyncStep_Failed);
-    CHECK(SyncProgress(NULL) == SyncStep_Failed);
+    CHECK(SyncProgress(&job, G_NOW_MS) == SyncStep_Failed);
+    CHECK(SyncProgress(NULL, G_NOW_MS) == SyncStep_Failed);
     CHECK(SyncHost(NULL) == NULL);
 }
 
@@ -640,6 +696,7 @@ int main(void)
         return 1;
 
     G_BACKEND.bReady = true;
+    G_NOW_MS = 1000;
 
     TestHappyPath(dir);
     TestRedirects(dir);
@@ -648,6 +705,7 @@ int main(void)
     TestDigestMismatchKeepsTheOldList(dir);
     TestListingWithoutTheAsset(dir);
     TestTransferFailureCleansUp(dir);
+    TestPartialBodyTimeoutCleansUp(dir);
     TestServerError(dir);
     TestFailuresNameThemselves(dir);
     TestInvalidLocator(dir);

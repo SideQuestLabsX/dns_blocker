@@ -25,18 +25,21 @@ static int G_FAILURES;
 
 /* The shim is replaced so the state machine runs against scripted bytes. A
    real handshake would make every case below depend on a live peer. */
-static ssize_t G_READ_RESULT;
-static size_t  G_READ_CHUNK;
-static size_t  G_READ_AT;
-static size_t  G_READ_LEN;
-static uint8_t G_READ_DATA[CFG_FETCH_HEADER_BYTES * 4];
+static ssize_t  G_READ_RESULT;
+static ssize_t  G_WRITE_RESULT;
+static size_t   G_READ_CHUNK;
+static size_t   G_READ_AT;
+static size_t   G_READ_LEN;
+static uint8_t  G_READ_DATA[CFG_FETCH_HEADER_BYTES * 4];
+static uint32_t G_NOW_MS;
 
 static void FakeReset(void)
 {
-    G_READ_RESULT = 0;
-    G_READ_CHUNK  = SIZE_MAX;
-    G_READ_AT     = 0;
-    G_READ_LEN    = 0;
+    G_READ_RESULT  = 0;
+    G_WRITE_RESULT = 0;
+    G_READ_CHUNK   = SIZE_MAX;
+    G_READ_AT      = 0;
+    G_READ_LEN     = 0;
 }
 
 static void Script(const char *head, const char *body, size_t bodyLen)
@@ -95,6 +98,15 @@ ssize_t TlsChannelRead(TlsChannel *channel, uint8_t *out, size_t cap)
 ssize_t TlsChannelWrite(TlsChannel *channel, const uint8_t *data, size_t len)
 {
     (void)data;
+
+    if(G_WRITE_RESULT != 0)
+    {
+        ssize_t result = G_WRITE_RESULT;
+        G_WRITE_RESULT = 0;
+        channel->want = (TlsIo)result;
+        return result;
+    }
+
     channel->want = TlsIo_WantWrite;
     return (ssize_t)len;
 }
@@ -154,7 +166,7 @@ static FetchStep Drive(FetchJob *job, unsigned budget)
 {
     for(unsigned i = 0; i < budget; i++)
     {
-        FetchStep step = FetchProgress(job);
+        FetchStep step = FetchProgress(job, G_NOW_MS);
         if(step != FetchStep_Again)
             return step;
     }
@@ -197,7 +209,8 @@ static bool Start(FetchJob *job, const char *url, uint16_t port, int sink,
     socklen_t               addrLen = 0;
 
     LoopbackAddress(&addr, &addrLen, port);
-    return FetchBegin(job, &G_BACKEND, url, &addr, addrLen, sink, maxBody);
+    return FetchBegin(job, &G_BACKEND, url, &addr, addrLen, sink, maxBody,
+                      G_NOW_MS);
 }
 
 static bool Follow(FetchJob *job, uint16_t port)
@@ -207,6 +220,15 @@ static bool Follow(FetchJob *job, uint16_t port)
 
     LoopbackAddress(&addr, &addrLen, port);
     return FetchFollow(job, &G_BACKEND, &addr, addrLen);
+}
+
+static bool Retry(FetchJob *job, uint16_t port)
+{
+    struct sockaddr_storage addr;
+    socklen_t               addrLen = 0;
+
+    LoopbackAddress(&addr, &addrLen, port);
+    return FetchRetry(job, &G_BACKEND, &addr, addrLen);
 }
 
 static void TestBody(uint16_t port)
@@ -272,7 +294,7 @@ static void TestMemorySink(uint16_t port)
     G_READ_CHUNK = 7;
     Script(head, listing, strlen(listing));
     CHECK(FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                             addrLen, body, sizeof body));
+                             addrLen, body, sizeof body, G_NOW_MS));
     CHECK(Drive(&job, 256) == FetchStep_Done);
     CHECK(FetchBodyLength(&job) == strlen(listing));
     CHECK(memcmp(body, listing, strlen(listing)) == 0);
@@ -287,15 +309,15 @@ static void TestMemorySink(uint16_t port)
     FakeReset();
     Script("HTTP/1.1 200 OK\r\nContent-Length: 300\r\n\r\n", NULL, 0);
     CHECK(FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                             addrLen, body, sizeof body));
+                             addrLen, body, sizeof body, G_NOW_MS));
     CHECK(Drive(&job, 32) == FetchStep_Failed);
     CHECK(FetchBodyLength(&job) == 0);
     FetchEnd(&job);
 
     CHECK(!FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                              addrLen, NULL, sizeof body));
+                              addrLen, NULL, sizeof body, G_NOW_MS));
     CHECK(!FetchBeginToMemory(&job, &G_BACKEND, "https://a.example/d", &addr,
-                              addrLen, body, 0));
+                              addrLen, body, 0, G_NOW_MS));
 }
 
 static void TestRefusals(uint16_t port)
@@ -428,6 +450,114 @@ static void TestDigestGuard(uint16_t port)
     CHECK(FetchEvents(&job) == 0);
 }
 
+static void TestPermanentWantReadTimesOut(uint16_t port)
+{
+    FetchJob job;
+
+    G_NOW_MS = 1000;
+    FakeReset();
+    G_READ_RESULT = TlsIo_WantRead;
+    CHECK(Start(&job, "https://a.example/x", port, -1, 1024));
+    CHECK(Drive(&job, 1) == FetchStep_Again);
+    CHECK(job.state == FetchState_ReadHeaders);
+
+    G_NOW_MS = job.deadlineMs;
+    G_READ_RESULT = TlsIo_WantRead;
+    CHECK(Drive(&job, 1) == FetchStep_Failed);
+    CHECK(job.fail == FetchFail_Timeout);
+    CHECK(job.fd == -1);
+    CHECK(job.channel.fd == -1);
+    FetchEnd(&job);
+}
+
+static void TestPermanentWantWriteTimesOut(uint16_t port)
+{
+    FetchJob job;
+
+    G_NOW_MS = 1000;
+    FakeReset();
+    G_WRITE_RESULT = TlsIo_WantWrite;
+    CHECK(Start(&job, "https://a.example/x", port, -1, 1024));
+    CHECK(Drive(&job, 1) == FetchStep_Again);
+    CHECK(job.state == FetchState_Write);
+
+    G_NOW_MS = job.deadlineMs;
+    G_WRITE_RESULT = TlsIo_WantWrite;
+    CHECK(Drive(&job, 1) == FetchStep_Failed);
+    CHECK(job.fail == FetchFail_Timeout);
+    FetchEnd(&job);
+}
+
+static void TestPartialHeadersDoNotResetDeadline(uint16_t port)
+{
+    FetchJob job;
+
+    G_NOW_MS = 1000;
+    FakeReset();
+    G_READ_CHUNK = 1;
+    Script("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n", "hello\n", 6);
+    CHECK(Start(&job, "https://a.example/x", port, -1, 1024));
+
+    G_NOW_MS = job.deadlineMs - 1;
+    CHECK(Drive(&job, 1) == FetchStep_Again);
+    CHECK(job.held == 1);
+
+    G_NOW_MS++;
+    CHECK(Drive(&job, 1) == FetchStep_Failed);
+    CHECK(job.fail == FetchFail_Timeout);
+    FetchEnd(&job);
+}
+
+static void TestRedirectSharesDeadline(uint16_t port)
+{
+    FetchJob job;
+
+    G_NOW_MS = 1000;
+    FakeReset();
+    Script("HTTP/1.1 302 Found\r\nLocation: https://b.example/x\r\n"
+           "Content-Length: 0\r\n\r\n", NULL, 0);
+    CHECK(Start(&job, "https://a.example/x", port, -1, 1024));
+    CHECK(Drive(&job, 32) == FetchStep_Redirect);
+
+    uint32_t deadlineMs = job.deadlineMs;
+    G_NOW_MS = deadlineMs - 1;
+    FakeReset();
+    G_READ_RESULT = TlsIo_WantRead;
+    CHECK(Follow(&job, port));
+    CHECK(job.deadlineMs == deadlineMs);
+    CHECK(Drive(&job, 1) == FetchStep_Again);
+
+    G_NOW_MS++;
+    CHECK(Drive(&job, 1) == FetchStep_Failed);
+    CHECK(job.fail == FetchFail_Timeout);
+    FetchEnd(&job);
+}
+
+static void TestReadRetrySharesDeadline(uint16_t port)
+{
+    FetchJob job;
+
+    G_NOW_MS = 1000;
+    FakeReset();
+    CHECK(Start(&job, "https://a.example/x", port, -1, 1024));
+    CHECK(Drive(&job, 32) == FetchStep_Failed);
+    CHECK(job.fail == FetchFail_Read);
+
+    uint32_t deadlineMs = job.deadlineMs;
+    FetchEnd(&job);
+    G_NOW_MS = deadlineMs - 1;
+    FakeReset();
+    G_READ_RESULT = TlsIo_WantRead;
+    CHECK(Retry(&job, port));
+    CHECK(job.deadlineMs == deadlineMs);
+    CHECK(Drive(&job, 1) == FetchStep_Again);
+
+    G_NOW_MS++;
+    CHECK(Drive(&job, 1) == FetchStep_Failed);
+    CHECK(job.fail == FetchFail_Timeout);
+    FetchEnd(&job);
+}
+
 int main(void)
 {
     uint16_t port     = 0;
@@ -444,6 +574,11 @@ int main(void)
     TestRefusals(port);
     TestRedirects(port);
     TestDigestGuard(port);
+    TestPermanentWantReadTimesOut(port);
+    TestPermanentWantWriteTimesOut(port);
+    TestPartialHeadersDoNotResetDeadline(port);
+    TestRedirectSharesDeadline(port);
+    TestReadRetrySharesDeadline(port);
 
     close(listener);
 

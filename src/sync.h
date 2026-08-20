@@ -131,14 +131,14 @@ bool SyncBegin(SyncJob *job, TlsBackend *backend, const char *path,
 const char *SyncHost(const SyncJob *job);
 
 bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
-                        socklen_t addrLen);
+                        socklen_t addrLen, uint32_t nowMs);
 
 short SyncEvents(const SyncJob *job);
 
 /* The descriptor the transfer is running on, or -1 when none is. Lets the
    caller hand it to a poll loop it already owns. */
 int SyncFd(const SyncJob *job);
-SyncStep SyncProgress(SyncJob *job);
+SyncStep SyncProgress(SyncJob *job, uint32_t nowMs);
 void SyncEnd(SyncJob *job);
 
 /* Which transfer was running, and why it stopped. Both are for a log line and

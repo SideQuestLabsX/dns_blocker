@@ -327,6 +327,10 @@
    949-byte signed Location beside a 2KB Content-Security-Policy */
 #define CFG_FETCH_HEADER_BYTES  16384
 #define CFG_FETCH_MAX_REDIRECTS 4
+/* One budget for the initial URL, redirects and same-URL read retries */
+#ifndef CFG_FETCH_TIMEOUT_MS
+  #define CFG_FETCH_TIMEOUT_MS  (10u * 60u * 1000u)
+#endif
 /* A peer can close between the request and the complete response header */
 #ifndef CFG_FETCH_READ_RETRIES
   #define CFG_FETCH_READ_RETRIES 2

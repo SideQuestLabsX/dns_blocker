@@ -348,6 +348,8 @@ static bool WriteAll(int fd, const uint8_t *data, size_t len)
 _Static_assert(CFG_FETCH_REQUEST_BYTES
                > CFG_FETCH_PATH_BYTES + CFG_FETCH_HOST_BYTES + 96,
                "the request buffer must hold the longest path and host");
+_Static_assert(CFG_FETCH_TIMEOUT_MS > 0 && CFG_FETCH_TIMEOUT_MS <= INT32_MAX,
+               "the fetch timeout must fit signed deadline arithmetic");
 
 static bool BuildRequest(FetchJob *job)
 {
@@ -441,17 +443,18 @@ static bool Connect(FetchJob *job, TlsBackend *backend,
 
 bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
                 const struct sockaddr_storage *addr, socklen_t addrLen,
-                int sink, size_t maxBody)
+                int sink, size_t maxBody, uint32_t nowMs)
 {
     if(job == NULL || backend == NULL || !backend->bReady || addr == NULL
        || maxBody == 0)
         return false;
 
     memset(job, 0, sizeof *job);
-    job->fd      = -1;
-    job->sink    = sink;
-    job->maxBody = maxBody;
-    job->state   = FetchState_Idle;
+    job->fd         = -1;
+    job->sink       = sink;
+    job->maxBody    = maxBody;
+    job->state      = FetchState_Idle;
+    job->deadlineMs = nowMs + CFG_FETCH_TIMEOUT_MS;
 
     if(!FetchParseUrl(url, &job->url))
     {
@@ -464,12 +467,12 @@ bool FetchBegin(FetchJob *job, TlsBackend *backend, const char *url,
 
 bool FetchBeginToMemory(FetchJob *job, TlsBackend *backend, const char *url,
                         const struct sockaddr_storage *addr, socklen_t addrLen,
-                        uint8_t *out, size_t cap)
+                        uint8_t *out, size_t cap, uint32_t nowMs)
 {
     if(out == NULL || cap == 0)
         return false;
 
-    if(!FetchBegin(job, backend, url, addr, addrLen, -1, cap))
+    if(!FetchBegin(job, backend, url, addr, addrLen, -1, cap, nowMs))
         return false;
 
     job->memory    = out;
@@ -598,10 +601,19 @@ static FetchStep OnHeaders(FetchJob *job, const FetchHeaders *headers,
     return step;
 }
 
-FetchStep FetchProgress(FetchJob *job)
+FetchStep FetchProgress(FetchJob *job, uint32_t nowMs)
 {
     if(job == NULL || job->fd < 0)
         return FetchStep_Failed;
+
+    if(job->state == FetchState_Done)
+        return FetchStep_Done;
+
+    if((int32_t)(nowMs - job->deadlineMs) >= 0)
+    {
+        ResetChannel(job);
+        return Fail(job, FetchFail_Timeout);
+    }
 
     if(job->state == FetchState_Connect)
     {
@@ -714,6 +726,7 @@ const char *FetchFailText(const FetchJob *job)
         case FetchFail_Header:    return "the response header was refused";
         case FetchFail_Status:    return "the response status or framing was refused";
         case FetchFail_Body:      return "the body was truncated or oversized";
+        case FetchFail_Timeout:   return "the transfer deadline expired";
         case FetchFail_Redirects: return "too many redirects";
     }
 

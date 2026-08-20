@@ -189,6 +189,10 @@ the selected tier.
 
 During an update, `/run` holds the live trie and a staging copy. Allow twice the
 trie size, and keep each trie below `CFG_BLOCKLIST_MAX_BYTES`.
+`CFG_FETCH_TIMEOUT_MS` gives each HTTPS transfer one deadline across redirects
+and response-read retries, ten minutes by default. On expiry, the daemon removes
+the staging copy and retries after `CFG_SYNC_RETRY_MS`, fifteen minutes by
+default.
 
 To install one by hand, download the trie and the digest into a staging
 directory on the same tmpfs as `CFG_BLOCKLIST_PATH`, check that one line, then
