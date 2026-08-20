@@ -127,6 +127,7 @@ DEP := $(patsubst src/%.c,$(BUILD)/%.d,$(SRC))
 READELF_GUESS := $(if $(filter %gcc,$(CC)),$(patsubst %gcc,%readelf,$(CC)),readelf)
 READELF ?= $(shell command -v $(READELF_GUESS) >/dev/null 2>&1 \
              && echo $(READELF_GUESS) || echo readelf)
+STRINGS ?= strings
 
 # Some toolchains accept a static link flag and still produce a dynamic binary.
 # The compiler reports no error, and the result needs a loader on the target.
@@ -139,6 +140,23 @@ define assert_static
 	fi
 	@if $(READELF) -l $(1) | grep -q INTERP; then \
 		echo "$(1): dynamically linked. $(CC) ignored the static link flag"; \
+		rm -f $(1); \
+		exit 1; \
+	fi
+endef
+
+define assert_no_sync
+	@if ! command -v $(STRINGS) >/dev/null 2>&1; then \
+		echo "$(STRINGS) not found, cannot verify that $(1) omits sync"; \
+		rm -f $(1); \
+		exit 1; \
+	fi
+	@if $(STRINGS) $(1) | grep -F \
+		-e 'retrying in' \
+		-e 'cannot start against' \
+		-e 'installed %zu bytes' \
+		-e 'the reserved lookup slot is busy' >/dev/null; then \
+		echo "$(1): immutable build retains the sync run"; \
 		rm -f $(1); \
 		exit 1; \
 	fi
@@ -157,6 +175,9 @@ $(TARGET): $(OBJ) $(TLS_DEPS) | $(LICENSE_FILES) $(TLS_CHECK)
 	@test -n "$(strip $(SRC))" || { echo "No sources in src/ yet"; exit 1; }
 	$(CC) $(CFLAGS) $(OBJ) -o $@ $(LIBS)
 	$(call assert_static,$@)
+ifneq ($(filter -DCFG_BLOCKLIST_PATH=NULL,$(FEATURES)),)
+	$(call assert_no_sync,$@)
+endif
 	@echo "built $@"
 
 $(BUILD)/THIRD_PARTY_LICENSES.md: THIRD_PARTY_LICENSES.md | $(BUILD)

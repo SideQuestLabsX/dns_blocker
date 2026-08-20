@@ -70,6 +70,12 @@ jobs:
           make test PROFILE=encrypted
           make PROFILE=encrypted
 
+      - name: Build immutable configuration
+        run: >-
+          make PROFILE=encrypted BUILD=build/immutable
+          MBEDTLS_DIR=build/x86_64-encrypted/mbedtls
+          FEATURES="-DCFG_BLOCKLIST_PATH=NULL -DCFG_STATUS_PATH=NULL"
+
   fuzz:
     name: guided fuzzing
     runs-on: ubuntu-latest
