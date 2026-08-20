@@ -20,9 +20,13 @@ licenses="$outputDir/THIRD_PARTY_LICENSES.md"
 
 # The sources, the base tiers and the categories combined onto them.
 #
-#   source   <name> <minimum accepted names> <https URL>
-#   base     <name> <source>...
-#   category <name> <base> <source>...
+#   source   <name> <minimum accepted names> <SPDX license> <https URL>
+#   group    <name> <source>...
+#   base     <name> <source-or-group>...
+#   category <name> <base> <source-or-group>...
+#
+# A group is one publisher that ships its inputs as separate files. Repeat the
+# line to keep it readable; the members accumulate.
 #
 # A base decides how hard ads and trackers are blocked. A category is one more
 # thing to block, and every subset of the categories is published against every
@@ -41,29 +45,61 @@ licenses="$outputDir/THIRD_PARTY_LICENSES.md"
 # release. Every source is a plain hosts file or a domain-per-line list.
 #
 # Each source carries its own license and a compiled trie is a combined work
-# under all of them. Record a new source in THIRD_PARTY_LICENSES.md before it
-# ships.
+# under all of them, so every source states its license here and the manifest
+# publishes it. Take that license from the publisher's own license file or terms
+# page, never from the repository a generated file happens to sit in. Record a
+# new source in THIRD_PARTY_LICENSES.md before it ships.
+#
+# Every license here has to be conveyable under GPL-3.0, because the tries are.
+# A NonCommercial term is not: GPL-3.0 section 7 forbids further restrictions.
+# See DECISIONS D-045.
+# StevenBlack publishes each of its inputs separately under data/<name>/hosts,
+# and this takes those rather than the merged master/hosts. The merge pulls in
+# mvps.org (CC BY-NC-SA 3.0) and someonewhocares.org (non-commercial), whose
+# terms cannot be conveyed under GPL-3.0 and reach every tier through every
+# base. Measured on 2026-08-20: of the 16056 domains unique to those two lists,
+# 0 of a random 300 still resolved, so the exclusion costs no live coverage.
+# yoyo.org is excluded for the same reason: it grants redistribution but states
+# no license, and its 2111 unique domains were 0 of 250 live.
 TIERS=${TIERS:-'
-source stevenblack   90000  https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
-source hagezi-lite   35000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt
-source hagezi-pro    190000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt
-source hagezi-max    240000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/ultimate-onlydomains.txt
-source oisd-small    50000  https://small.oisd.nl/domainswild
-source oisd-big      220000 https://big.oisd.nl/domainswild
+source sb-stevenblack  2000  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/StevenBlack/hosts
+source sb-baddboyz     900   MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/Badd-Boyz-Hosts/hosts
+source sb-hostsvn      1200  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/hostsVN/hosts
+source sb-uncheckyads  5     MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/UncheckyAds/hosts
+source sb-2o7net       1500  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.2o7Net/hosts
+source sb-dead         5     MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Dead/hosts
+source sb-risk         1500  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Risk/hosts
+source sb-spam         20    MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Spam/hosts
+source sb-adaway       5000  CC-BY-3.0     https://raw.githubusercontent.com/StevenBlack/hosts/master/data/adaway.org/hosts
+source sb-tiuxo        1200  CC-BY-4.0     https://raw.githubusercontent.com/StevenBlack/hosts/master/data/tiuxo/hosts
+source sb-kadhosts     40000 CC-BY-SA-4.0  https://raw.githubusercontent.com/StevenBlack/hosts/master/data/KADhosts/hosts
+source sb-minecraft    5     CC0-1.0       https://raw.githubusercontent.com/StevenBlack/hosts/master/data/minecraft-hosts/hosts
+source sb-urlhaus      50    CC0-1.0       https://raw.githubusercontent.com/StevenBlack/hosts/master/data/URLHaus/hosts
 
-source adult-small   70000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt
-source adult-big     400000 https://nsfw.oisd.nl/domainswild
+group  stevenblack sb-stevenblack sb-baddboyz sb-hostsvn sb-uncheckyads
+group  stevenblack sb-2o7net sb-dead sb-risk sb-spam
+group  stevenblack sb-adaway sb-tiuxo sb-kadhosts
+group  stevenblack sb-minecraft sb-urlhaus
 
-source tif-small     120000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt
-source tif-mid       250000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt
-source tif-big       1500000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
+source hagezi-lite   35000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt
+source hagezi-pro    190000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt
+source hagezi-max    240000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/ultimate-onlydomains.txt
+source oisd-small    50000  GPL-3.0-only https://small.oisd.nl/domainswild
+source oisd-big      220000 GPL-3.0-only https://big.oisd.nl/domainswild
 
-source gambling-small 65000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.mini-onlydomains.txt
-source gambling-mid   100000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt
-source gambling-big   280000 https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt
+source adult-small   70000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt
+source adult-big     400000 GPL-3.0-only https://nsfw.oisd.nl/domainswild
 
-source piracy        27000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
-source bypass        12000  https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt
+source tif-small     120000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt
+source tif-mid       250000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt
+source tif-big       1500000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
+
+source gambling-small 65000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.mini-onlydomains.txt
+source gambling-mid   100000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt
+source gambling-big   280000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt
+
+source piracy        27000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
+source bypass        12000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt
 
 base compact    stevenblack hagezi-lite
 base standard   stevenblack hagezi-pro oisd-small
@@ -95,7 +131,24 @@ category bypass   aggressive bypass
 materialise()
 {
     printf '%s\n' "$TIERS" | awk '
+        # A group stands for its members wherever a source may appear. Repeated
+        # lines accumulate, so one publisher can be declared a few names at a time
+        function expand(list,   i, n, parts, out) {
+            n = split(list, parts, /[ \t]+/)
+            for (i = 1; i <= n; i++)
+            {
+                if (parts[i] == "")
+                    continue
+                out = out ((parts[i] in grp) ? grp[parts[i]] : " " parts[i])
+            }
+            return out
+        }
         $1 == "source"   { print; next }
+        $1 == "group"    {
+            for (i = 3; i <= NF; i++)
+                grp[$2] = grp[$2] " " $i
+            next
+        }
         $1 == "base"     { bases[++nb] = $0; next }
         $1 == "category" {
             if (!($2 in seen)) { seen[$2] = ++nc; order[nc] = $2 }
@@ -133,7 +186,7 @@ materialise()
                         extra = extra add[key]
                     }
 
-                    print "tier", tier, sources extra
+                    print "tier", tier, expand(sources extra)
                 }
             }
         }
@@ -167,7 +220,7 @@ if [ -z "$tier" ]; then
     # what was fetched, then the composition of every tier. With the archive it
     # is the corresponding source of every trie here
     {
-        printf '# source <name> <sha256> <bytes> <accepted names> <url>\n'
+        printf '# source <name> <sha256> <bytes> <accepted names> <license> <url>\n'
         sort "$outputDir/manifest.sources"
         printf '\n# tier <name> <source>...\n'
         sort "$outputDir/manifest.tiers"
@@ -214,7 +267,8 @@ materialise | awk -v want="$tier" '
     $1 == "source" {
         if ($2 in minimum) { printf "duplicate source %s\n", $2 > "/dev/stderr"; exit 1 }
         minimum[$2] = $3
-        url[$2]     = $4
+        license[$2] = $4
+        url[$2]     = $5
         next
     }
     $1 == "tier" && $2 == want {
@@ -222,7 +276,8 @@ materialise | awk -v want="$tier" '
         for (i = 3; i <= NF; i++)
         {
             if (!(($i) in url)) { printf "no such source: %s\n", $i > "/dev/stderr"; exit 1 }
-            print $i, minimum[$i], url[$i]
+            if (seen[$i]++) continue
+            print $i, minimum[$i], license[$i], url[$i]
         }
     }
     END {
@@ -233,7 +288,7 @@ materialise | awk -v want="$tier" '
 count=0
 used=""
 
-while read -r sname minimum url; do
+while read -r sname minimum license url; do
     case "$minimum" in
         *[!0-9]*)
             printf 'blocklist release: invalid minimum: %s\n' "$minimum" >&2
@@ -297,8 +352,8 @@ while read -r sname minimum url; do
         rm -f "$target.trie"
 
         sourceHash=$(sha256sum "$target")
-        printf 'source %s %s %s %s %s\n' "$sname" "${sourceHash%% *}" \
-            "$(wc -c < "$target")" "$accepted" "$url" \
+        printf 'source %s %s %s %s %s %s\n' "$sname" "${sourceHash%% *}" \
+            "$(wc -c < "$target")" "$accepted" "$license" "$url" \
             >> "$outputDir/manifest.sources"
     fi
 

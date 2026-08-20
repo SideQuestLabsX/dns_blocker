@@ -56,7 +56,7 @@ jobs:
             "Compiled at ${GITHUB_SHA}. One trie a tier, $(wc -l < tiers) of them." \
             "dns_blocker-blocklist.sources names every source and the composition of every tier." \
             "dns_blocker-blocklist-sources.tar.gz holds the fetched lists themselves." \
-            "Upstream sources are GPL-3.0, so every trie is a combined work under GPL-3.0." \
+            "Every tier draws on a GPL-3.0 source, and every other source is GPL-3.0 compatible, so each trie is a combined work under GPL-3.0." \
             "That manifest and that archive together are its corresponding source. See THIRD_PARTY_LICENSES.md.")
 
           gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" \

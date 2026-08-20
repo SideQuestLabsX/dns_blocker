@@ -9,7 +9,7 @@ a copy of it.
 |---|---|---|
 | `dns_blocker`, `minimal` profile | musl libc | MIT |
 | `dns_blocker`, `encrypted` profile | musl libc, Mbed TLS with Everest and p256-m | MIT, Apache-2.0 |
-| `dns_blocker-blocklist-<tier>.trie` | StevenBlack `hosts`, hagezi `dns-blocklists`, oisd | MIT, GPL-3.0 |
+| `dns_blocker-blocklist-<tier>.trie` | StevenBlack `hosts` components, adaway.org, tiuxo, KADhosts, minecraft-hosts, URLHaus, hagezi `dns-blocklists`, oisd | GPL-3.0 combined work. See below |
 
 The daemon reads the blocklist asset as data at runtime. The binary contains no
 part of it, so the terms on the asset apply only to the asset.
@@ -455,9 +455,22 @@ obstacle to adoption, that text has been removed.
 from them. The weekly pipeline fetches them, concatenates them and compiles each
 tier with `tools/mkblocklist.c` into `dns_blocker-blocklist-<tier>.trie`.
 
+The pipeline fetches the StevenBlack inputs **individually**, from
+`data/<name>/hosts`, rather than the merged `master/hosts`. The merge also
+carries `mvps.org` and `someonewhocares.org`, whose NonCommercial terms cannot
+be conveyed under GPL-3.0, and `yoyo.org`, which states no license. Those three
+are excluded, so every source below is GPL-3.0 or GPL-3.0 compatible.
+
 | Source | Used for | License |
 |---|---|---|
-| [StevenBlack/hosts](https://github.com/StevenBlack/hosts) | every tier | MIT |
+| [StevenBlack/hosts](https://github.com/StevenBlack/hosts) `data/StevenBlack` | every tier | MIT |
+| [StevenBlack/hosts](https://github.com/StevenBlack/hosts) `data/Badd-Boyz-Hosts`, `data/hostsVN`, `data/UncheckyAds` | every tier | MIT |
+| [StevenBlack/hosts](https://github.com/StevenBlack/hosts) `data/add.2o7Net`, `data/add.Dead`, `data/add.Risk`, `data/add.Spam` | every tier | MIT |
+| [adaway.org](https://adaway.org/) via `data/adaway.org` | every tier | CC BY 3.0 |
+| [tiuxo/hosts](https://github.com/tiuxo/hosts) via `data/tiuxo` | every tier | CC BY 4.0 |
+| [KADhosts](https://kadantiscam.netlify.app/) via `data/KADhosts` | every tier | CC BY-SA 4.0 |
+| [minecraft-hosts](https://github.com/jamiemansfield/minecraft-hosts) via `data/minecraft-hosts` | every tier | CC0-1.0 |
+| [URLHaus](https://urlhaus.abuse.ch/) via `data/URLHaus` | every tier | CC0-1.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) light, pro, ultimate | the three base tiers | GPL-3.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) nsfw | the compact `nsfw` category | GPL-3.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) tif.mini, tif.medium, tif | the `tif` category | GPL-3.0 |
@@ -468,13 +481,46 @@ tier with `tools/mkblocklist.c` into `dns_blocker-blocklist-<tier>.trie`.
 | [oisd](https://oisd.nl/) nsfw | the standard and aggressive `nsfw` category | GPL-3.0 |
 
 Every tier includes a GPL-3.0 source, so every compiled trie is a combined work
-under GPL-3.0. The release publishes `dns_blocker-blocklist.sources`, which
-records each fetched list and every tier's composition. It also publishes the
-fetched lists in `dns_blocker-blocklist-sources.tar.gz`. Together they provide
-the corresponding source for each trie. `tools/mkblocklist.c` is in this
-repository under The Unlicense.
+under GPL-3.0. The other licenses above are GPL-3.0 compatible: MIT and CC0-1.0
+impose no conflicting condition, CC BY 3.0 and CC BY 4.0 require attribution
+only, and Creative Commons declares CC BY-SA 4.0 one-way compatible with
+GPL-3.0. Attribution for the CC BY sources is carried by the table above and by
+`dns_blocker-blocklist.sources`.
+
+The release publishes `dns_blocker-blocklist.sources`, which records each
+fetched list with its digest, size, accepted-name count and license, and every
+tier's composition. It also publishes the fetched lists in
+`dns_blocker-blocklist-sources.tar.gz`. Together with `tools/mkblocklist.c`,
+`tools/build-blocklist-release.sh` and `src/config.h` at the tagged commit named
+in the release, they provide the corresponding source for each trie.
+`tools/mkblocklist.c` is in this repository under The Unlicense.
+
+### Creative Commons sources
+
+`adaway.org` is CC BY 3.0, `tiuxo` is CC BY 4.0, `KADhosts` is CC BY-SA 4.0, and
+`minecraft-hosts` and `URLHaus` are CC0-1.0. Each of these licenses is satisfied
+by supplying its canonical URI rather than its full text: CC BY 3.0 section 4(a)
+asks for "a copy of, or the Uniform Resource Identifier for, this License", and
+the 4.0 licenses accept a URI or hyperlink in section 3(a)(1).
+
+| License | URI |
+|---|---|
+| CC BY 3.0 | https://creativecommons.org/licenses/by/3.0/legalcode |
+| CC BY 4.0 | https://creativecommons.org/licenses/by/4.0/legalcode |
+| CC BY-SA 4.0 | https://creativecommons.org/licenses/by-sa/4.0/legalcode |
+| CC0 1.0 | https://creativecommons.org/publicdomain/zero/1.0/legalcode |
+
+Attribution, as those licenses require: AdAway (https://adaway.org/), tiuxo
+(https://github.com/tiuxo/hosts), KADhosts
+(https://kadantiscam.netlify.app/), minecraft-hosts
+(https://github.com/jamiemansfield/minecraft-hosts), URLHaus by abuse.ch
+(https://urlhaus.abuse.ch/).
 
 ### StevenBlack/hosts
+
+Covers the components this release fetches from `data/`. It does not cover the
+merged `master/hosts`, which aggregates further lists under their own terms and
+is not used here.
 
 ```
 The MIT License (MIT)
