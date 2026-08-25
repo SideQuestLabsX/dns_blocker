@@ -172,7 +172,8 @@ and you take the combination you want rather than a bundle somebody else chose.
 
 `CFG_BLOCKLIST_TIER` selects the tier a build downloads. The same asset name is
 used for the download and digest lookup, so a run cannot fetch one tier and
-verify another.
+verify another. After selecting the digest, the daemon hashes the active mapped
+trie and skips the asset transfer when the bytes match.
 
 To change the tier without rebuilding, write the name into `/etc/dns_blocker/tier`
 and restart:

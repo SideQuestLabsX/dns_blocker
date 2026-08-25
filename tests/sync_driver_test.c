@@ -2,7 +2,11 @@
 
 #include "sync.h"
 
+#include "dnsbuild.h"
+#include "trieimage.h"
+
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
@@ -40,6 +44,8 @@ static size_t   G_READ_AT;
 static size_t   G_STALL_REPLY;
 static size_t   G_STALL_AFTER;
 static uint32_t G_NOW_MS;
+static char     G_REQUEST[MAX_REPLIES][CFG_FETCH_REQUEST_BYTES];
+static size_t   G_REQUESTS;
 
 static void ScriptReset(void)
 {
@@ -48,6 +54,7 @@ static void ScriptReset(void)
     G_READ_AT     = 0;
     G_STALL_REPLY = SIZE_MAX;
     G_STALL_AFTER = SIZE_MAX;
+    G_REQUESTS    = 0;
 }
 
 static void Reply(const char *head, const void *body, size_t bodyLen)
@@ -139,7 +146,14 @@ ssize_t TlsChannelRead(TlsChannel *channel, uint8_t *out, size_t cap)
 
 ssize_t TlsChannelWrite(TlsChannel *channel, const uint8_t *data, size_t len)
 {
-    (void)data;
+    if(G_REQUESTS < MAX_REPLIES)
+    {
+        size_t copy = (len < sizeof G_REQUEST[0] - 1)
+                    ? len : sizeof G_REQUEST[0] - 1;
+        memcpy(G_REQUEST[G_REQUESTS], data, copy);
+        G_REQUEST[G_REQUESTS][copy] = '\0';
+        G_REQUESTS++;
+    }
     channel->want = TlsIo_WantWrite;
     return (ssize_t)len;
 }
@@ -192,7 +206,15 @@ static bool Begin(SyncJob *job, const char *path, const char *tier)
 {
     UpstreamPoolInit(&G_POOL, G_NOW_MS);
     UpstreamPoolSetTlsBackend(&G_POOL, &G_BACKEND);
-    return SyncBegin(job, &G_POOL, path, tier);
+    return SyncBegin(job, &G_POOL, path, tier, NULL);
+}
+
+static bool BeginWithList(SyncJob *job, const char *path,
+                          const Blocklist *list)
+{
+    UpstreamPoolInit(&G_POOL, G_NOW_MS);
+    UpstreamPoolSetTlsBackend(&G_POOL, &G_BACKEND);
+    return SyncBegin(job, &G_POOL, path, NULL, list);
 }
 
 static bool Answer(SyncJob *job)
@@ -276,6 +298,205 @@ static size_t UsedTlsSlots(const UpstreamPool *pool)
     return used;
 }
 
+static bool WriteBytes(const char *path, const uint8_t *data, size_t len)
+{
+    FILE *file = fopen(path, "wb");
+    if(file == NULL)
+        return false;
+
+    bool bOk = fwrite(data, 1, len, file) == len;
+    return fclose(file) == 0 && bOk;
+}
+
+static uint8_t *BuildTrie(const char *name, size_t *size)
+{
+    TrieImage build;
+    char     *reversed = TrieReverse(name);
+
+    TrieImageInit(&build, CFG_MAX_NAME_BYTES);
+    CHECK(TrieImageAdd(&build, reversed, ""));
+    uint8_t *image = TrieImageFinish(&build, size);
+    TrieImageRelease(&build);
+    free(reversed);
+    return image;
+}
+
+static bool BuildListing(const uint8_t *data, size_t len,
+                         char *out, size_t cap)
+{
+    static const char hex[] = "0123456789abcdef";
+    uint8_t digest[FETCH_DIGEST_BYTES];
+
+    if(mbedtls_sha256(data, len, digest, 0) != 0
+       || cap < FETCH_DIGEST_BYTES * 2 + 3 + sizeof CFG_BLOCKLIST_ASSET)
+        return false;
+
+    for(size_t i = 0; i < sizeof digest; i++)
+    {
+        out[i * 2]     = hex[digest[i] >> 4];
+        out[i * 2 + 1] = hex[digest[i] & 0x0Fu];
+    }
+
+    snprintf(out + FETCH_DIGEST_BYTES * 2,
+             cap - FETCH_DIGEST_BYTES * 2, "  %s\n", CFG_BLOCKLIST_ASSET);
+    return true;
+}
+
+static bool RequestContains(const char *text)
+{
+    for(size_t i = 0; i < G_REQUESTS; i++)
+    {
+        if(strstr(G_REQUEST[i], text) != NULL)
+            return true;
+    }
+
+    return false;
+}
+
+static void TestUnchangedListSkipsTheAsset(const char *dir)
+{
+    SyncJob job;
+    Blocklist list;
+    char target[256];
+    char staging[256];
+    char listing[160];
+    size_t imageLen = 0;
+    uint8_t *image = BuildTrie("old.example", &imageLen);
+    struct stat before;
+    struct stat after;
+    struct timespec times[2] = {
+        { .tv_sec = 1700000000, .tv_nsec = 123456789 },
+        { .tv_sec = 1700000000, .tv_nsec = 123456789 }
+    };
+    unsigned resolves = 0;
+
+    snprintf(target, sizeof target, "%s/unchanged.trie", dir);
+    CHECK(SyncStagingPath(staging, sizeof staging, target));
+    CHECK(image != NULL && WriteBytes(target, image, imageLen));
+    CHECK(utimensat(AT_FDCWD, target, times, 0) == 0);
+    CHECK(BlocklistLoad(&list, target));
+    CHECK(stat(target, &before) == 0);
+    const uint8_t *mapped = list.base;
+
+    CHECK(BuildListing(image, imageLen, listing, sizeof listing));
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyBody(listing, strlen(listing));
+
+    CHECK(BeginWithList(&job, target, &list));
+    CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
+    CHECK(!SyncInstalled(&job));
+    CHECK(resolves == 2);
+    CHECK(G_REQUESTS == 2);
+    CHECK(!RequestContains(CFG_BLOCKLIST_ASSET));
+    CHECK(!Exists(staging));
+    CHECK(stat(target, &after) == 0);
+    CHECK(before.st_ino == after.st_ino);
+    CHECK(before.st_mtim.tv_sec == after.st_mtim.tv_sec);
+    CHECK(before.st_mtim.tv_nsec == after.st_mtim.tv_nsec);
+    CHECK(list.base == mapped);
+    CHECK(list.size == imageLen);
+
+    SyncEnd(&job);
+    BlocklistUnload(&list);
+    free(image);
+    unlink(target);
+}
+
+static void TestChangedListInstallsAndReloads(const char *dir)
+{
+    SyncJob job;
+    Blocklist list;
+    char target[256];
+    char listing[160];
+    size_t oldLen = 0;
+    size_t newLen = 0;
+    uint8_t *oldImage = BuildTrie("old.example", &oldLen);
+    uint8_t *newImage = BuildTrie("new.example", &newLen);
+    WireName oldName;
+    WireName newName;
+    unsigned resolves = 0;
+
+    snprintf(target, sizeof target, "%s/changed.trie", dir);
+    CHECK(oldImage != NULL && newImage != NULL);
+    CHECK(WriteBytes(target, oldImage, oldLen));
+    CHECK(BlocklistLoad(&list, target));
+    const uint8_t *mapped = list.base;
+    CHECK(NameOf("old.example", &oldName));
+    CHECK(NameOf("new.example", &newName));
+    CHECK(BlocklistContains(&list, &oldName));
+    CHECK(!BlocklistContains(&list, &newName));
+
+    CHECK(BuildListing(newImage, newLen, listing, sizeof listing));
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyBody(listing, strlen(listing));
+    ReplyBody(newImage, newLen);
+
+    CHECK(BeginWithList(&job, target, &list));
+    CHECK(Run(&job, 512, &resolves) == SyncStep_Done);
+    CHECK(SyncInstalled(&job));
+    CHECK(resolves == 3);
+    CHECK(G_REQUESTS == 3);
+    CHECK(RequestContains(CFG_BLOCKLIST_ASSET));
+    CHECK(list.base == mapped);
+    CHECK(BlocklistReload(&list, target));
+    CHECK(list.base != mapped);
+    CHECK(!BlocklistContains(&list, &oldName));
+    CHECK(BlocklistContains(&list, &newName));
+
+    SyncEnd(&job);
+    BlocklistUnload(&list);
+    free(oldImage);
+    free(newImage);
+    unlink(target);
+}
+
+static void TestActiveHashYieldsBetweenChunks(const char *dir)
+{
+    SyncJob job;
+    char target[256];
+    char listing[160];
+    size_t size = 128u * 1024u;
+    uint8_t *data = malloc(size);
+    Blocklist list = {
+        .base = data,
+        .size = size,
+        .source = BlocklistSource_Mapped
+    };
+
+    snprintf(target, sizeof target, "%s/chunked.trie", dir);
+    CHECK(data != NULL);
+    if(data == NULL)
+        return;
+
+    memset(data, 'x', size);
+    CHECK(BuildListing(data, size, listing, sizeof listing));
+    ScriptReset();
+    ReplyBody(G_LOCATOR, strlen(G_LOCATOR));
+    ReplyBody(listing, strlen(listing));
+    CHECK(BeginWithList(&job, target, &list));
+
+    for(unsigned i = 0; i < 64 && !SyncNeedsProgress(&job); i++)
+    {
+        SyncStep step = SyncProgress(&job, G_NOW_MS);
+        if(step == SyncStep_NeedAddress)
+            CHECK(Answer(&job));
+        else
+            CHECK(step == SyncStep_Again);
+    }
+
+    CHECK(SyncNeedsProgress(&job));
+    CHECK(SyncProgress(&job, G_NOW_MS) == SyncStep_Again);
+    CHECK(SyncNeedsProgress(&job));
+    CHECK(job.activeAt > 0 && job.activeAt < size);
+    CHECK(SyncProgress(&job, G_NOW_MS) == SyncStep_Done);
+    CHECK(!SyncInstalled(&job));
+
+    SyncEnd(&job);
+    free(data);
+}
+
 static void TestHappyPath(const char *dir)
 {
     SyncJob  job;
@@ -325,7 +546,7 @@ static void TestSyncCompletesWithTwoFreeSlots(const char *dir)
     ReplyBody(G_LISTING, strlen(G_LISTING));
     ReplyBody("hello\n", 6);
 
-    CHECK(SyncBegin(&job, &pool, target, NULL));
+    CHECK(SyncBegin(&job, &pool, target, NULL, NULL));
     CHECK(UsedTlsSlots(&pool) == CFG_TLS_SLOTS - 1);
     CHECK(Run(&job, 512, NULL) == SyncStep_Done);
     CHECK(SizeOf(target) == 6);
@@ -380,7 +601,7 @@ static void TestRefusedSyncKeepsResolverHealthy(const char *dir)
     }
 
     uint64_t failures = pool.members[0].failures;
-    CHECK(!SyncBegin(&job, &pool, target, NULL));
+    CHECK(!SyncBegin(&job, &pool, target, NULL, NULL));
     CHECK(job.fail == SyncFail_Capacity);
     CHECK(job.state == SyncState_Failed);
     CHECK(strcmp(SyncFailText(&job),
@@ -742,7 +963,7 @@ static void TestRefusals(const char *dir)
 
     snprintf(target, sizeof target, "%s/guard.trie", dir);
 
-    CHECK(!SyncBegin(NULL, &G_POOL, target, NULL));
+    CHECK(!SyncBegin(NULL, &G_POOL, target, NULL, NULL));
 
     /* A refused start still has to leave a defined job. The daemon reads
        job->fail to report why the run did not begin, and an immutable build
@@ -750,13 +971,13 @@ static void TestRefusals(const char *dir)
        undefined behaviour on a schedule. 0xA5 stands in for whatever the stack
        held. */
     memset(&job, 0xA5, sizeof job);
-    CHECK(!SyncBegin(&job, NULL, target, NULL));
+    CHECK(!SyncBegin(&job, NULL, target, NULL, NULL));
     CHECK(job.fail == SyncFail_None);
     CHECK(job.state == SyncState_Idle);
     CHECK(strcmp(SyncFailText(&job), "no failure") == 0);
 
     memset(&job, 0xA5, sizeof job);
-    CHECK(!SyncBegin(&job, &G_POOL, NULL, NULL));
+    CHECK(!SyncBegin(&job, &G_POOL, NULL, NULL, NULL));
     CHECK(job.fail == SyncFail_None);
     CHECK(job.state == SyncState_Idle);
     CHECK(strcmp(SyncFailText(&job), "no failure") == 0);
@@ -784,6 +1005,7 @@ static void TestRefusals(const char *dir)
     CHECK(SyncProgress(&job, G_NOW_MS) == SyncStep_Failed);
     CHECK(SyncProgress(NULL, G_NOW_MS) == SyncStep_Failed);
     CHECK(SyncHost(NULL) == NULL);
+    CHECK(!SyncNeedsProgress(NULL));
 }
 
 int main(void)
@@ -805,6 +1027,9 @@ int main(void)
     G_BACKEND.bReady = true;
     G_NOW_MS = 1000;
 
+    TestUnchangedListSkipsTheAsset(dir);
+    TestChangedListInstallsAndReloads(dir);
+    TestActiveHashYieldsBetweenChunks(dir);
     TestHappyPath(dir);
     TestSyncCompletesWithTwoFreeSlots(dir);
     TestRefusedSyncKeepsResolverHealthy(dir);

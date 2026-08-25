@@ -1,6 +1,7 @@
 #ifndef DNS_BLOCKER_SYNC_H
 #define DNS_BLOCKER_SYNC_H
 
+#include "blocklist.h"
 #include "fetch.h"
 #include "upstream.h"
 
@@ -63,6 +64,7 @@ typedef enum
     SyncState_Idle,
     SyncState_Resolve,
     SyncState_Transfer,
+    SyncState_Compare,
     SyncState_Done,
     SyncState_Failed
 } SyncState;
@@ -123,14 +125,19 @@ typedef struct
 
     uint8_t  metadataText[CFG_SYNC_DIGEST_BYTES];
     uint8_t  want[FETCH_DIGEST_BYTES];
+    const Blocklist *active;
+    mbedtls_sha256_context activeSha;
+    size_t   activeAt;
     bool     bHaveWant;
+    bool     bInstalled;
+    bool     bActiveShaReady;
     SyncFail fail;
 } SyncJob;
 
 /* Prepares a run against `path` and reserves its shared TLS slot. `tier` NULL
    uses the compiled default */
 bool SyncBegin(SyncJob *job, UpstreamPool *pool, const char *path,
-               const char *tier);
+               const char *tier, const Blocklist *active);
 
 /* The host the driver is waiting on, valid after SyncStep_NeedAddress. */
 const char *SyncHost(const SyncJob *job);
@@ -144,6 +151,8 @@ short SyncEvents(const SyncJob *job);
    caller hand it to a poll loop it already owns. */
 int SyncFd(const SyncJob *job);
 SyncStep SyncProgress(SyncJob *job, uint32_t nowMs);
+bool SyncNeedsProgress(const SyncJob *job);
+bool SyncInstalled(const SyncJob *job);
 void SyncEnd(SyncJob *job);
 
 /* Which transfer was running, and why it stopped. Both are for a log line and

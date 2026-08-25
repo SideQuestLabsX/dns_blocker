@@ -247,7 +247,8 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
         if(!SyncDue(nowMs, run->dueMs))
             return;
 
-        if(!SyncBegin(run->job, run->server->upstreams, run->path, run->tier))
+        if(!SyncBegin(run->job, run->server->upstreams, run->path, run->tier,
+                      run->list))
         {
             if(run->job->fail == SyncFail_None)
             {
@@ -327,11 +328,14 @@ static void SyncTick(SyncRun *run, uint32_t nowMs)
 
     if(step == SyncStep_Done)
     {
-        if(BlocklistReload(run->list, run->path))
-            fprintf(stderr, "sync: installed %zu bytes\n", run->list->size);
-        else
-            fputs("sync: the installed list did not map, keeping the old one\n",
-                  stderr);
+        if(SyncInstalled(run->job))
+        {
+            if(BlocklistReload(run->list, run->path))
+                fprintf(stderr, "sync: installed %zu bytes\n", run->list->size);
+            else
+                fputs("sync: the installed list did not map, keeping the old one\n",
+                      stderr);
+        }
 
         SyncStop(run, nowMs, CFG_SYNC_PERIOD_MS, NULL);
         return;
@@ -550,13 +554,16 @@ int main(int argc, char **argv)
     while(!G_STOP)
     {
         uint32_t nowMs = ServerNowMilliseconds();
+        int      pollTimeoutMs = 1000;
 
 #if defined(PROFILE_ENCRYPTED)
         if(bSyncEnabled)
         {
             SyncTick(&run, nowMs);
             ServerWatch(&server, run.bActive ? SyncFd(&sync) : -1,
-                        run.bActive ? SyncEvents(&sync) : 0);
+                         run.bActive ? SyncEvents(&sync) : 0);
+            if(run.bActive && SyncNeedsProgress(&sync))
+                pollTimeoutMs = 0;
         }
 #endif
 
@@ -579,7 +586,7 @@ int main(int argc, char **argv)
             statusDueMs = nowMs + CFG_STATUS_PERIOD_MS;
         }
 
-        if(ServerPoll(&server, 1000) < 0)
+        if(ServerPoll(&server, pollTimeoutMs) < 0)
         {
             fputs("dns_blocker: poll failed\n", stderr);
             break;

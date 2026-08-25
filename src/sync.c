@@ -11,6 +11,8 @@
 
 static const char G_SUFFIX[] = ".new";
 
+#define SYNC_HASH_CHUNK_BYTES (64u * 1024u)
+
 _Static_assert(CFG_SYNC_RELEASE_TAG_BYTES + 1 <= CFG_SYNC_DIGEST_BYTES,
                "locator body exceeds its buffer");
 
@@ -378,7 +380,7 @@ static bool SetPhaseUrl(SyncJob *job)
 }
 
 bool SyncBegin(SyncJob *job, UpstreamPool *pool, const char *path,
-               const char *tier)
+               const char *tier, const Blocklist *active)
 {
     if(job == NULL)
         return false;
@@ -393,7 +395,8 @@ bool SyncBegin(SyncJob *job, UpstreamPool *pool, const char *path,
     if(pool == NULL || path == NULL)
         return false;
 
-    job->pool = pool;
+    job->pool   = pool;
+    job->active = active;
 
     if(!SyncBuildAssetName(job->asset, sizeof job->asset,
                            (tier != NULL) ? tier : CFG_BLOCKLIST_TIER))
@@ -552,6 +555,56 @@ static SyncStep FinishDigest(SyncJob *job)
     }
 
     job->bHaveWant = true;
+
+    if(job->active != NULL
+       && job->active->source == BlocklistSource_Mapped
+       && job->active->base != NULL && job->active->size != 0)
+    {
+        FetchEnd(&job->job);
+        mbedtls_sha256_init(&job->activeSha);
+        if(mbedtls_sha256_starts(&job->activeSha, 0) == 0)
+        {
+            job->activeAt        = 0;
+            job->bActiveShaReady = true;
+            job->state           = SyncState_Compare;
+            return SyncStep_Again;
+        }
+
+        mbedtls_sha256_free(&job->activeSha);
+    }
+
+    return StartPhase(job, SyncPhase_Asset);
+}
+
+static SyncStep CompareActive(SyncJob *job)
+{
+    size_t remaining = job->active->size - job->activeAt;
+    size_t count = (remaining < SYNC_HASH_CHUNK_BYTES)
+                 ? remaining : SYNC_HASH_CHUNK_BYTES;
+
+    if(mbedtls_sha256_update(&job->activeSha,
+                             job->active->base + job->activeAt, count) != 0)
+    {
+        mbedtls_sha256_free(&job->activeSha);
+        job->bActiveShaReady = false;
+        return StartPhase(job, SyncPhase_Asset);
+    }
+
+    job->activeAt += count;
+    if(job->activeAt < job->active->size)
+        return SyncStep_Again;
+
+    uint8_t active[FETCH_DIGEST_BYTES];
+    bool bFinished = mbedtls_sha256_finish(&job->activeSha, active) == 0;
+    mbedtls_sha256_free(&job->activeSha);
+    job->bActiveShaReady = false;
+
+    if(bFinished && memcmp(active, job->want, sizeof active) == 0)
+    {
+        job->state = SyncState_Done;
+        return SyncStep_Done;
+    }
+
     return StartPhase(job, SyncPhase_Asset);
 }
 
@@ -580,6 +633,7 @@ static SyncStep FinishAsset(SyncJob *job)
         return SyncStep_Failed;
     }
 
+    job->bInstalled = true;
     job->state = SyncState_Done;
     return SyncStep_Done;
 }
@@ -594,6 +648,9 @@ SyncStep SyncProgress(SyncJob *job, uint32_t nowMs)
 
     if(job->state == SyncState_Done)
         return SyncStep_Done;
+
+    if(job->state == SyncState_Compare)
+        return CompareActive(job);
 
     if(job->state != SyncState_Transfer)
         return SyncStep_Failed;
@@ -681,6 +738,16 @@ const char *SyncFailText(const SyncJob *job)
     return "unknown";
 }
 
+bool SyncInstalled(const SyncJob *job)
+{
+    return job != NULL && job->state == SyncState_Done && job->bInstalled;
+}
+
+bool SyncNeedsProgress(const SyncJob *job)
+{
+    return job != NULL && job->state == SyncState_Compare;
+}
+
 void SyncEnd(SyncJob *job)
 {
     if(job == NULL)
@@ -688,6 +755,12 @@ void SyncEnd(SyncJob *job)
 
     FetchEnd(&job->job);
     job->job.channel = NULL;
+
+    if(job->bActiveShaReady)
+    {
+        mbedtls_sha256_free(&job->activeSha);
+        job->bActiveShaReady = false;
+    }
 
     if(job->pool != NULL && job->tlsSlot != UPSTREAM_NONE)
         UpstreamPoolReleaseFetchChannel(job->pool, job->tlsSlot);
