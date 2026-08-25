@@ -54,6 +54,7 @@ typedef struct
     uint32_t    answerTtl;
     int         padding;
     bool        bSilent;
+    bool        bCompressOwner;
     const char *silentName;
     int         delayMs;
     volatile bool bStop;
@@ -62,9 +63,13 @@ typedef struct
 
 /* The answer has to be owned by the name that was asked, or the daemon's
    bailiwick check rejects it, which is exactly what that check is for. */
-static void PutAnswerFor(Builder *b, const WireQuestion *question, uint32_t ttl)
+static void PutAnswerFor(Builder *b, const WireQuestion *question, uint32_t ttl,
+                         bool bCompressOwner)
 {
-    PutBytes(b, question->name.wire, question->name.len);
+    if(bCompressOwner)
+        PutU16(b, 0xC00Cu);
+    else
+        PutBytes(b, question->name.wire, question->name.len);
     PutU16(b, WIRE_TYPE_A);
     PutU16(b, WIRE_CLASS_IN);
     PutU32(b, ttl);
@@ -132,11 +137,12 @@ static void *FakeUpstreamMain(void *arg)
         PutHeader(&b, header.id, 0x8180u, 1, 1, 0, 0);
         PutBytes(&b, query + WIRE_HEADER_BYTES,
                  reader.pos - WIRE_HEADER_BYTES);
-        PutAnswerFor(&b, &question, fake->answerTtl);
+        PutAnswerFor(&b, &question, fake->answerTtl, fake->bCompressOwner);
 
         /* Optional filler so the reply crosses the 512-byte UDP limit. */
         for(int i = 0; i < fake->padding; i++)
-            PutAnswerFor(&b, &question, fake->answerTtl);
+            PutAnswerFor(&b, &question, fake->answerTtl,
+                         fake->bCompressOwner);
 
         if(fake->padding > 0)
         {
@@ -247,16 +253,17 @@ typedef struct
 static void FixtureDown(Fixture *fix);
 
 static bool FixtureStart(Fixture *fix, uint32_t ttl, int padding, bool bSilent,
-                         bool bPtrRoute)
+                         bool bPtrRoute, bool bCompressOwner)
 {
     memset(fix, 0, sizeof *fix);
     fix->fake.fd  = -1;
     fix->fake2.fd = -1;
 
     fix->fake.fd        = OpenLoopbackUdp(UPSTREAM_PORT);
-    fix->fake.answerTtl = ttl;
-    fix->fake.padding   = padding;
-    fix->fake.bSilent   = bSilent;
+    fix->fake.answerTtl      = ttl;
+    fix->fake.padding        = padding;
+    fix->fake.bSilent        = bSilent;
+    fix->fake.bCompressOwner = bCompressOwner;
 
     if(fix->fake.fd < 0)
         goto fail;
@@ -302,12 +309,17 @@ fail:
 
 static bool FixtureUp(Fixture *fix, uint32_t ttl, int padding, bool bSilent)
 {
-    return FixtureStart(fix, ttl, padding, bSilent, false);
+    return FixtureStart(fix, ttl, padding, bSilent, false, false);
 }
 
 static bool FixturePtrRouteUp(Fixture *fix, uint32_t ttl)
 {
-    return FixtureStart(fix, ttl, 0, false, true);
+    return FixtureStart(fix, ttl, 0, false, true, false);
+}
+
+static bool FixtureCompressedOwnerUp(Fixture *fix, uint32_t ttl)
+{
+    return FixtureStart(fix, ttl, 0, false, false, true);
 }
 
 /* A second resolver that always answers, behind a first one that never does,
@@ -418,6 +430,37 @@ static void PumpBriefly(Server *server, int times)
         ServerPoll(server, 10);
 }
 
+static bool ReadQuestionAndOwner(const uint8_t *reply, size_t replyLen,
+                                 WireQuestion *question, WireRecord *record,
+                                 size_t *ownerAt)
+{
+    Reader     reader;
+    WireHeader header;
+
+    ReaderInit(&reader, reply, replyLen);
+    if(!WireParseHeader(&reader, &header) || header.qdCount != 1
+       || header.anCount == 0 || !WireParseQuestion(&reader, question))
+        return false;
+
+    if(ownerAt != NULL)
+        *ownerAt = reader.pos;
+
+    return WireReadRecord(&reader, record);
+}
+
+static bool ReplyNamesUseCase(const uint8_t *reply, size_t replyLen,
+                              const char *name, size_t *ownerAt)
+{
+    WireName     original;
+    WireQuestion answered;
+    WireRecord   record;
+
+    return NameOf(name, &original)
+        && ReadQuestionAndOwner(reply, replyLen, &answered, &record, ownerAt)
+        && WireNameEqualExact(&answered.name, &original)
+        && WireNameEqualExact(&record.name, &original);
+}
+
 static void TestUdpQueryIsForwardedAndAnswered(void)
 {
     Fixture  fix;
@@ -434,7 +477,7 @@ static void TestUdpQueryIsForwardedAndAnswered(void)
     CHECK(client >= 0);
 
     size_t queryLen = BuildQuery(query, sizeof query, 0xBEEF,
-                                 "a.example.com", WIRE_TYPE_A);
+                                 "FoRwArDeD.ExAmPlE.CoM", WIRE_TYPE_A);
     CHECK(send(client, query, queryLen, 0) == (ssize_t)queryLen);
 
     Pump(&fix.server, 6);
@@ -450,6 +493,9 @@ static void TestUdpQueryIsForwardedAndAnswered(void)
         CHECK((MsgFlags(reply, (size_t)got) & MSG_FLAG_QR) != 0);
         CHECK(fix.server.forwarded == 1);
         CHECK(fix.server.hits == 0);
+
+        CHECK(ReplyNamesUseCase(reply, (size_t)got,
+                                "FoRwArDeD.ExAmPlE.CoM", NULL));
     }
 
     close(client);
@@ -575,7 +621,7 @@ static void TestHeldQueryTimesOutWithoutBlamingAnUpstream(void)
     FixtureDown(&fix);
 }
 
-static void TestSecondQueryIsACacheHit(void)
+static void TestClientsRestoreCaseOnCacheHits(void)
 {
     Fixture fix;
     uint8_t query[512];
@@ -587,30 +633,84 @@ static void TestSecondQueryIsACacheHit(void)
         return;
     }
 
-    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
-    CHECK(client >= 0);
+    int seeder  = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    int clientA = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    int clientB = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(seeder >= 0 && clientA >= 0 && clientB >= 0);
 
     size_t queryLen = BuildQuery(query, sizeof query, 0x1111,
-                                 "a.example.com", WIRE_TYPE_A);
-    send(client, query, queryLen, 0);
+                                 "cache.example.com", WIRE_TYPE_A);
+    send(seeder, query, queryLen, 0);
     Pump(&fix.server, 6);
-    recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    recv(seeder, reply, sizeof reply, MSG_DONTWAIT);
 
     queryLen = BuildQuery(query, sizeof query, 0x2222,
-                          "a.example.com", WIRE_TYPE_A);
-    send(client, query, queryLen, 0);
+                          "CaChE.Example.Com", WIRE_TYPE_A);
+    send(clientA, query, queryLen, 0);
     Pump(&fix.server, 6);
 
-    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    ssize_t got = recv(clientA, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        CHECK(ReplyNamesUseCase(reply, (size_t)got,
+                                "CaChE.Example.Com", NULL));
+    }
+
+    queryLen = BuildQuery(query, sizeof query, 0x3333,
+                          "cAcHe.eXAMPLE.cOM", WIRE_TYPE_A);
+    send(clientB, query, queryLen, 0);
+    Pump(&fix.server, 6);
+
+    got = recv(clientB, reply, sizeof reply, MSG_DONTWAIT);
     CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
 
     if(got > 0)
     {
         /* A hit replays stored bytes whose ID belongs to the first exchange. */
-        CHECK(MsgId(reply, (size_t)got) == 0x2222);
-        CHECK(fix.server.hits == 1);
+        CHECK(MsgId(reply, (size_t)got) == 0x3333);
+        CHECK(fix.server.hits == 2);
         CHECK(fix.server.forwarded == 1);
         CHECK(fix.fake.served == 1);
+
+        CHECK(ReplyNamesUseCase(reply, (size_t)got,
+                                "cAcHe.eXAMPLE.cOM", NULL));
+    }
+
+    close(seeder);
+    close(clientA);
+    close(clientB);
+    FixtureDown(&fix);
+}
+
+static void TestCompressedOwnerTracksClientQuestionCase(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureCompressedOwnerUp(&fix, 300))
+    {
+        fprintf(G_OUT, "SKIP compressed owner: cannot bind test ports\n");
+        return;
+    }
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0xCA5E,
+                                 "PoInTeR.Example.Com", WIRE_TYPE_A);
+    CHECK(send(client, query, queryLen, 0) == (ssize_t)queryLen);
+    Pump(&fix.server, 6);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        size_t ownerAt = 0;
+        CHECK(ReplyNamesUseCase(reply, (size_t)got,
+                                "PoInTeR.Example.Com", &ownerAt));
+        CHECK(reply[ownerAt] == 0xC0u && reply[ownerAt + 1] == 0x0Cu);
     }
 
     close(client);
@@ -1602,7 +1702,8 @@ int main(void)
     TestUdpQueryIsForwardedAndAnswered();
     TestHeldQueryIsSentWhenAChannelFrees();
     TestHeldQueryTimesOutWithoutBlamingAnUpstream();
-    TestSecondQueryIsACacheHit();
+    TestClientsRestoreCaseOnCacheHits();
+    TestCompressedOwnerTracksClientQuestionCase();
     TestTcpQuery();
     TestOversizedUdpAnswerSetsTruncated();
     TestUpstreamSilenceBecomesServfail();

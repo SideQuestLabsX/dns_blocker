@@ -46,6 +46,59 @@ size_t MsgQuestionEnd(const uint8_t *msg, size_t len)
     return reader.pos;
 }
 
+bool MsgRestoreQuestionCase(uint8_t *response, size_t responseLen,
+                            const uint8_t *query, size_t queryLen)
+{
+    Reader       queryReader;
+    Reader       responseReader;
+    Reader       restoredReader;
+    WireHeader   queryHeader;
+    WireHeader   responseHeader;
+    WireQuestion asked;
+    WireQuestion answered;
+    WireName     restored;
+
+    ReaderInit(&queryReader, query, queryLen);
+    ReaderInit(&responseReader, response, responseLen);
+
+    if(!WireParseHeader(&queryReader, &queryHeader)
+       || queryHeader.qdCount != 1
+       || !WireParseQuestion(&queryReader, &asked)
+       || !WireParseHeader(&responseReader, &responseHeader)
+       || responseHeader.qdCount != 1
+       || !WireParseQuestion(&responseReader, &answered)
+       || answered.type != asked.type || answered.klass != asked.klass
+       || !WireNameEqual(&answered.name, &asked.name)
+       || !WireRestoreNameCase(response, responseLen, WIRE_HEADER_BYTES,
+                               &asked.name))
+        return false;
+
+    ReaderInit(&restoredReader, response, responseLen);
+    restoredReader.pos = WIRE_HEADER_BYTES;
+    if(!WireReadName(&restoredReader, &restored)
+       || !WireNameEqualExact(&restored, &asked.name))
+        return false;
+
+    uint32_t total = (uint32_t)responseHeader.anCount
+                   + responseHeader.nsCount + responseHeader.arCount;
+    for(uint32_t i = 0; i < total; i++)
+    {
+        size_t     ownerAt = responseReader.pos;
+        WireRecord record;
+
+        if(!WireReadRecord(&responseReader, &record))
+            return false;
+
+        if(WireNameEqual(&record.name, &asked.name)
+           && !WireNameEqualExact(&record.name, &asked.name)
+           && !WireRestoreNameCase(response, responseLen, ownerAt,
+                                   &asked.name))
+            return false;
+    }
+
+    return true;
+}
+
 bool MsgBuildQuery(uint8_t *out, size_t cap, const WireName *name,
                    uint16_t type, uint16_t id, size_t *outLen)
 {

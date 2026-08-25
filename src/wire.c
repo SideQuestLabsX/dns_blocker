@@ -335,6 +335,43 @@ bool WireNameEqualExact(const WireName *a, const WireName *b)
     return a->len == b->len && memcmp(a->wire, b->wire, a->len) == 0;
 }
 
+bool WireRestoreNameCase(uint8_t *msg, size_t len, size_t offset,
+                         const WireName *name)
+{
+    if(msg == NULL || name == NULL || offset >= len)
+        return false;
+
+    Reader   reader;
+    WireName current;
+
+    ReaderInit(&reader, msg, len);
+    reader.pos = offset;
+    if(!WireReadName(&reader, &current) || !WireNameEqual(&current, name))
+        return false;
+
+    size_t pos    = offset;
+    size_t nameAt = 0;
+
+    for(;;)
+    {
+        uint8_t label = msg[pos];
+
+        if((label & 0xC0u) == 0xC0u)
+            return true;
+
+        if(label == 0)
+            return nameAt + 1 == name->len && name->wire[nameAt] == 0;
+
+        if(nameAt >= name->len || name->wire[nameAt] != label)
+            return false;
+
+        nameAt++;
+        memcpy(msg + pos + 1, name->wire + nameAt, label);
+        nameAt += label;
+        pos += 1u + label;
+    }
+}
+
 bool WireEncodeName(const char *dotted, WireName *out)
 {
     size_t len = strlen(dotted);

@@ -10,11 +10,12 @@
 #include <stdint.h>
 
 /* Stores each upstream response whole. A hit is a copy, a transaction ID
-   patch and a TTL rewrite.
+   patch, a TTL rewrite and client-case restoration.
 
    A slot keeps a 64-bit hash to select the bucket. To confirm a candidate, the
    code compares the question inside the stored message. This comparison is
-   exact, so a hash collision cannot give a wrong answer. */
+   case-insensitive and still confirms every wire label, so a hash collision
+   cannot give a wrong answer */
 
 typedef struct
 {

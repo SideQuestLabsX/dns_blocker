@@ -31,6 +31,11 @@ uint16_t MsgFlags(const uint8_t *msg, size_t len);
    parse that far. */
 size_t MsgQuestionEnd(const uint8_t *msg, size_t len);
 
+/* Applies exact client case to the echoed question and corresponding literal
+   labels in matching record owners without changing message offsets */
+bool MsgRestoreQuestionCase(uint8_t *response, size_t responseLen,
+                            const uint8_t *query, size_t queryLen);
+
 /* Response echoing the query's question and carrying no records. Used for
    blocked names, and for every failure the daemon reports itself. */
 bool MsgBuildReply(uint8_t *out, size_t cap, const uint8_t *query,

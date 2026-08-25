@@ -119,6 +119,11 @@ bool WireNameInZone(const WireName *name, const WireName *zone);
    the defence is the case surviving the round trip unchanged. */
 bool WireNameEqualExact(const WireName *a, const WireName *b);
 
+/* Rewrites literal label bytes at offset. Compression targets stay read-only,
+   so callers that require exact case must check the expanded result */
+bool WireRestoreNameCase(uint8_t *msg, size_t len, size_t offset,
+                         const WireName *name);
+
 /* Presentation name to wire form, lowercased, with a trailing dot accepted.
    Used for the names the daemon holds as text: the host map and the probe. */
 bool WireEncodeName(const char *dotted, WireName *out);

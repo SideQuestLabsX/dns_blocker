@@ -45,6 +45,20 @@ static void TestQuestionEnd(void)
     CHECK(MsgQuestionEnd(query, 3) == 0);
 }
 
+static void TestRestoreRequiresExactQuestionCase(void)
+{
+    uint8_t query[512];
+    uint8_t response[] = {
+        0x00, 0x01, 'A', 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xC0, 0x01, 0x00, 0x01, 0x00, 0x01
+    };
+    size_t queryLen = BuildQuery(query, sizeof query, 1, "a", WIRE_TYPE_A);
+
+    CHECK(!MsgRestoreQuestionCase(response, sizeof response, query, queryLen));
+    CHECK(response[2] == 'A');
+}
+
 static void TestBuildReplyEchoesTheQuestion(void)
 {
     uint8_t query[512];
@@ -311,6 +325,7 @@ int main(void)
 {
     TestIdRoundTrip();
     TestQuestionEnd();
+    TestRestoreRequiresExactQuestionCase();
     TestBuildReplyEchoesTheQuestion();
     TestCountsFromTheQueryAreNotInherited();
     TestTruncatedSetsTc();

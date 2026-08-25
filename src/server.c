@@ -584,6 +584,9 @@ void ServerResolveCancel(Server *server)
 static void TxFinish(Server *server, Transaction *tx,
                      uint8_t *reply, size_t replyLen)
 {
+    /* Best effort. A verified answer must not be refused for a cosmetic rewrite */
+    (void)MsgRestoreQuestionCase(reply, replyLen, tx->query, tx->queryLen);
+
     (void)CacheInsert(server->cache, reply, replyLen, ServerNowSeconds());
 
     if(tx->bInternal)
@@ -948,6 +951,7 @@ static Handled HandleQuery(Server *server, const uint8_t *query, size_t queryLen
     if(CacheLookup(server->cache, &question.name, question.type, question.klass,
                    ServerNowSeconds(), out, cap, outLen))
     {
+        (void)MsgRestoreQuestionCase(out, *outLen, query, queryLen);
         server->hits++;
         MsgSetId(out, *outLen, clientId);
 

@@ -329,6 +329,45 @@ static void TestNameEqualIsCaseInsensitive(void)
     CHECK(!WireNameEqual(&a, &c));
 }
 
+static void TestRestoreNameCaseLeavesPointerTargetsReadOnly(void)
+{
+    uint8_t msg[] = {
+        0x12, 0x34, 1, 'A', 0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0xC0, 0x02
+    };
+    WireName name = { .wire = { 1, 'a', 0 }, .len = 3 };
+
+    CHECK(WireRestoreNameCase(msg, sizeof msg, WIRE_HEADER_BYTES, &name));
+    CHECK(msg[3] == 'A');
+}
+
+static void TestRestoreNameCaseWithCompressedTail(void)
+{
+    uint8_t msg[] = {
+        HDR,
+        7, 'E', 'x', 'A', 'm', 'P', 'l', 'E', 3, 'C', 'o', 'M', 0,
+        3, 'W', 'W', 'W', 0xC0, 0x0C
+    };
+    static const uint8_t desired[] = {
+        HDR,
+        3, 'w', 'W', 'w', 7, 'e', 'X', 'a', 'M', 'p', 'L', 'e',
+        3, 'c', 'O', 'm', 0
+    };
+    WireName name;
+    WireName restored;
+    size_t ownerAt = 25;
+
+    CHECK(ParseName(desired, sizeof desired, WIRE_HEADER_BYTES, &name));
+    CHECK(WireRestoreNameCase(msg, sizeof msg, ownerAt, &name));
+    CHECK(msg[ownerAt + 1] == 'w');
+    CHECK(msg[ownerAt + 2] == 'W');
+    CHECK(msg[ownerAt + 3] == 'w');
+    CHECK(msg[ownerAt + 4] == 0xC0 && msg[ownerAt + 5] == 0x0C);
+    CHECK(ParseName(msg, sizeof msg, ownerAt, &restored));
+    CHECK(WireNameEqual(&restored, &name));
+    CHECK(!WireNameEqualExact(&restored, &name));
+}
+
 /* The parser must reject every prefix of a valid message before it reads past
    the end. This catches off-by-one bounds errors that the shaped cases miss. */
 static void TestAllPrefixesOfAValidMessage(void)
@@ -452,6 +491,8 @@ int main(void)
     TestEdnsNotAtRootRejected();
     TestRdLengthOverrun();
     TestNameEqualIsCaseInsensitive();
+    TestRestoreNameCaseLeavesPointerTargetsReadOnly();
+    TestRestoreNameCaseWithCompressedTail();
     TestAllPrefixesOfAValidMessage();
 
     if(G_FAILURES != 0)
