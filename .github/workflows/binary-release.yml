@@ -143,13 +143,14 @@ jobs:
 
       - name: Verify release assets
         run: |
-          cp THIRD_PARTY_LICENSES.md release/
+          cp THIRD_PARTY_LICENSES.md LICENSE release/
           for arch in x86_64 x86 aarch64 armv7 armv6 riscv64 loongarch64 mips mipsel; do
             test -s "release/dns_blocker-${arch}-minimal"
             test -s "release/dns_blocker-${arch}-encrypted"
             test -s "release/dns_blocker-${arch}.check"
           done
-          (cd release && sha256sum dns_blocker-* THIRD_PARTY_LICENSES.md \
+          test -s release/LICENSE
+          (cd release && sha256sum dns_blocker-* THIRD_PARTY_LICENSES.md LICENSE \
             > dns_blocker.sha256)
           (cd release && sha256sum -c dns_blocker.sha256)
 
@@ -159,10 +160,12 @@ jobs:
         run: |
           date=$(date -u +%Y-%m-%d)
           tag="binary-${date}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          notes=$(printf '%s\n\n%s\n%s\n' \
+          notes=$(printf '%s\n\n%s\n%s\n\n%s\n%s\n' \
             "Static musl binaries built from ${GITHUB_SHA}." \
             "Architectures: x86_64, x86, aarch64, armv7, armv6, riscv64, loongarch64, mips and mipsel." \
-            "Each architecture has minimal and encrypted profiles plus the health probe. Verify downloads with dns_blocker.sha256.")
+            "Each architecture has minimal and encrypted profiles plus the health probe. Verify downloads with dns_blocker.sha256." \
+            "This project's own code is public domain under The Unlicense, published here as LICENSE." \
+            "The encrypted profile links musl and Mbed TLS statically. THIRD_PARTY_LICENSES.md carries their terms as one asset for the whole release, not a copy inside each binary. No release binary contains blocklist data.")
 
           gh release create "$tag" release/* --target "$GITHUB_SHA" \
             --title "dns_blocker ${date}" --notes "$notes" --draft

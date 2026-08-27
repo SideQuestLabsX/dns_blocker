@@ -17,6 +17,7 @@ checksum="$outputDir/dns_blocker-blocklist.sha256"
 manifest="$outputDir/dns_blocker-blocklist.sources"
 archive="$outputDir/dns_blocker-blocklist-sources.tar.gz"
 licenses="$outputDir/THIRD_PARTY_LICENSES.md"
+project="$outputDir/LICENSE"
 
 # The sources, the base tiers and the categories combined onto them.
 #
@@ -215,6 +216,7 @@ if [ -z "$tier" ]; then
     done < "$outputDir/tiers"
 
     cp THIRD_PARTY_LICENSES.md "$licenses"
+    cp LICENSE "$project"
 
     # One manifest for the release: every source with the bytes and digest of
     # what was fetched, then the composition of every tier. With the archive it
@@ -231,7 +233,7 @@ if [ -z "$tier" ]; then
     : > "$checksum"
     for published in $(cd "$outputDir" && ls dns_blocker-blocklist-*.trie \
         dns_blocker-blocklist-sources.tar.gz dns_blocker-blocklist.sources \
-        THIRD_PARTY_LICENSES.md)
+        THIRD_PARTY_LICENSES.md LICENSE)
     do
         digest=$(sha256sum "$outputDir/$published")
         printf '%s  %s\n' "${digest%% *}" "$published" >> "$checksum"

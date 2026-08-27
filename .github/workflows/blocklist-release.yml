@@ -47,6 +47,7 @@ jobs:
             dns_blocker-blocklist.sources
             dns_blocker-blocklist-sources.tar.gz
             THIRD_PARTY_LICENSES.md
+            LICENSE
           )
           while read -r tier; do
             assets+=("dns_blocker-blocklist-${tier}.trie")
@@ -57,7 +58,7 @@ jobs:
             "dns_blocker-blocklist.sources names every source and the composition of every tier." \
             "dns_blocker-blocklist-sources.tar.gz holds the fetched lists themselves." \
             "Every tier draws on a GPL-3.0 source, and every other source is GPL-3.0 compatible, so each trie is a combined work under GPL-3.0." \
-            "That manifest and that archive together are its corresponding source. See THIRD_PARTY_LICENSES.md.")
+            "That manifest and that archive together are its corresponding source. THIRD_PARTY_LICENSES.md ships once for the whole release and names every source, its license and which tiers use it. LICENSE covers the code that built them.")
 
           gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" \
             --title "$title" --notes "$notes" --draft --latest=false

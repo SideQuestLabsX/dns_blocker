@@ -2,17 +2,27 @@
 
 `dns_blocker` source code is public domain under [The Unlicense](LICENSE). The
 published artifacts contain third party work that keeps its own license. This
-file holds the full text of those licenses, and every published artifact carries
-a copy of it.
+file holds the full text of those licenses and **ships once per release, as its
+own asset.** It is not copied inside an executable or a trie.
+
+Every artifact of both releases:
 
 | Artifact | Third party work | License |
 |---|---|---|
-| `dns_blocker`, `minimal` profile | musl libc | MIT |
-| `dns_blocker`, `encrypted` profile | musl libc, Mbed TLS with Everest and p256-m | MIT, Apache-2.0 |
-| `dns_blocker-blocklist-<tier>.trie` | StevenBlack `hosts` components, adaway.org, tiuxo, KADhosts, minecraft-hosts, URLHaus, hagezi `dns-blocklists`, oisd | GPL-3.0 combined work. See below |
+| `dns_blocker-<arch>-minimal` | musl libc | MIT |
+| `dns_blocker-<arch>-encrypted` | musl libc, Mbed TLS | MIT, Apache-2.0 |
+| `dns_blocker-<arch>.check` | musl libc | MIT |
+| `dns_blocker-blocklist-<tier>.trie` | See the tier table below | GPL-3.0 combined work |
+| `dns_blocker-blocklist-sources.tar.gz` | The fetched lists themselves | The terms of each source below |
+| `dns_blocker-blocklist.sources` | Manifest, no third party content | Unlicense |
+| `dns_blocker.sha256`, `dns_blocker-blocklist.sha256` | Checksums, no third party content | Unlicense |
+| `LICENSE`, `THIRD_PARTY_LICENSES.md` | The license texts themselves | As stated in each |
 
-The daemon reads the blocklist asset as data at runtime. The binary contains no
-part of it, so the terms on the asset apply only to the asset.
+The daemon reads the blocklist asset as data at runtime and does not link it, so
+the terms on a trie apply to that trie and do not reach the binary. **No
+released binary contains blocklist data**: `EMBED_TIER` and `EMBED_LIST` can
+link a trie into `.rodata`, and both release workflows force them empty. A build
+that sets either one carries the trie's terms into the binary it produces.
 
 ## Mbed TLS
 
@@ -31,8 +41,14 @@ The build changes the Mbed TLS configuration header. It sets
 `MBEDTLS_MEMORY_BUFFER_ALLOC_C`, `MBEDTLS_PLATFORM_C` and
 `MBEDTLS_PLATFORM_MEMORY`. No other Mbed TLS file is changed.
 
-Mbed TLS carries two components with their own copyright. Both compile into
+Mbed TLS carries two components with their own copyright. Both are archived into
 `libmbedcrypto.a` and both fall under the Apache-2.0 text that follows.
+
+Neither reaches a shipped binary. `MBEDTLS_ECDH_VARIANT_EVEREST_ENABLED` and
+`MBEDTLS_PSA_P256M_DRIVER_ENABLED` stay disabled, so the objects compile to
+placeholders of under a kilobyte each and the linked executable carries no
+symbol from either. Their notices are kept because the static library this build
+produces does contain the objects.
 
     Project Everest
     Copyright 2016-2018 INRIA and Microsoft Corporation
@@ -471,13 +487,16 @@ are excluded, so every source below is GPL-3.0 or GPL-3.0 compatible.
 | [KADhosts](https://kadantiscam.netlify.app/) via `data/KADhosts` | every tier | CC BY-SA 4.0 |
 | [minecraft-hosts](https://github.com/jamiemansfield/minecraft-hosts) via `data/minecraft-hosts` | every tier | CC0-1.0 |
 | [URLHaus](https://urlhaus.abuse.ch/) via `data/URLHaus` | every tier | CC0-1.0 |
-| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) light, pro, ultimate | the three base tiers | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) light | the `compact` base | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) pro | the `standard` base | GPL-3.0 |
+| [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) ultimate | the `aggressive` base | GPL-3.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) nsfw | the compact `nsfw` category | GPL-3.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) tif.mini, tif.medium, tif | the `tif` category | GPL-3.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) gambling, gambling.medium, gambling.mini | the `gambling` category | GPL-3.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) anti.piracy | the `piracy` category | GPL-3.0 |
 | [hagezi/dns-blocklists](https://github.com/hagezi/dns-blocklists) doh-vpn-proxy-bypass | the `bypass` category | GPL-3.0 |
-| [oisd](https://oisd.nl/) small, big | the standard and aggressive bases | GPL-3.0 |
+| [oisd](https://oisd.nl/) small | the `standard` base | GPL-3.0 |
+| [oisd](https://oisd.nl/) big | the `aggressive` base | GPL-3.0 |
 | [oisd](https://oisd.nl/) nsfw | the standard and aggressive `nsfw` category | GPL-3.0 |
 
 Every tier includes a GPL-3.0 source, so every compiled trie is a combined work
