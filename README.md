@@ -173,10 +173,26 @@ and you take the combination you want rather than a bundle somebody else chose.
 | Asset | Contents |
 |---|---|
 | `dns_blocker-blocklist-<tier>.trie` | The compiled list the daemon maps, one a tier |
-| `dns_blocker-blocklist.sources` | Every source with its URL, size, accepted-name count and digest, then the composition of every tier |
+| `dns_blocker-blocklist.sources` | Every source with its URL, size, accepted-name count and digest, then the composition of every tier, then every allowlist removal with its reason |
 | `dns_blocker-blocklist-sources.tar.gz` | The fetched lists themselves |
 | `dns_blocker-blocklist.sha256` | A digest for every other asset in the release |
 | `THIRD_PARTY_LICENSES.md` | The license terms the release carries |
+
+### A name blocked by mistake
+
+Publishers sometimes list a name that should not be blocked.
+`tools/blocklist-removals.txt` is the reviewed allowlist, subtracted from every
+tier when the release is compiled, so the correction reaches a unit through the
+sync it already performs. Each line is a name and, after `#`, the reason. The
+release manifest publishes both.
+
+A removal takes the exact name and its `www.` form. It does not take the
+subtree: removing `example.com` leaves `ads.example.com` blocked, because a
+blocked subdomain of a legitimate parent is usually the entry the publisher
+meant. To unblock a child, name the child.
+
+This is a correction to the published list, not a per-device preference, and it
+takes effect only when a new list publishes.
 
 `CFG_BLOCKLIST_TIER` selects the tier a build downloads. The same asset name is
 used for the download and digest lookup, so a run cannot fetch one tier and

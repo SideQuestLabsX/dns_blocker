@@ -17,6 +17,7 @@ checksum="$outputDir/dns_blocker-blocklist.sha256"
 manifest="$outputDir/dns_blocker-blocklist.sources"
 archive="$outputDir/dns_blocker-blocklist-sources.tar.gz"
 licenses="$outputDir/THIRD_PARTY_LICENSES.md"
+removals=${REMOVALS:-tools/blocklist-removals.txt}
 project="$outputDir/LICENSE"
 
 # The sources, the base tiers and the categories combined onto them.
@@ -226,6 +227,19 @@ if [ -z "$tier" ]; then
         sort "$outputDir/manifest.sources"
         printf '\n# tier <name> <source>...\n'
         sort "$outputDir/manifest.tiers"
+        printf '\n# removal <name> <reason>. Subtracted from every tier above.\n'
+        printf '# The exact name and its www. form only, never the subtree.\n'
+        awk '{ sub(/\r$/, "") }
+             /^[ \t]*#/ || /^[ \t]*$/ { next }
+             { name = $1
+               reason = ""
+               at = index($0, "#")
+               if(at > 0)
+               {
+                   reason = substr($0, at + 1)
+                   sub(/^[ \t]+/, "", reason)
+               }
+               printf "removal %s %s\n", name, reason }' "$removals"
     } > "$manifest"
 
     tar -czf "$archive" -C "$outputDir/cache" .
@@ -368,7 +382,7 @@ if [ "$count" -eq 0 ]; then
     exit 1
 fi
 
-"$mkblocklist" "$asset" "$combined" >/dev/null 2>&1
+"$mkblocklist" -x "$removals" "$asset" "$combined" >/dev/null 2>&1
 rm -f "$combined"
 
 printf 'tier %s%s\n' "$tier" "$used" >> "$outputDir/manifest.tiers"

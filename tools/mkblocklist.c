@@ -21,6 +21,7 @@
 
 #include "blocklist.h"
 #include "listline.h"
+#include "removals.h"
 #include "trieimage.h"
 
 #include <stdio.h>
@@ -483,7 +484,8 @@ static void WriteCArray(const char *path, const uint8_t *image, size_t size)
         Fatal("cannot write the output");
 }
 
-static void ReadList(Node *root, FILE *in, size_t *accepted, size_t *skipped)
+static void ReadList(Node *root, FILE *in, size_t *accepted, size_t *skipped,
+                     const RemovalSet *removals, size_t *removed)
 {
     char line[1024];
 
@@ -494,6 +496,12 @@ static void ReadList(Node *root, FILE *in, size_t *accepted, size_t *skipped)
         if(name == NULL)
         {
             (*skipped)++;
+            continue;
+        }
+
+        if(RemovalSetHas(removals, name))
+        {
+            (*removed)++;
             continue;
         }
 
@@ -516,9 +524,10 @@ static void ReadList(Node *root, FILE *in, size_t *accepted, size_t *skipped)
 
 int main(int argc, char **argv)
 {
-    bool bCArray = false;
-    bool bWrap   = false;
-    int  first   = 1;
+    bool        bCArray     = false;
+    bool        bWrap       = false;
+    const char *removalPath = NULL;
+    int         first       = 1;
 
     while(first < argc && argv[first][0] == '-' && argv[first][1] != '\0')
     {
@@ -526,6 +535,13 @@ int main(int argc, char **argv)
             bCArray = true;
         else if(strcmp(argv[first], "-t") == 0)
             bWrap = true;
+        else if(strcmp(argv[first], "-x") == 0)
+        {
+            if(first + 1 >= argc)
+                Fatal("-x takes a removals file");
+            removalPath = argv[first + 1];
+            first++;
+        }
         else
             break;
 
@@ -534,7 +550,7 @@ int main(int argc, char **argv)
 
     if(argc <= first)
     {
-        fprintf(stderr, "usage: mkblocklist [-c] out [list ...]\n"
+        fprintf(stderr, "usage: mkblocklist [-c] [-x removals] out [list ...]\n"
                         "       mkblocklist -t out.c in.trie\n");
         return 1;
     }
@@ -564,10 +580,27 @@ int main(int argc, char **argv)
     Node  *root     = NodeNew();
     size_t accepted = 0;
     size_t skipped  = 0;
+    size_t removed  = 0;
+
+    /* The reviewed allowlist, subtracted here rather than in the daemon, so a
+       correction reaches every unit through the sync it already performs */
+    RemovalSet removals = { NULL, 0, 0 };
+
+    if(removalPath != NULL)
+    {
+        FILE *in = fopen(removalPath, "r");
+        if(in == NULL)
+            Fatal("cannot open the removals file");
+
+        if(!RemovalSetLoad(&removals, in, NULL))
+            Fatal("cannot read the removals file");
+
+        fclose(in);
+    }
 
     if(argc == firstList)
     {
-        ReadList(root, stdin, &accepted, &skipped);
+        ReadList(root, stdin, &accepted, &skipped, &removals, &removed);
     }
     else
     {
@@ -580,7 +613,7 @@ int main(int argc, char **argv)
                 return 1;
             }
 
-            ReadList(root, in, &accepted, &skipped);
+            ReadList(root, in, &accepted, &skipped, &removals, &removed);
             fclose(in);
         }
     }
@@ -625,6 +658,12 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "mkblocklist: %zu names, %zu skipped, %zu bytes, checked\n",
             accepted, skipped, imageSize);
+
+    if(removalPath != NULL)
+        fprintf(stderr, "mkblocklist: %zu removed by %zu allowlist entries\n",
+                removed, removals.count);
+
+    RemovalSetFree(&removals);
 
     return 0;
 }

@@ -1,0 +1,19 @@
+# Reviewed allowlist, subtracted from every published tier.
+#
+# One name a line. Everything after `#` is the reason, and the manifest
+# publishes it, so a tier still explains what was taken out of it and why.
+#
+# A removal drops the exact name and its `www.` form. It does NOT drop the
+# subtree: removing `example.com` leaves `ads.example.com` blocked, because a
+# blocked subdomain of a legitimate parent is very often the entry the
+# publisher meant. To unblock a child, name the child.
+#
+# This corrects a false positive in a published list. It is not a per-device
+# preference: every unit gets it through the sync, and only when a new list
+# publishes.
+#
+# Format:
+#   name.example    # YYYY-MM-DD, what broke, who reported it
+#
+# No entries yet. A name is added here only after the false positive is
+# confirmed against the source that carries it.

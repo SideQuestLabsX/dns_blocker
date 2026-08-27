@@ -1,4 +1,5 @@
 #include "listline.h"
+#include "removals.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -25,6 +26,71 @@ static void Expect(const char *input, const char *want)
                (want != NULL) ? want : "(none)");
         G_FAILURES++;
     }
+}
+
+/* The allowlist corrects a false positive in a published list. It must take
+   the name it names and leave the subtree alone, because a blocked child of a
+   legitimate parent is usually the entry the publisher meant. */
+static void Check(bool bOk, const char *what)
+{
+    if(!bOk)
+    {
+        printf("FAIL  removals: %s\n", what);
+        G_FAILURES++;
+    }
+}
+
+static void TestRemovals(void)
+{
+    RemovalSet set = { NULL, 0, 0 };
+    FILE      *in  = tmpfile();
+
+    if(in == NULL)
+    {
+        Check(false, "no temporary file");
+        return;
+    }
+
+    fputs("# a comment line\n", in);
+    fputs("\n", in);
+    fputs("example.com   # 2026-01-01, breaks sign-in\n", in);
+    fputs("0.0.0.0 hosts-form.example  # a hosts line too\n", in);
+    fputs("*.wild.example             # and a wildcard rule\n", in);
+    rewind(in);
+
+    size_t skipped = 0;
+    bool   bLoaded = RemovalSetLoad(&set, in, &skipped);
+    fclose(in);
+
+    Check(bLoaded, "the file loads");
+    Check(set.count == 3, "three names load");
+    Check(skipped == 2, "the comment and the blank line are skipped");
+
+    /* The removed parent, and its www. form with it */
+    Check(RemovalSetHas(&set, "example.com"), "the removed parent goes");
+    Check(RemovalSetHas(&set, "www.example.com"), "its www. form goes");
+
+    /* An explicitly blocked child survives, or the allowlist discards true
+       positives that happen to share a parent */
+    Check(!RemovalSetHas(&set, "ads.example.com"), "a blocked child stays");
+    Check(!RemovalSetHas(&set, "a.b.example.com"), "a deeper child stays");
+
+    /* Unrelated names, including one that merely ends the same way */
+    Check(!RemovalSetHas(&set, "other.example"), "an unrelated name stays");
+    Check(!RemovalSetHas(&set, "notexample.com"), "a similar name stays");
+    Check(!RemovalSetHas(&set, "www.other.example"), "www. of a kept name stays");
+
+    /* The other accepted line formats reached the set as bare names */
+    Check(RemovalSetHas(&set, "hosts-form.example"), "a hosts line removes");
+    Check(RemovalSetHas(&set, "wild.example"), "a wildcard rule removes");
+    Check(RemovalSetHas(&set, "www.wild.example"), "and its www. form");
+
+    RemovalSetFree(&set);
+    Check(set.count == 0, "the set frees");
+
+    /* An empty allowlist removes nothing, which is the shipped state */
+    RemovalSet none = { NULL, 0, 0 };
+    Check(!RemovalSetHas(&none, "example.com"), "an empty set removes nothing");
 }
 
 int main(void)
@@ -57,6 +123,8 @@ int main(void)
     /* A wildcard the trie cannot express must not become a label. */
     Expect("ad*.example.com", NULL);
     Expect("*ads.example.com", NULL);
+
+    TestRemovals();
 
     if(G_FAILURES != 0)
     {
