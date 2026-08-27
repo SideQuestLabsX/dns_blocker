@@ -956,6 +956,35 @@ static void TestInvalidLocator(const char *dir)
     SyncEnd(&job);
 }
 
+/* SyncBegin zeroes the embedded FetchJob, so an early end would close fd 0 */
+static void TestEarlyEndKeepsStdinOpen(const char *dir)
+{
+    SyncJob job;
+    char    target[256];
+
+    snprintf(target, sizeof target, "%s/stdin.trie", dir);
+
+    /* Own fd 0, so the check cannot pass vacuously */
+    int spare = open("/dev/null", O_RDONLY);
+    CHECK(spare >= 0);
+    if(spare < 0)
+        return;
+    if(spare != 0)
+    {
+        CHECK(dup2(spare, 0) == 0);
+        close(spare);
+    }
+    CHECK(fcntl(0, F_GETFD) != -1);
+
+    ScriptReset();
+    CHECK(Begin(&job, target, NULL));
+    CHECK(SyncProgress(&job, G_NOW_MS) == SyncStep_NeedAddress);
+
+    SyncEnd(&job);
+
+    CHECK(fcntl(0, F_GETFD) != -1);
+}
+
 static void TestRefusals(const char *dir)
 {
     SyncJob job;
@@ -1045,6 +1074,7 @@ int main(void)
     TestInvalidLocator(dir);
     TestRuntimeTierSelectsTheAsset(dir);
     TestInvalidTierIsRefused(dir);
+    TestEarlyEndKeepsStdinOpen(dir);
     TestRefusals(dir);
 
     close(listener);

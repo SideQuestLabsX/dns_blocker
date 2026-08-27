@@ -392,6 +392,9 @@ bool SyncBegin(SyncJob *job, UpstreamPool *pool, const char *path,
     job->tlsSlot   = UPSTREAM_NONE;
     job->phase     = SyncPhase_Locator;
 
+    /* fd 0 is stdin, and a run that ends before FetchBegin dials would close it */
+    job->job.fd = -1;
+
     if(pool == NULL || path == NULL)
         return false;
 
