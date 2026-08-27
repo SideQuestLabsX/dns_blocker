@@ -201,10 +201,12 @@
 #define CFG_UPSTREAM_0X20       1
 
 /* Literal addresses only, in preference order. Each query goes to one of them,
-   the one with the lowest measured round trip, so no resolver receives the
-   whole query stream. The order decides the boot choice and breaks a tie,
-   because no measurement exists yet. Two independent operators, so one going
-   down is not correlated with the other.
+   the one with the lowest measured round trip. Selection is by latency alone,
+   so a consistently faster resolver receives essentially the whole stream and
+   the others see only the rotating probe: a second address buys failover, not a
+   split. The order decides the boot choice and breaks a tie, because no
+   measurement exists yet. Two independent operators, so one going down is not
+   correlated with the other.
 
    CFG_UPSTREAM_ADDRS, CFG_UPSTREAM_TLS_NAMES and CFG_UPSTREAM_DOH_PATHS share
    indices and must be overridden together. */

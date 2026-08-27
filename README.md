@@ -1,9 +1,10 @@
 # dns_blocker
 
 A DNS filtering and forwarding daemon for embedded Linux. The daemon reserves
-one memory arena at start-up and does no other allocation. It uses no database
-engine and no scripting runtime. It links static musl, and mbedTLS for the
-encrypted profile.
+one memory arena at start-up and does no heap allocation while it runs. Beside
+that arena it maps three bounded files read-only: the TLS trust bundle, the
+blocklist and the status segment. It uses no database engine and no scripting
+runtime. It links static musl, and mbedTLS for the encrypted profile.
 
 The daemon resolves names and filters them. It listens on UDP and TCP, parses
 RFC 1035 messages, caches responses, blocks names from a compiled list and
@@ -30,8 +31,10 @@ Router Advertisement RDNSS, the clients go around this device, and the network
 continues to look correct. Give this device for IPv6, or stop the IPv6 DNS
 advertisement.
 
-The daemon runs on any Linux host. The prebuilt appliance images target the
-Raspberry Pi Zero W and the Zero 2 W.
+The daemon builds for the nine architectures in the table below and runs on any
+Linux host among them. It is developed against the Raspberry Pi Zero W. A
+prebuilt appliance image is planned and does not exist yet, so every deployment
+today installs a binary onto an existing Linux system.
 
 ## Behavior
 
@@ -98,7 +101,7 @@ payload size gets the `TC` bit, and the client sends the query again over TCP.
 | `minimal` | The core engine and plaintext upstream forwarding |
 | `encrypted` | Adds mbedTLS, DoH and DoT upstream |
 
-The default is `encrypted`, and it is the shipped image. The build downloads
+The default is `encrypted`. The build downloads
 the pinned mbedTLS 3.6.7 release, verifies its SHA-256 digest and compiles it
 with the fixed-buffer allocator enabled. It needs `curl`, `python3` and
 `sha256sum`.
@@ -138,16 +141,18 @@ after GitHub reports the dated release as published and immutable.
 A release carries one set of assets per tier. A tier is how much the list
 blocks. `tools/build-blocklist-release.sh` declares the sources of each one.
 
-A base tier decides how hard ads and trackers are blocked:
+A base tier decides how much is blocked by default:
 
 | Base | Blocks |
 |---|---|
 | `compact` | The common ad and tracker names, and small enough to link into the binary |
-| `standard` | Ads and trackers, and is not expected to break a site. The default |
+| `standard` | A broader list, and is not expected to break a site. The default |
 | `aggressive` | Every rung the publishers offer. Blocks more, breaks more |
 
-A base blocks ads and trackers and nothing else. Everything beyond that is a
-category you choose. The more aggressive tiers breaks more legitimate use cases.
+A base is mostly advertising and tracking, but the publishers it draws on also
+carry phishing, malware, scam and cryptojacking names, so a base blocks some of
+those too. The categories below are the axes you choose deliberately. The more
+aggressive tiers break more legitimate use cases.
 
 Categories are independent of the base and of each other. Every combination of
 these five categories is published against every base:
@@ -259,11 +264,14 @@ network down with it.
 in preference order.
 
 ```c
-#define CFG_UPSTREAM_ADDRS { "1.1.1.1", "9.9.9.9" }
+#define CFG_UPSTREAM_ADDRS { "1.1.1.1", "8.8.8.8" }
 ```
 
-A query goes to one of them, the one answering fastest, so no resolver receives
-everything you look up. The daemon times a resolver from the answers it gives,
+A query goes to one of them, the one answering fastest. Selection is by measured
+round trip alone, so a resolver that is consistently fastest receives
+essentially every query and the others see only the probe. Configuring two
+resolvers buys failover, not a split of the query stream. The daemon times a
+resolver from the answers it gives,
 and sends one small probe every `CFG_UPSTREAM_PROBE_MS` to one of the others, so
 a resolver it is not using still gets measured. It sends no probe while nothing
 is querying it. The first address in the list serves until the first
@@ -276,10 +284,18 @@ failing the daemon keeps forwarding to the best of them anyway.
 The encrypted profile also needs one TLS authentication name for each address:
 
 ```c
-#define CFG_UPSTREAM_ADDRS    { "1.1.1.1", "9.9.9.9" }
-#define CFG_UPSTREAM_TLS_NAMES { "cloudflare-dns.com", "dns.quad9.net" }
+#define CFG_UPSTREAM_ADDRS     { "1.1.1.1", "8.8.8.8" }
+#define CFG_UPSTREAM_TLS_NAMES { "cloudflare-dns.com", "dns.google" }
 #define CFG_UPSTREAM_DOH_PATHS { "/dns-query", "/dns-query" }
 ```
+
+Those are the shipped defaults. **Every DoH endpoint has to answer HTTP/1.1**,
+which is what this client speaks. Measured with `curl --http1.1`: Cloudflare,
+Google and AdGuard return 200, Quad9 returns 505 because its DoH endpoint is
+HTTP/2 only. Quad9 works as a DoT endpoint, so use it only with
+`CFG_ENCRYPTED_USE_DOH` at 0. Verify a new endpoint against its real address
+before making it a default: one that refuses the protocol fails every query it
+is given.
 
 The encrypted transport setting is:
 
@@ -291,9 +307,11 @@ The encrypted transport setting is:
 `CFG_TLS_CA_DER_PATH` names the DER trust bundle for the configured resolvers
 and blocklist sync. The default sync connects to `raw.githubusercontent.com`,
 `github.com`, `objects.githubusercontent.com` and
-`release-assets.githubusercontent.com`. Concatenate their root certificates
-and the resolver roots in that file. The file is mapped read-only at startup
-and must stay within `CFG_TLS_CA_MAX_BYTES`. DoH sends HTTP/1.1 POST requests
+`release-assets.githubusercontent.com`. Build it with
+`tools/make-trust-bundle.sh`, which collects only the roots those endpoints and
+the configured resolvers chain to. The file is mapped read-only at startup and
+must stay within `CFG_TLS_CA_MAX_BYTES`, which is 16 KiB by default against a
+generated bundle of about 3 KB. DoH sends HTTP/1.1 POST requests
 with a bounded response header. Client exchanges and blocklist fetches share six
 TLS slots. A sync starts only when two slots are available and holds one until
 the run ends. A query waits in its transaction slot when all six are busy and
@@ -358,11 +376,24 @@ make ARCH=armv6
 make PROFILE=minimal
 ```
 
+**A plain `make` is a development build, not a release one.** `CC` defaults to
+`gcc`, so it links the host libc, which on most distributions is glibc. The
+published binaries are static musl and come from the release workflow. To
+reproduce one locally, name a musl compiler:
+
+```sh
+make CC=musl-gcc                        # static musl for the host
+make ARCH=armv6 CC=arm-linux-musleabihf-gcc
+```
+
+Anything that depends on the libc has to be verified under musl before it is
+claimed, because a glibc build can behave differently and does not ship.
+
 A cross build also needs a native compiler, because the generator that compiles
 the embedded list runs on the build host. `HOSTCC` names it and defaults to
 `gcc`.
 
-Every target links static, and `-fstack-protector-strong` is always on. The
+Every released target links static, and `-fstack-protector-strong` is always on. The
 `x86_64`, `x86` and `aarch64` Alpine builds also link position independent.
 ARM, RISC-V, LoongArch and MIPS use static executables because their selected
 toolchains do not produce a valid static PIE. The build reads the linked file
@@ -390,16 +421,21 @@ make test
 
 This runs the unit tests and the end-to-end tests with AddressSanitizer and
 UndefinedBehaviorSanitizer, then a short fuzz run. `make fuzz` builds the
-libFuzzer target and needs clang. `make test-static` builds sanitizer-free wire,
-cache, message, verification, blocklist and host-map tests. These tests can run
-under emulation on the target instruction set. The encrypted profile also runs
-the DoH/DoT state tests and the real mbedTLS backend test this way.
+libFuzzer target and needs clang.
+
+`make test-static` builds a **subset** without sanitizers, using the shipped
+flags so it cross-compiles: the wire, cache, message, verification, blocklist,
+host-map, fetch, status and trust tests. The encrypted profile adds the DoH and
+DoT state tests and the real mbedTLS backend test. The rest of the suite, which
+includes the server, arena, upstream and sync tests and the fuzz driver, runs on
+the host only.
 
 CI runs the host and encrypted tests, links both profiles and fuzzes against a
 corpus that stays between runs. Alpine target toolchains build six targets in
 containers. Zig builds LoongArch and both MIPS byte orders. QEMU runs each
-non-x86 target on its instruction set. This exposes ARM1176 unaligned access
-faults that x86 tests cannot reproduce.
+non-x86 target on its own instruction set, which is what exercises the byte-wise
+reads the parser uses. Generic ARMv6 emulation does not reproduce ARM1176
+alignment trapping, so that behaviour still needs a real board.
 
 ## Install
 
@@ -465,12 +501,47 @@ binary and the runtime files where the unit expects them:
 sudo install -Dm755 build/x86_64-encrypted/dns_blocker /usr/local/sbin/dns_blocker
 sudo install -Dm644 deploy/dns_blocker.service /etc/systemd/system/dns_blocker.service
 sudo install -dm755 /etc/dns_blocker
+```
+
+**Install the trust bundle before starting the unit.** The encrypted profile
+refuses to start without it, and the unit restarts on failure, so the daemon
+would fail several times a second until systemd gives up on it:
+
+```sh
+sh tools/make-trust-bundle.sh build/ca.der
+sudo install -Dm644 build/ca.der /etc/dns_blocker/ca.der
 sudo systemctl enable --now dns_blocker
 ```
 
-The encrypted profile also needs the DER trust bundle at
-`/etc/dns_blocker/ca.der`. Local names go in `/etc/dns_blocker/hosts`, and the
-daemon starts without that file.
+The `minimal` profile needs no bundle and can be started straight away.
+
+Local names go in `/etc/dns_blocker/hosts`, and the daemon starts without that
+file.
+
+#### The trust bundle
+
+`tools/make-trust-bundle.sh` reads the resolvers out of `src/config.h`, adds the
+hosts the blocklist sync downloads from, collects only the roots those endpoints
+chain to and writes concatenated DER. It verifies every one of them against the
+result before writing it, and refuses to write a bundle above
+`CFG_TLS_CA_MAX_BYTES`.
+
+Four roots and about 3 KB against a 16 KiB cap, on the shipped defaults. Do not
+substitute a system CA store: those run past 180 KB and the daemon refuses them,
+naming the size and the cap.
+
+**Roots rotate.** Regenerate the bundle after changing an upstream, and whenever
+the blocklist sync and DoH begin failing together, because one stale bundle
+breaks both and each reports only a TLS failure. Restart the daemon afterwards.
+
+If the daemon exits at startup it names which of the four cases it hit:
+
+| Message | Meaning |
+|---|---|
+| `no such file` | The bundle is not at `CFG_TLS_CA_DER_PATH` |
+| `the file is empty` | It was created but never written |
+| `is N bytes against a M byte cap` | A whole store, or too many hosts. Cut hosts or raise the cap and the TLS arena |
+| `the file could not be read` | Wrong permissions, or the path is a directory |
 
 | Question | Answer |
 |---|---|
@@ -502,22 +573,27 @@ The daemon keeps its current state in a small file at `CFG_STATUS_PATH`, beside
 the blocklist. Reading it needs no signal, no port and no restart:
 
 ```sh
-dns_blocker --status
+sudo dns_blocker --status
 ```
+
+The supplied unit runs under `DynamicUser=yes` with `RuntimeDirectoryMode=0750`
+and `UMask=0077`, so the segment is readable only by the daemon's transient user
+and by root. Drop `sudo` only if you have relaxed one of those.
 
 ```text
 pid         941
 uptime      2 s
 queries     4, hits 1, blocked 0, local 0, forwarded 3, failed 0
 refused     malformed 0, truncated 0, connections 0, evicted 0, retries 0
-cache       hits 1, misses 3, inserts 3, evictions 0, refused 0
+deferred    0, waited for a free encrypted channel
 channels    opened 1, reused 2, stale 0
+cache       hits 1, misses 3, inserts 3, evictions 0, refused 0
 blocklist   mapped, 2717008 bytes, tier standard
 sync        idle, next in 3600 s, installed 2717008 bytes
 latency     service, n 4, min 41 us, mean 6.85 ms, p50 52 us, p90 27.30 ms, p99 27.30 ms, max 27.30 ms
-upstream    1.1.1.1:53 plain, 27 ms, queries 3, failures 0, rejected 0, probes 0
+upstream    1.1.1.1:443 doh, 27 ms, queries 3, failures 0, rejected 0, probes 0
 latency       round trip, n 3, min 24.00 ms, mean 27.00 ms, p50 26.62 ms, p90 29.00 ms, p99 29.00 ms, max 29.00 ms
-upstream    9.9.9.9:53 plain, unmeasured, queries 0, failures 0, rejected 0, probes 0
+upstream    8.8.8.8:443 doh, unmeasured, queries 0, failures 0, rejected 0, probes 0
 latency       round trip, no samples
 ```
 

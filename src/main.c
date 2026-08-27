@@ -9,6 +9,7 @@
 #include "status.h"
 #include "sync.h"
 #include "tls.h"
+#include "trust.h"
 #include "upstream.h"
 
 #include <arpa/inet.h>
@@ -88,47 +89,6 @@ _Static_assert(sizeof G_UPSTREAM_ADDRS / sizeof *G_UPSTREAM_ADDRS
                == sizeof G_UPSTREAM_DOH_PATHS / sizeof *G_UPSTREAM_DOH_PATHS,
                "each encrypted upstream needs a DoH path");
 
-typedef struct
-{
-    const uint8_t *base;
-    size_t         size;
-} TrustMap;
-
-static bool TrustLoad(TrustMap *trust)
-{
-    memset(trust, 0, sizeof *trust);
-
-    int fd = open(CFG_TLS_CA_DER_PATH, O_RDONLY | O_CLOEXEC);
-    if(fd < 0)
-        return false;
-
-    struct stat info;
-    if(fstat(fd, &info) != 0 || info.st_size <= 0
-       || info.st_size > (off_t)CFG_TLS_CA_MAX_BYTES)
-    {
-        close(fd);
-        return false;
-    }
-
-    void *base = mmap(NULL, (size_t)info.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
-
-    if(base == MAP_FAILED)
-        return false;
-
-    trust->base = base;
-    trust->size = (size_t)info.st_size;
-    return true;
-}
-
-static void TrustUnload(TrustMap *trust)
-{
-    if(trust->base != NULL)
-        munmap((void *)trust->base, trust->size);
-
-    trust->base = NULL;
-    trust->size = 0;
-}
 #endif
 
 static bool ConfigurePtrRoute(UpstreamPool *router, uint8_t prefix[4])
@@ -422,10 +382,21 @@ int main(int argc, char **argv)
     UpstreamPoolInit(&upstreams, ServerNowMilliseconds());
 
 #if defined(PROFILE_ENCRYPTED)
-    if(!TrustLoad(&trust))
+    TrustResult loaded = TrustLoad(&trust, CFG_TLS_CA_DER_PATH,
+                                   CFG_TLS_CA_MAX_BYTES);
+    if(loaded != TrustLoad_Ok)
     {
-        fprintf(stderr, "dns_blocker: cannot map TLS trust anchor %s\n",
-                CFG_TLS_CA_DER_PATH);
+        if(loaded == TrustLoad_TooLarge)
+            fprintf(stderr,
+                    "dns_blocker: TLS trust anchor %s is %zu bytes against a "
+                    "%zu byte cap. Build a curated bundle with "
+                    "tools/make-trust-bundle.sh\n",
+                    CFG_TLS_CA_DER_PATH, trust.fileSize,
+                    (size_t)CFG_TLS_CA_MAX_BYTES);
+        else
+            fprintf(stderr, "dns_blocker: TLS trust anchor %s: %s\n",
+                    CFG_TLS_CA_DER_PATH, TrustResultText(loaded));
+
         ArenaRelease(&mem.root);
         return EXIT_FAILURE;
     }

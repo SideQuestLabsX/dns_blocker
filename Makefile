@@ -294,7 +294,7 @@ TEST_BIN := $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test \
 	$(BUILD)/verify_test $(BUILD)/blocklist_test $(BUILD)/listline_test \
 	$(BUILD)/hosts_test $(BUILD)/latency_test $(BUILD)/upstream_test \
 	$(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/status_test \
-	$(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/arena_test \
+	$(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/arena_test $(BUILD)/trust_test \
 	$(BUILD)/fuzz_quick \
 	$(ENCRYPTED_TESTS)
 
@@ -316,6 +316,7 @@ test: $(TEST_BIN)
 	@$(BUILD)/server_test
 	@$(BUILD)/tls_test
 	@$(BUILD)/arena_test
+	@$(BUILD)/trust_test
 	@$(BUILD)/fuzz_quick 50000
 ifeq ($(PROFILE),encrypted)
 	@$(BUILD)/upstream_dot_test
@@ -393,13 +394,19 @@ $(BUILD)/tls_backend_test: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR)
 $(BUILD)/server_test: tests/server_test.c src/server.c src/qlog.c src/upstream.c src/latency.c src/msg.c src/cache.c src/verify.c src/blocklist.c src/hosts.c src/wire.c src/arena.c $(EMBED_SRC) $(HDR) tools/trieimage.h | $(BUILD)
 	$(CC) $(TEST_CFLAGS) -Itools -DCFG_UPSTREAM_TIMEOUT_MS=120 $(filter %.c,$^) -o $@ -lpthread
 
+$(BUILD)/trust_test: tests/trust_test.c src/trust.c $(HDR) | $(BUILD)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+$(BUILD)/trust_test_native: tests/trust_test.c src/trust.c $(HDR) | $(BUILD)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
 $(BUILD)/tls_test: tests/tls_test.c src/tls.c src/arena.c $(HDR) | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 # Sanitizer-free copies of the pure tests, built with the shipped flags so they
 # cross-compile and run under qemu-user on the target instruction set. This is
 # the only way the byte-wise field reads get exercised on real ARM
-XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native $(BUILD)/fetch_test_native $(BUILD)/status_test_native
+XTEST := $(BUILD)/wire_test_native $(BUILD)/cache_test_native $(BUILD)/msg_test_native $(BUILD)/verify_test_native $(BUILD)/blocklist_test_native $(BUILD)/hosts_test_native $(BUILD)/fetch_test_native $(BUILD)/status_test_native $(BUILD)/trust_test_native
 
 ifeq ($(PROFILE),encrypted)
   XTEST += $(BUILD)/upstream_dot_test_native $(BUILD)/tls_backend_test_native
