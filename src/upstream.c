@@ -437,6 +437,138 @@ static bool BeginPlaintext(Upstream *member, const uint8_t *sent,
     return true;
 }
 
+bool UpstreamBeginTcp(UpstreamPool *pool, UpstreamExchange *exchange,
+                      const uint8_t *query, size_t queryLen, uint32_t nowMs)
+{
+    if(pool == NULL || exchange == NULL || query == NULL
+       || exchange->transport != UpstreamTransport_Plaintext
+       || exchange->bTcpFallback || pool->tcpSlot.bUsed
+       || exchange->index >= pool->count
+       || queryLen < WIRE_HEADER_BYTES || queryLen > CFG_TX_QUERY_BYTES)
+        return false;
+
+    UpstreamTcpSlot *slot = &pool->tcpSlot;
+    Upstream *member      = &pool->members[exchange->index];
+
+    /* A fresh draw, so the TCP answer is checked against its own ID and case
+       rather than inheriting the ones the truncated datagram already used */
+    if(!PrepareQuery(query, queryLen, exchange, slot->request + 2,
+                     sizeof slot->request - 2))
+        return false;
+
+    int fd = socket(member->addr.ss_family,
+                    SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if(fd < 0)
+        return false;
+
+    int connected = connect(fd, (struct sockaddr *)&member->addr,
+                            member->addrLen);
+    if(connected != 0 && errno != EINPROGRESS)
+    {
+        close(fd);
+        return false;
+    }
+
+    slot->request[0] = (uint8_t)(queryLen >> 8);
+    slot->request[1] = (uint8_t)queryLen;
+    slot->requestLen = queryLen + 2;
+    slot->sent       = 0;
+    slot->got        = 0;
+    slot->responseLen = 0;
+    slot->bUsed      = true;
+    slot->state      = (connected == 0) ? UpstreamTcp_Write
+                                        : UpstreamTcp_Connect;
+
+    if(exchange->fd >= 0)
+        close(exchange->fd);
+
+    exchange->fd           = fd;
+    exchange->bTcpFallback = true;
+    exchange->sentMs       = nowMs;
+    pool->tcpFallbacks++;
+    return true;
+}
+
+/* Mirrors the DoT machine: fall-through states, so one wake-up can advance
+   several, and every partial result asks for another event */
+static UpstreamRead TcpProgress(UpstreamExchange *exchange, uint8_t *out,
+                                size_t cap, size_t *outLen)
+{
+    UpstreamTcpSlot *slot = &exchange->pool->tcpSlot;
+
+    if(slot->state == UpstreamTcp_Connect)
+    {
+        int       error    = 0;
+        socklen_t errorLen = sizeof error;
+        if(getsockopt(exchange->fd, SOL_SOCKET, SO_ERROR, &error, &errorLen) != 0
+           || error != 0)
+            return UpstreamRead_Failed;
+
+        slot->state = UpstreamTcp_Write;
+    }
+
+    if(slot->state == UpstreamTcp_Write)
+    {
+        ssize_t wrote = send(exchange->fd, slot->request + slot->sent,
+                             slot->requestLen - slot->sent, MSG_DONTWAIT);
+        if(wrote < 0)
+            return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                 ? UpstreamRead_Again : UpstreamRead_Failed;
+
+        slot->sent += (size_t)wrote;
+        if(slot->sent < slot->requestLen)
+            return UpstreamRead_Again;
+
+        slot->state = UpstreamTcp_ReadLength;
+        slot->got   = 0;
+    }
+
+    if(slot->state == UpstreamTcp_ReadLength)
+    {
+        ssize_t got = recv(exchange->fd, slot->response + slot->got,
+                           2 - slot->got, MSG_DONTWAIT);
+        if(got < 0)
+            return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                 ? UpstreamRead_Again : UpstreamRead_Failed;
+        if(got == 0)
+            return UpstreamRead_Failed;
+
+        slot->got += (size_t)got;
+        if(slot->got < 2)
+            return UpstreamRead_Again;
+
+        slot->responseLen = ((size_t)slot->response[0] << 8) | slot->response[1];
+        if(slot->responseLen < WIRE_HEADER_BYTES
+           || slot->responseLen > CFG_TCP_MSG_BYTES
+           || slot->responseLen > cap)
+            return UpstreamRead_Failed;
+
+        slot->state = UpstreamTcp_ReadBody;
+    }
+
+    if(slot->state == UpstreamTcp_ReadBody)
+    {
+        size_t  have = slot->got - 2;
+        ssize_t got  = recv(exchange->fd, slot->response + slot->got,
+                            slot->responseLen - have, MSG_DONTWAIT);
+        if(got < 0)
+            return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                 ? UpstreamRead_Again : UpstreamRead_Failed;
+        if(got == 0)
+            return UpstreamRead_Failed;
+
+        slot->got += (size_t)got;
+        if(slot->got - 2 < slot->responseLen)
+            return UpstreamRead_Again;
+
+        memcpy(out, slot->response + 2, slot->responseLen);
+        *outLen = slot->responseLen;
+        return UpstreamRead_Answer;
+    }
+
+    return UpstreamRead_Failed;
+}
+
 #if defined(PROFILE_ENCRYPTED)
 _Static_assert(CFG_TLS_SLOTS >= CFG_TLS_FETCH_MIN_FREE_SLOTS,
                "the fetch reservation cannot exceed the slot count");
@@ -724,7 +856,14 @@ short UpstreamEvents(const UpstreamExchange *exchange)
         return 0;
 
     if(exchange->transport == UpstreamTransport_Plaintext)
-        return POLLIN;
+    {
+        if(!exchange->bTcpFallback || exchange->pool == NULL)
+            return POLLIN;
+
+        const UpstreamTcpSlot *slot = &exchange->pool->tcpSlot;
+        return (slot->state == UpstreamTcp_Connect
+                || slot->state == UpstreamTcp_Write) ? POLLOUT : POLLIN;
+    }
 
 #if defined(PROFILE_ENCRYPTED)
     if(exchange->pool == NULL || exchange->tlsSlot >= CFG_TLS_SLOTS)
@@ -1090,13 +1229,31 @@ static UpstreamRead TlsProgress(UpstreamExchange *exchange, uint8_t *out,
 }
 #endif
 
+/* A datagram failing a check may be an off-path forgery racing the real answer,
+   so plaintext UDP keeps listening. Nothing better follows on a stream */
+static UpstreamRead RejectRead(const UpstreamExchange *exchange)
+{
+    return (exchange->transport == UpstreamTransport_Plaintext
+            && !exchange->bTcpFallback)
+         ? UpstreamRead_Again : UpstreamRead_Failed;
+}
+
 UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
                               uint32_t nowMs, uint8_t *out, size_t cap,
                               size_t *outLen)
 {
     ssize_t got = -1;
 
-    if(exchange->transport == UpstreamTransport_Plaintext)
+    if(exchange->transport == UpstreamTransport_Plaintext
+       && exchange->bTcpFallback)
+    {
+        UpstreamRead result = TcpProgress(exchange, out, cap, outLen);
+        if(result != UpstreamRead_Answer)
+            return result;
+
+        got = (ssize_t)*outLen;
+    }
+    else if(exchange->transport == UpstreamTransport_Plaintext)
     {
         got = recv(exchange->fd, out, cap, MSG_DONTWAIT);
 
@@ -1133,14 +1290,12 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
     Upstream *member = &pool->members[exchange->index];
 
     if(got < (ssize_t)WIRE_HEADER_BYTES)
-        return (exchange->transport == UpstreamTransport_Plaintext)
-             ? UpstreamRead_Again : UpstreamRead_Failed;
+        return RejectRead(exchange);
 
     if(MsgId(out, (size_t)got) != exchange->id)
     {
         member->mismatches++;
-        return (exchange->transport == UpstreamTransport_Plaintext)
-             ? UpstreamRead_Again : UpstreamRead_Failed;
+        return RejectRead(exchange);
     }
 
     VerifyResult verdict = VerifyAnswer(&exchange->asked, out, (size_t)got);
@@ -1148,8 +1303,7 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
     {
         member->rejected++;
         member->lastReject = verdict;
-        return (exchange->transport == UpstreamTransport_Plaintext)
-             ? UpstreamRead_Again : UpstreamRead_Failed;
+        return RejectRead(exchange);
     }
 
     /* Every check has passed, so this is the daemon's own query coming back and
@@ -1209,9 +1363,16 @@ void UpstreamEnd(UpstreamExchange *exchange, uint32_t nowMs)
         close(exchange->fd);
     }
 
-    exchange->fd      = -1;
-    exchange->tlsSlot = UPSTREAM_NONE;
-    exchange->pool    = NULL;
+    if(exchange->bTcpFallback && exchange->pool != NULL)
+    {
+        exchange->pool->tcpSlot.bUsed = false;
+        exchange->pool->tcpSlot.state = UpstreamTcp_Idle;
+    }
+
+    exchange->fd           = -1;
+    exchange->tlsSlot      = UPSTREAM_NONE;
+    exchange->pool         = NULL;
+    exchange->bTcpFallback = false;
 }
 
 bool UpstreamExchangeReusedIdle(const UpstreamExchange *exchange)

@@ -54,6 +54,34 @@ typedef struct
     VerifyResult lastReject;
 } Upstream;
 
+/* An upstream that answers a UDP query with TC set is saying the answer does
+   not fit a datagram, so the same question goes out again over TCP. Available
+   in both profiles, because the conditional PTR router is plaintext whatever
+   the profile carries client queries. */
+typedef enum
+{
+    UpstreamTcp_Idle,
+    UpstreamTcp_Connect,
+    UpstreamTcp_Write,
+    UpstreamTcp_ReadLength,
+    UpstreamTcp_ReadBody
+} UpstreamTcpState;
+
+/* One fallback at a time a pool. A second truncated answer is delivered as it
+   arrived, which is what the daemon did before this existed, so capacity here
+   costs a large answer its second half and never costs a client its reply. */
+typedef struct
+{
+    UpstreamTcpState state;
+    size_t  sent;
+    size_t  got;
+    size_t  requestLen;
+    size_t  responseLen;
+    bool    bUsed;
+    uint8_t request[2 + CFG_TX_QUERY_BYTES];
+    uint8_t response[2 + CFG_TCP_MSG_BYTES];
+} UpstreamTcpSlot;
+
 #if defined(PROFILE_ENCRYPTED)
 typedef enum
 {
@@ -116,6 +144,8 @@ typedef struct
     UpstreamTransport transport;
     struct UpstreamPool *pool;
     WireQuestion asked;
+    /* Holds the pool's TCP slot after a truncated UDP answer */
+    bool         bTcpFallback;
 } UpstreamExchange;
 
 /* The configured resolvers and their measured latency. A query goes to one of
@@ -130,6 +160,9 @@ typedef struct UpstreamPool
 #if defined(PROFILE_ENCRYPTED)
     UpstreamTlsSlot tlsSlots[CFG_TLS_SLOTS];
 #endif
+
+    UpstreamTcpSlot tcpSlot;
+    uint64_t        tcpFallbacks;
 
     WireName         probeName;
     UpstreamExchange probe;
@@ -229,6 +262,13 @@ typedef enum
     UpstreamRead_Stale,
     UpstreamRead_Failed
 } UpstreamRead;
+
+/* Sends the same question to the same upstream over TCP, after a UDP answer
+   came back truncated. Draws a fresh transaction ID, source port and 0x20 case,
+   so every check that guards the UDP answer guards this one. False leaves the
+   exchange untouched, which lets the caller deliver the truncated answer. */
+bool UpstreamBeginTcp(UpstreamPool *pool, UpstreamExchange *exchange,
+                      const uint8_t *query, size_t queryLen, uint32_t nowMs);
 
 /* UpstreamRead_Again keeps the exchange open for another poll event */
 UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,

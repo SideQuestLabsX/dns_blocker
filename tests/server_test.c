@@ -56,9 +56,17 @@ typedef struct
     bool        bSilent;
     bool        bCompressOwner;
     const char *silentName;
+    /* Answered over UDP with TC set, so the daemon has to come back over TCP */
+    const char *truncateName;
     int         delayMs;
+    int         tcpFd;
+    /* 0 sends the real length. Anything else is written instead */
+    int         tcpLength;
+    int         tcpDelayMs;
+    bool        bTcpSilent;
     volatile bool bStop;
     volatile int  served;
+    volatile int  tcpServed;
 } FakeUpstream;
 
 /* The answer has to be owned by the name that was asked, or the daemon's
@@ -133,6 +141,23 @@ static void *FakeUpstreamMain(void *arg)
             nanosleep(&nap, NULL);
         }
 
+        if(fake->truncateName != NULL)
+        {
+            WireName big;
+            if(NameOf(fake->truncateName, &big)
+               && WireNameEqual(&question.name, &big))
+            {
+                Builder t = { reply, sizeof reply, 0 };
+                PutHeader(&t, header.id, 0x8380u, 1, 0, 0, 0);
+                PutBytes(&t, query + WIRE_HEADER_BYTES,
+                         reader.pos - WIRE_HEADER_BYTES);
+                sendto(fake->fd, reply, t.len, 0, (struct sockaddr *)&from,
+                       fromLen);
+                fake->served++;
+                continue;
+            }
+        }
+
         Builder b = { reply, sizeof reply, 0 };
         PutHeader(&b, header.id, 0x8180u, 1, 1, 0, 0);
         PutBytes(&b, query + WIRE_HEADER_BYTES,
@@ -155,6 +180,113 @@ static void *FakeUpstreamMain(void *arg)
     }
 
     return NULL;
+}
+
+/* The same resolver reachable over TCP, which is where a truncated answer
+   sends the daemon. One connection an exchange, as DNS over TCP allows. */
+static void *FakeTcpMain(void *arg)
+{
+    FakeUpstream *fake = arg;
+
+    while(!fake->bStop)
+    {
+        uint8_t query[4096];
+        uint8_t reply[8192];
+
+        int conn = accept(fake->tcpFd, NULL, NULL);
+        if(conn < 0)
+            continue;
+
+        if(fake->bStop)
+        {
+            close(conn);
+            break;
+        }
+
+        ssize_t got = recv(conn, query, sizeof query, 0);
+        if(got < (ssize_t)(2 + WIRE_HEADER_BYTES))
+        {
+            close(conn);
+            continue;
+        }
+
+        if(fake->bTcpSilent)
+        {
+            fake->tcpServed++;
+            /* Held open and silent, so the daemon sees a live peer that never
+               answers rather than a refused connection */
+            while(!fake->bStop)
+            {
+                struct timespec nap = { .tv_sec = 0, .tv_nsec = 20000000L };
+                nanosleep(&nap, NULL);
+            }
+            close(conn);
+            continue;
+        }
+
+        if(fake->tcpDelayMs > 0)
+        {
+            struct timespec nap = {
+                .tv_sec  = fake->tcpDelayMs / 1000,
+                .tv_nsec = (long)(fake->tcpDelayMs % 1000) * 1000000L
+            };
+            nanosleep(&nap, NULL);
+        }
+
+        Reader       reader;
+        WireHeader   header;
+        WireQuestion question;
+
+        ReaderInit(&reader, query + 2, (size_t)got - 2);
+        if(!WireParseHeader(&reader, &header)
+           || !WireParseQuestion(&reader, &question))
+        {
+            close(conn);
+            continue;
+        }
+
+        Builder b = { reply + 2, sizeof reply - 2, 0 };
+        PutHeader(&b, header.id, 0x8180u, 1, 1, 0, 0);
+        PutBytes(&b, query + 2 + WIRE_HEADER_BYTES,
+                 reader.pos - WIRE_HEADER_BYTES);
+        PutAnswerFor(&b, &question, fake->answerTtl, false);
+
+        size_t declared = (fake->tcpLength != 0) ? (size_t)fake->tcpLength
+                                                 : b.len;
+        reply[0] = (uint8_t)(declared >> 8);
+        reply[1] = (uint8_t)declared;
+
+        send(conn, reply, b.len + 2, 0);
+        close(conn);
+        fake->tcpServed++;
+    }
+
+    return NULL;
+}
+
+static int OpenLoopbackTcp(uint16_t port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr;
+    int one = 1;
+
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if(fd < 0)
+        return -1;
+
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if(bind(fd, (struct sockaddr *)&addr, sizeof addr) != 0
+       || listen(fd, 4) != 0)
+    {
+        close(fd);
+        return -1;
+    }
+
+    return fd;
 }
 
 static int OpenLoopbackUdp(uint16_t port)
@@ -248,6 +380,9 @@ typedef struct
     FakeUpstream fake2;
     pthread_t    thread2;
     bool         bThread2;
+
+    pthread_t    tcpThread;
+    bool         bTcpThread;
 } Fixture;
 
 static void FixtureDown(Fixture *fix);
@@ -256,8 +391,10 @@ static bool FixtureStart(Fixture *fix, uint32_t ttl, int padding, bool bSilent,
                          bool bPtrRoute, bool bCompressOwner)
 {
     memset(fix, 0, sizeof *fix);
-    fix->fake.fd  = -1;
-    fix->fake2.fd = -1;
+    fix->fake.fd     = -1;
+    fix->fake.tcpFd  = -1;
+    fix->fake2.fd    = -1;
+    fix->fake2.tcpFd = -1;
 
     fix->fake.fd        = OpenLoopbackUdp(UPSTREAM_PORT);
     fix->fake.answerTtl      = ttl;
@@ -378,8 +515,44 @@ static void StopFake(FakeUpstream *fake, pthread_t thread, uint16_t port)
     close(fake->fd);
 }
 
+/* Brings the resolver's TCP side up beside the UDP one, on the same port */
+static bool FixtureTcpUp(Fixture *fix)
+{
+    fix->fake.tcpFd = OpenLoopbackTcp(UPSTREAM_PORT);
+    if(fix->fake.tcpFd < 0)
+        return false;
+
+    if(pthread_create(&fix->tcpThread, NULL, FakeTcpMain, &fix->fake) != 0)
+    {
+        close(fix->fake.tcpFd);
+        fix->fake.tcpFd = -1;
+        return false;
+    }
+
+    fix->bTcpThread = true;
+    return true;
+}
+
+static void StopFakeTcp(Fixture *fix)
+{
+    fix->fake.bStop = true;
+
+    /* Unblocks accept without racing the listener's teardown */
+    int poker = ConnectLoopback(UPSTREAM_PORT, SOCK_STREAM);
+    if(poker >= 0)
+        close(poker);
+
+    pthread_join(fix->tcpThread, NULL);
+    close(fix->fake.tcpFd);
+    fix->fake.tcpFd    = -1;
+    fix->bTcpThread    = false;
+}
+
 static void FixtureDown(Fixture *fix)
 {
+    if(fix->bTcpThread)
+        StopFakeTcp(fix);
+
     if(fix->bThread)
     {
         StopFake(&fix->fake, fix->thread, UPSTREAM_PORT);
@@ -756,6 +929,214 @@ static void TestTcpQuery(void)
     }
 
     close(client);
+    FixtureDown(&fix);
+}
+
+/* A truncated datagram is the only signal that the answer does not fit UDP.
+   Without the TCP retry the client asks again over TCP and gets truncated
+   again, with no path to the rest of the answer. */
+static void TestTruncatedUdpAnswerRetriesOverTcp(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t framed[514];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        fprintf(G_OUT, "SKIP tcp fallback: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.truncateName = "big.example.com";
+    if(!FixtureTcpUp(&fix))
+    {
+        fprintf(G_OUT, "SKIP tcp fallback: cannot bind upstream TCP\n");
+        FixtureDown(&fix);
+        return;
+    }
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_STREAM);
+    CHECK(client >= 0);
+    Pump(&fix.server, 2);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0x5151,
+                                 "big.example.com", WIRE_TYPE_A);
+    framed[0] = (uint8_t)(queryLen >> 8);
+    framed[1] = (uint8_t)queryLen;
+    memcpy(framed + 2, query, queryLen);
+    CHECK(send(client, framed, queryLen + 2, 0) == (ssize_t)(queryLen + 2));
+
+    Pump(&fix.server, 30);
+
+    CHECK(fix.fake.served >= 1);
+    CHECK(fix.fake.tcpServed == 1);
+    CHECK(fix.upstreams.tcpFallbacks == 1);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)(2 + WIRE_HEADER_BYTES));
+
+    if(got > 2)
+    {
+        size_t declared = ((size_t)reply[0] << 8) | reply[1];
+        CHECK(declared == (size_t)got - 2);
+        CHECK(MsgId(reply + 2, declared) == 0x5151);
+        /* The complete answer, not the truncated one that started this */
+        CHECK((MsgFlags(reply + 2, declared) & MSG_FLAG_TC) == 0);
+        CHECK(reply[2 + 6] == 0 && reply[2 + 7] == 1);
+    }
+
+    /* The slot is handed back, or the next large answer never gets one */
+    CHECK(!fix.upstreams.tcpSlot.bUsed);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
+/* The length prefix arrives from the network and sizes a read */
+static void TestInvalidTcpLengthIsRefused(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        fprintf(G_OUT, "SKIP tcp length: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.truncateName = "big.example.com";
+    fix.fake.tcpLength    = CFG_TCP_MSG_BYTES + 1;
+    if(!FixtureTcpUp(&fix))
+    {
+        fprintf(G_OUT, "SKIP tcp length: cannot bind upstream TCP\n");
+        FixtureDown(&fix);
+        return;
+    }
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0x5252,
+                                 "big.example.com", WIRE_TYPE_A);
+    send(client, query, queryLen, 0);
+
+    Pump(&fix.server, 40);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        CHECK(MsgId(reply, (size_t)got) == 0x5252);
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_SERVFAIL);
+    }
+
+    CHECK(!fix.upstreams.tcpSlot.bUsed);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
+/* A peer that accepts and says nothing is the timeout case, and it has to
+   spend the retry budget and blame the resolver like any other transport */
+static void TestSilentTcpFollowsRetryPolicy(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        fprintf(G_OUT, "SKIP tcp timeout: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.truncateName = "big.example.com";
+    fix.fake.bTcpSilent   = true;
+    if(!FixtureTcpUp(&fix))
+    {
+        fprintf(G_OUT, "SKIP tcp timeout: cannot bind upstream TCP\n");
+        FixtureDown(&fix);
+        return;
+    }
+
+    int client = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(client >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0x5353,
+                                 "big.example.com", WIRE_TYPE_A);
+    send(client, query, queryLen, 0);
+
+    Pump(&fix.server, 60);
+
+    ssize_t got = recv(client, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+    {
+        CHECK(MsgId(reply, (size_t)got) == 0x5353);
+        CHECK((MsgFlags(reply, (size_t)got) & 0x000Fu) == MSG_RCODE_SERVFAIL);
+    }
+
+    CHECK(fix.server.retries > 0);
+    CHECK(fix.upstreams.members[0].failures > 0);
+    CHECK(!fix.upstreams.tcpSlot.bUsed);
+
+    close(client);
+    FixtureDown(&fix);
+}
+
+/* The fallback runs on the poll loop, so a slow one may not hold the box */
+static void TestSlowTcpDoesNotDelayOtherClients(void)
+{
+    Fixture fix;
+    uint8_t query[512];
+    uint8_t reply[2048];
+
+    if(!FixtureUp(&fix, 300, 0, false))
+    {
+        fprintf(G_OUT, "SKIP slow tcp: cannot bind test ports\n");
+        return;
+    }
+
+    fix.fake.truncateName = "big.example.com";
+    fix.fake.tcpDelayMs   = 400;
+    if(!FixtureTcpUp(&fix))
+    {
+        fprintf(G_OUT, "SKIP slow tcp: cannot bind upstream TCP\n");
+        FixtureDown(&fix);
+        return;
+    }
+
+    int slow = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    int fast = ConnectLoopback(SERVER_PORT, SOCK_DGRAM);
+    CHECK(slow >= 0 && fast >= 0);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 0x5454,
+                                 "big.example.com", WIRE_TYPE_A);
+    send(slow, query, queryLen, 0);
+    PumpBriefly(&fix.server, 4);
+
+    queryLen = BuildQuery(query, sizeof query, 0x5555,
+                          "quick.example.com", WIRE_TYPE_A);
+    send(fast, query, queryLen, 0);
+
+    PumpBriefly(&fix.server, 12);
+
+    /* Answered while the fallback is still waiting on its slow peer */
+    ssize_t got = recv(fast, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+    if(got > 0)
+        CHECK(MsgId(reply, (size_t)got) == 0x5555);
+
+    CHECK(recv(slow, reply, sizeof reply, MSG_DONTWAIT) < 0);
+
+    Pump(&fix.server, 30);
+    got = recv(slow, reply, sizeof reply, MSG_DONTWAIT);
+    CHECK(got > (ssize_t)WIRE_HEADER_BYTES);
+
+    close(slow);
+    close(fast);
     FixtureDown(&fix);
 }
 
@@ -1705,6 +2086,10 @@ int main(void)
     TestClientsRestoreCaseOnCacheHits();
     TestCompressedOwnerTracksClientQuestionCase();
     TestTcpQuery();
+    TestTruncatedUdpAnswerRetriesOverTcp();
+    TestInvalidTcpLengthIsRefused();
+    TestSilentTcpFollowsRetryPolicy();
+    TestSlowTcpDoesNotDelayOtherClients();
     TestOversizedUdpAnswerSetsTruncated();
     TestUpstreamSilenceBecomesServfail();
     TestRetryMovesToTheSecondUpstream();

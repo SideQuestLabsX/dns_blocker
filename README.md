@@ -7,7 +7,10 @@ encrypted profile.
 
 The daemon resolves names and filters them. It listens on UDP and TCP, parses
 RFC 1035 messages, caches responses, blocks names from a compiled list and
-forwards the rest through plaintext DNS, DNS-over-HTTPS or DNS-over-TLS.
+forwards the rest through plaintext DNS, DNS-over-HTTPS or DNS-over-TLS. An
+answer too large for a datagram sets `TC` toward the client, which retries over
+TCP, and a plaintext resolver that answers with `TC` is asked again over TCP so
+the complete answer is available to give.
 
 ## Setup
 

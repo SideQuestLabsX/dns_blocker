@@ -691,6 +691,26 @@ static void TxResend(Server *server, Transaction *tx, uint32_t nowMs)
     (void)TxRetry(server, tx, nowMs);
 }
 
+/* A truncated datagram says the answer does not fit UDP, so the client would
+   retry over TCP and this daemon would ask over UDP again and truncate again.
+   Refusal leaves the truncated answer to be delivered, which is what happened
+   before this path existed */
+static bool TxUpgradeToTcp(Transaction *tx, const uint8_t *reply,
+                           size_t replyLen, uint32_t nowMs)
+{
+    if(tx->exchange.transport != UpstreamTransport_Plaintext
+       || tx->exchange.bTcpFallback
+       || (MsgFlags(reply, replyLen) & MSG_FLAG_TC) == 0)
+        return false;
+
+    if(!UpstreamBeginTcp(tx->pool, &tx->exchange, tx->query, tx->queryLen,
+                         nowMs))
+        return false;
+
+    tx->deadlineMs = nowMs + TxTimeoutMs(tx);
+    return true;
+}
+
 static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
 {
     uint8_t reply[CFG_TCP_MSG_BYTES];
@@ -725,6 +745,9 @@ static void TxReadable(Server *server, Transaction *tx, uint32_t nowMs)
 
         return;
     }
+
+    if(TxUpgradeToTcp(tx, reply, replyLen, nowMs))
+        return;
 
     TxFinish(server, tx, reply, replyLen);
 }
