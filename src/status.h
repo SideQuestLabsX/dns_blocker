@@ -148,4 +148,10 @@ bool StatusReport(const char *path, FILE *out);
 
 const char *StatusTransportName(uint8_t transport);
 
+/* Why the last sync stopped. The segment stores the reason as a number and this
+   file is built in both profiles, so the names are a second copy of the ones
+   `SyncFailText` gives. `main.c` asserts the two enums stay the same length. */
+#define STATUS_SYNC_FAIL_COUNT 10u
+const char *StatusSyncFailName(uint32_t fail);
+
 #endif

@@ -358,10 +358,17 @@ void StatusPrint(const StatusBlock *block, FILE *out)
             (unsigned long long)block->blocklistBytes,
             (block->blocklistTier[0] != '\0') ? block->blocklistTier
                                               : "unnamed");
-    fprintf(out, "sync        %s, next in %llu s, installed %llu bytes\n",
+    fprintf(out, "sync        %s, next in %llu s, installed %llu bytes",
             (block->sync.bActive != 0) ? "running" : "idle",
             (unsigned long long)(block->sync.nextDueMs / 1000u),
             (unsigned long long)block->sync.installedBytes);
+
+    /* A sync that keeps failing retries on a timer and is otherwise silent
+       here, which is how two fetch buffer defects survived a green suite */
+    if(block->sync.fail != 0)
+        fprintf(out, ", %s", StatusSyncFailName(block->sync.fail));
+
+    fprintf(out, "\n");
     PrintLatency(out, "service", &block->service);
 
     for(uint32_t i = 0; i < block->upstreamCount; i++)
@@ -403,6 +410,24 @@ bool StatusReport(const char *path, FILE *out)
 
     StatusPrint(&block, out);
     return true;
+}
+
+const char *StatusSyncFailName(uint32_t fail)
+{
+    switch(fail)
+    {
+        case 0: return "no failure";
+        case 1: return "the transfer failed";
+        case 2: return "the staging file could not be opened";
+        case 3: return "the listing names no such asset";
+        case 4: return "the digest did not match";
+        case 5: return "the install failed";
+        case 6: return "the locator names no valid release";
+        case 7: return "the release URL is invalid";
+        case 8: return "the configured tier is not a valid name";
+        case 9: return "no TLS channel was free";
+        default: return "unknown";
+    }
 }
 
 const char *StatusTransportName(uint8_t transport)

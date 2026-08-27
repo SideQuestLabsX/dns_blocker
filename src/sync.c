@@ -736,6 +736,7 @@ const char *SyncFailText(const SyncJob *job)
         case SyncFail_Url:      return "the release URL is invalid";
         case SyncFail_Tier:     return "the configured tier is not a valid name";
         case SyncFail_Capacity: return "TLS capacity is reserved for client queries";
+        case SyncFail_Count:    break;
     }
 
     return "unknown";

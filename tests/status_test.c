@@ -241,6 +241,84 @@ static void TestFinalSnapshotReportsNoSync(const char *path)
     StatusClose(&status);
 }
 
+/* A sync that keeps failing retries on a timer and says nothing else. The
+   segment is the only place an operator can see why without the daemon's
+   stderr, so the reason has to reach the printed line. */
+static void TestSyncFailureIsPrinted(const char *path)
+{
+    Status       status;
+    Server       server;
+    Cache        cache;
+    UpstreamPool pool;
+    Blocklist    list;
+    StatusBlock  block;
+
+    FillServer(&server);
+    FillCache(&cache);
+    FillPool(&pool);
+    memset(&list, 0, sizeof list);
+
+    CHECK(StatusOpen(&status, path, 1000));
+
+    /* A healthy run stays one line, with no reason appended */
+    StatusSync healthy = { 0, 0, 6543894, 900000 };
+    StatusPublish(&status, &server, &cache, &pool, &list, &healthy, NULL, 4000);
+    CHECK(StatusRead(path, &block));
+
+    char  *text = NULL;
+    size_t len  = 0;
+    FILE  *out  = open_memstream(&text, &len);
+    CHECK(out != NULL);
+    if(out == NULL)
+    {
+        StatusClose(&status);
+        return;
+    }
+    StatusPrint(&block, out);
+    fclose(out);
+    CHECK(strstr(text, "sync        idle, next in 900 s") != NULL);
+    CHECK(strstr(text, "no failure") == NULL);
+    free(text);
+
+    /* 4 is SyncFail_Digest, which is what a corrupted download looks like */
+    StatusSync failed = { 0, 4, 6543894, 900000 };
+    StatusPublish(&status, &server, &cache, &pool, &list, &failed, NULL, 5000);
+    CHECK(StatusRead(path, &block));
+
+    text = NULL;
+    len  = 0;
+    out  = open_memstream(&text, &len);
+    CHECK(out != NULL);
+    if(out == NULL)
+    {
+        StatusClose(&status);
+        return;
+    }
+    StatusPrint(&block, out);
+    fclose(out);
+    CHECK(strstr(text, "the digest did not match") != NULL);
+    free(text);
+
+    StatusClose(&status);
+}
+
+/* The names are a second copy of SyncFailText, kept because status.c is built
+   in both profiles. A value added to one and not the other prints "unknown",
+   so every value in range has to be named. main.c holds the two lengths equal
+   at compile time. */
+static void TestEverySyncFailureIsNamed(void)
+{
+    for(uint32_t fail = 0; fail < STATUS_SYNC_FAIL_COUNT; fail++)
+    {
+        const char *name = StatusSyncFailName(fail);
+        CHECK(name != NULL && name[0] != '\0');
+        CHECK(strcmp(name, "unknown") != 0);
+    }
+
+    CHECK(strcmp(StatusSyncFailName(STATUS_SYNC_FAIL_COUNT), "unknown") == 0);
+    CHECK(strcmp(StatusSyncFailName(4242), "unknown") == 0);
+}
+
 /* Status text is part of the operator interface */
 static void TestPrintRenders(const char *path)
 {
@@ -406,6 +484,8 @@ int main(void)
     TestPublishAndRead(path);
     TestExpiredHoldIsNotReported(path);
     TestFinalSnapshotReportsNoSync(path);
+    TestSyncFailureIsPrinted(path);
+    TestEverySyncFailureIsNamed();
     TestPrintRenders(path);
     TestTornReadIsRefused(path);
     TestForeignSegmentIsRefused(path);

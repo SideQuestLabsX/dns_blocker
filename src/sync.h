@@ -95,7 +95,11 @@ typedef enum
     SyncFail_Locator,
     SyncFail_Url,
     SyncFail_Tier,
-    SyncFail_Capacity
+    SyncFail_Capacity,
+    /* Keeps the status segment's copy of these names honest. main.c asserts it
+       against STATUS_SYNC_FAIL_COUNT, because status.c is built in both
+       profiles and cannot see this enum */
+    SyncFail_Count
 } SyncFail;
 
 /* Sequences the three transfers and the install. Nothing here resolves a name:

@@ -159,6 +159,12 @@ static void Report(const Memory *mem, const Blocklist *list, const Cache *cache,
 
 #if defined(PROFILE_ENCRYPTED)
 
+/* status.c carries its own names for SyncFail, because the segment stores the
+   reason as a number and that file is built in both profiles. This is the only
+   place that sees both, so it is where the two are held together */
+_Static_assert((unsigned)SyncFail_Count == STATUS_SYNC_FAIL_COUNT,
+               "a SyncFail value was added without a status name for it");
+
 /* Wiring only. Every branch below hands off to something tested on its own:
    the driver sequences the transfers, the server resolves on its reserved slot
    and the blocklist performs the swap. */

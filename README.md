@@ -599,10 +599,17 @@ latency       round trip, no samples
 
 Pass a path to read a segment somewhere else: `dns_blocker --status /run/x`.
 
-`blocklist` shows the active list and selected tier. `latency` uses microseconds
-below one millisecond. The minimum, mean and maximum are exact. Histogram
-percentiles have up to one part in eight of error. `service` includes local,
-cached and forwarded answers.
+`blocklist` shows the active list and selected tier. `sync` gains the reason
+when the last attempt failed, which is the only place to see it without the
+daemon's `stderr`:
+
+```text
+sync        idle, next in 780 s, installed 2717008 bytes, the digest did not match
+```
+
+`latency` uses microseconds below one millisecond. The minimum, mean and maximum
+are exact. Histogram percentiles have up to one part in eight of error.
+`service` includes local, cached and forwarded answers.
 
 The same binary reads and writes it, so a reader can never hold a stale idea of
 the layout. It maps the file read-only and exits, which cannot disturb a running
