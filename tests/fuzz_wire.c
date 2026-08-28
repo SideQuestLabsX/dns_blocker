@@ -3,6 +3,8 @@
 #include "verify.h"
 #include "wire.h"
 
+#include "fuzzseed.h"
+
 #include <stdint.h>
 #include <stddef.h>
 
@@ -49,6 +51,56 @@ static void FuzzCache(const uint8_t *data, size_t size)
                           question.klass, G_FUZZ_CLOCK + 100000u,
                           out, sizeof out, &outLen);
     }
+}
+
+/* A valid query and a valid response with an OPT record. */
+static const uint8_t G_SEED_QUERY[] = {
+    0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0,
+    0x00, 0x01, 0x00, 0x01,
+    0x00, 0x00, 0x29, 0x04, 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t G_SEED_RESPONSE[] = {
+    0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+    3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0,
+    0x00, 0x01, 0x00, 0x01,
+    0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2C,
+    0x00, 0x04, 0x5D, 0xB8, 0xD8, 0x22
+};
+
+const char *FuzzTargetName(void)
+{
+    return "fuzz-wire";
+}
+
+/* 0xC0 is the byte that turns a length prefix into a jump. */
+uint8_t FuzzSpliceByte(void)
+{
+    return 0xC0u;
+}
+
+size_t FuzzSeedCount(void)
+{
+    return 2;
+}
+
+FuzzSeed FuzzSeedAt(size_t index)
+{
+    FuzzSeed seed;
+
+    if(index == 0)
+    {
+        seed.data = G_SEED_QUERY;
+        seed.size = sizeof G_SEED_QUERY;
+    }
+    else
+    {
+        seed.data = G_SEED_RESPONSE;
+        seed.size = sizeof G_SEED_RESPONSE;
+    }
+
+    return seed;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)

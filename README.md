@@ -453,18 +453,19 @@ make test
 ```
 
 This runs the unit tests and the end-to-end tests with AddressSanitizer and
-UndefinedBehaviorSanitizer, then a short fuzz run. `make fuzz` builds the
-libFuzzer target and needs clang.
+UndefinedBehaviorSanitizer, then a short fuzz run against the message parser and
+another against the compiled blocklist. `make fuzz` builds the libFuzzer targets
+and needs clang.
 
 `make test-static` builds a **subset** without sanitizers, using the shipped
 flags so it cross-compiles: the wire, cache, message, verification, blocklist,
 host-map, fetch, status and trust tests. The encrypted profile adds the DoH and
 DoT state tests and the real mbedTLS backend test. The rest of the suite, which
-includes the server, arena, upstream and sync tests and the fuzz driver, runs on
+includes the server, arena, upstream and sync tests and the fuzz drivers, runs on
 the host only.
 
-CI runs the host and encrypted tests, links both profiles and fuzzes against a
-corpus that stays between runs. Alpine target toolchains build six targets in
+CI runs the host and encrypted tests, links both profiles and fuzzes each target
+against a corpus that stays between runs. Alpine target toolchains build six targets in
 containers. Zig builds LoongArch and both MIPS byte orders. QEMU runs each
 non-x86 target on its own instruction set, which is what exercises the byte-wise
 reads the parser uses. Generic ARMv6 emulation does not reproduce ARM1176

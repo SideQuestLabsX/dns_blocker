@@ -295,7 +295,7 @@ TEST_BIN := $(BUILD)/wire_test $(BUILD)/cache_test $(BUILD)/msg_test \
 	$(BUILD)/hosts_test $(BUILD)/latency_test $(BUILD)/upstream_test \
 	$(BUILD)/fetch_test $(BUILD)/sync_test $(BUILD)/status_test \
 	$(BUILD)/server_test $(BUILD)/tls_test $(BUILD)/arena_test $(BUILD)/trust_test \
-	$(BUILD)/fuzz_quick \
+	$(BUILD)/fuzz_wire_quick $(BUILD)/fuzz_blocklist_quick \
 	$(ENCRYPTED_TESTS)
 
 $(TEST_BIN): $(BUILD)/features.stamp
@@ -317,7 +317,8 @@ test: $(TEST_BIN)
 	@$(BUILD)/tls_test
 	@$(BUILD)/arena_test
 	@$(BUILD)/trust_test
-	@$(BUILD)/fuzz_quick 50000
+	@$(BUILD)/fuzz_wire_quick 50000
+	@$(BUILD)/fuzz_blocklist_quick 50000
 ifeq ($(PROFILE),encrypted)
 	@$(BUILD)/upstream_dot_test
 	@$(BUILD)/tls_backend_test
@@ -449,22 +450,32 @@ $(BUILD)/upstream_dot_test_native: tests/upstream_dot_test.c src/upstream.c src/
 $(BUILD)/tls_backend_test_native: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@ $(LIBS)
 
-# Coverage-blind driver for the same entry point, so the fuzz target is
-# exercised on any toolchain with a sanitizer
-fuzz-quick: $(BUILD)/fuzz_quick
-	@$(BUILD)/fuzz_quick
+# Coverage-blind driver for the same entry points, so the fuzz targets are
+# exercised on any toolchain with a sanitizer. One driver, and each entry point
+# names itself and supplies its own seeds through tests/fuzzseed.h
+fuzz-quick: $(BUILD)/fuzz_wire_quick $(BUILD)/fuzz_blocklist_quick
+	@$(BUILD)/fuzz_wire_quick
+	@$(BUILD)/fuzz_blocklist_quick
 
-$(BUILD)/fuzz_quick: tests/fuzz_standalone.c tests/fuzz_wire.c src/wire.c src/cache.c src/verify.c src/arena.c $(HDR) | $(BUILD)
+$(BUILD)/fuzz_wire_quick: tests/fuzz_standalone.c tests/fuzz_wire.c src/wire.c src/cache.c src/verify.c src/arena.c $(HDR) tests/fuzzseed.h | $(BUILD)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
-# libFuzzer needs clang. Run the binary directly, optionally with -max_total_time
+$(BUILD)/fuzz_blocklist_quick: tests/fuzz_standalone.c tests/fuzz_blocklist.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) tests/fuzzseed.h tools/trieimage.h | $(BUILD)
+	$(CC) $(TEST_CFLAGS) -Itools $(filter %.c,$^) -o $@
+
+# libFuzzer needs clang. Run a binary directly, optionally with -max_total_time
 FUZZ_CC ?= clang
 
-fuzz: $(BUILD)/fuzz_wire
+fuzz: $(BUILD)/fuzz_wire $(BUILD)/fuzz_blocklist
 	@echo "run: $(BUILD)/fuzz_wire -max_total_time=60"
+	@echo "run: $(BUILD)/fuzz_blocklist -max_total_time=60"
 
 $(BUILD)/fuzz_wire: tests/fuzz_wire.c src/wire.c src/cache.c src/verify.c src/arena.c $(HDR) $(BUILD)/features.stamp | $(BUILD)
 	$(FUZZ_CC) -std=c11 -O1 -g -fsanitize=fuzzer,address,undefined -Isrc \
+		$(FEATURES) $(filter %.c,$^) -o $@
+
+$(BUILD)/fuzz_blocklist: tests/fuzz_blocklist.c src/blocklist.c src/wire.c $(EMBED_SRC) $(HDR) tools/trieimage.h $(BUILD)/features.stamp | $(BUILD)
+	$(FUZZ_CC) -std=c11 -O1 -g -fsanitize=fuzzer,address,undefined -Isrc -Itools \
 		$(FEATURES) $(filter %.c,$^) -o $@
 
 $(BUILD):

@@ -90,19 +90,25 @@ jobs:
       - name: Restore corpus
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: .fuzz-corpus
+          path: |
+            .fuzz-corpus
+            .fuzz-corpus-blocklist
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
 
-      - name: Build fuzzer
+      - name: Build fuzzers
         run: make fuzz PROFILE=minimal
 
+      # Each target gets the same budget, so one run covers the message parser
+      # and the compiled list the daemon maps
       - name: Run
         run: |
-          mkdir -p .fuzz-corpus
+          mkdir -p .fuzz-corpus .fuzz-corpus-blocklist
           seconds=120
           if [ "${{ github.event_name }}" = "schedule" ]; then seconds=900; fi
           ./build/x86_64-minimal/fuzz_wire .fuzz-corpus \
+            -max_total_time=$seconds -print_final_stats=1
+          ./build/x86_64-minimal/fuzz_blocklist .fuzz-corpus-blocklist \
             -max_total_time=$seconds -print_final_stats=1
 
       - name: Upload crashers
