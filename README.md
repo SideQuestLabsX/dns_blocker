@@ -437,14 +437,17 @@ The manually triggered `Binary release` workflow creates a dated tag such as
 
 | Asset | Contents |
 |---|---|
+| `dns_blocker-<arch>-<profile>.tar.gz` | Deployment package: daemon, probe, unit, installer, license files, and the trust tool of an encrypted build |
 | `dns_blocker-<arch>-minimal` | Minimal profile daemon |
 | `dns_blocker-<arch>-encrypted` | Encrypted profile daemon |
 | `dns_blocker-<arch>.check` | Health probe |
-| `dns_blocker.sha256` | SHA-256 digest for every binary and the license file |
-| `THIRD_PARTY_LICENSES.md` | License text shipped with the binaries |
+| `dns_blocker.sha256` | SHA-256 digest for every asset above and the license files |
+| `LICENSE` | This project's own terms |
+| `THIRD_PARTY_LICENSES.md` | Terms of the code linked into the binaries |
 
 Each binary is static musl. The release workflow builds and tests every
-supported target before it publishes the release.
+supported target, then unpacks and installs one package before it publishes the
+release.
 
 ## Test
 
@@ -476,6 +479,29 @@ alignment trapping, so that behaviour still needs a real board.
 The daemon makes `/run/dns_blocker` at start-up when its account may write to
 `/run`. The directory holds the synced list and the staging file that is renamed
 onto it, and a tmpfs loses it at every boot.
+
+### From a release package
+
+Every binary release publishes `dns_blocker-<arch>-<profile>.tar.gz`. It holds
+the daemon, the health probe, the systemd unit, an installer and both license
+files. An encrypted package also carries the trust bundle tool and the
+configuration that build was compiled against:
+
+```sh
+tar -xzf dns_blocker-armv6-encrypted.tar.gz
+cd dns_blocker-armv6-encrypted
+sha256sum -c SHA256SUMS
+sudo sh install.sh
+```
+
+`install.sh` checks the digests itself and refuses a package that does not
+match. It writes the daemon and the probe to `/usr/local/sbin`, the unit to
+`/etc/systemd/system` and the license files to `/usr/local/lib/dns_blocker`,
+then prints the commands that generate the trust bundle and start the service.
+It starts nothing. `--destdir DIR` stages the same layout under another root,
+and `INSTALL.md` inside the package covers the rest.
+
+`make package` builds the same archive from a checkout.
 
 ### Under `init`
 
@@ -528,8 +554,9 @@ sync fails, and it says so on `stderr`.
 
 ### Under systemd
 
-`deploy/dns_blocker.service` runs the daemon under systemd 247 or later. Put the
-binary and the runtime files where the unit expects them:
+`deploy/dns_blocker.service` runs the daemon under systemd 247 or later. A
+release package installs it. From a checkout, put the binary and the runtime
+files where the unit expects them:
 
 ```sh
 sudo install -Dm755 build/x86_64-encrypted/dns_blocker /usr/local/sbin/dns_blocker
@@ -563,6 +590,11 @@ result before writing it, and refuses to write a bundle above
 Four roots and about 3 KB against a 16 KiB cap, on the shipped defaults. Do not
 substitute a system CA store: those run past 180 KB and the daemon refuses them,
 naming the size and the cap.
+
+An encrypted release package carries the same tool at
+`/usr/local/lib/dns_blocker/make-trust-bundle.sh`, with `trust-bundle.env`
+beside it. The tool reads the cap and the host list from that file when there is
+no `src/config.h`, so a packaged install needs no checkout.
 
 **Roots rotate.** Regenerate the bundle after changing an upstream, and whenever
 the blocklist sync and DoH begin failing together, because one stale bundle

@@ -118,6 +118,17 @@ jobs:
           install -m755 "build/${ARCH}-minimal/dns_blocker.check" \
             "release/dns_blocker-${ARCH}.check"
 
+      # One installable package a profile, carrying its own license text. Only
+      # the minimal build makes the probe, so both packages take that copy
+      - name: Build deployment packages
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          CHECK_BIN="build/${ARCH}-minimal/dns_blocker.check" \
+            sh tools/package-release.sh "$ARCH" minimal release
+          CHECK_BIN="build/${ARCH}-minimal/dns_blocker.check" \
+            sh tools/package-release.sh "$ARCH" encrypted release
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.arch }}
@@ -148,11 +159,28 @@ jobs:
             test -s "release/dns_blocker-${arch}-minimal"
             test -s "release/dns_blocker-${arch}-encrypted"
             test -s "release/dns_blocker-${arch}.check"
+            test -s "release/dns_blocker-${arch}-minimal.tar.gz"
+            test -s "release/dns_blocker-${arch}-encrypted.tar.gz"
           done
           test -s release/LICENSE
           (cd release && sha256sum dns_blocker-* THIRD_PARTY_LICENSES.md LICENSE \
             > dns_blocker.sha256)
           (cd release && sha256sum -c dns_blocker.sha256)
+
+      # An operator runs the archive, so one archive gets run here. The runner
+      # is discarded afterwards, so this installs to the real paths the unit
+      # names and systemd can read the unit back
+      - name: Install one package
+        run: |
+          work=$(mktemp -d)
+          tar -xzf release/dns_blocker-x86_64-encrypted.tar.gz -C "$work"
+          (cd "$work/dns_blocker-x86_64-encrypted" && sudo sh install.sh)
+          test -x /usr/local/sbin/dns_blocker
+          test -x /usr/local/sbin/dns_blocker.check
+          test -s /usr/local/lib/dns_blocker/trust-bundle.env
+          test -s /usr/local/lib/dns_blocker/THIRD_PARTY_LICENSES.md
+          test -s /usr/local/lib/dns_blocker/LICENSE
+          systemd-analyze verify /etc/systemd/system/dns_blocker.service
 
       - name: Publish GitHub release
         env:
@@ -160,12 +188,13 @@ jobs:
         run: |
           date=$(date -u +%Y-%m-%d)
           tag="binary-${date}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          notes=$(printf '%s\n\n%s\n%s\n\n%s\n%s\n' \
+          notes=$(printf '%s\n\n%s\n%s\n\n%s\n\n%s\n%s\n' \
             "Static musl binaries built from ${GITHUB_SHA}." \
             "Architectures: x86_64, x86, aarch64, armv7, armv6, riscv64, loongarch64, mips and mipsel." \
             "Each architecture has minimal and encrypted profiles plus the health probe. Verify downloads with dns_blocker.sha256." \
+            "dns_blocker-<arch>-<profile>.tar.gz is the deployment package: the daemon, the probe, the systemd unit, an installer, the trust bundle tool of an encrypted build and both license files. Unpack it and run install.sh." \
             "This project's own code is public domain under The Unlicense, published here as LICENSE." \
-            "The encrypted profile links musl and Mbed TLS statically. THIRD_PARTY_LICENSES.md carries their terms as one asset for the whole release, not a copy inside each binary. No release binary contains blocklist data.")
+            "The encrypted profile links musl and Mbed TLS statically. THIRD_PARTY_LICENSES.md carries their terms, as a release asset and again inside every package. No release binary contains blocklist data.")
 
           gh release create "$tag" release/* --target "$GITHUB_SHA" \
             --title "dns_blocker ${date}" --notes "$notes" --draft

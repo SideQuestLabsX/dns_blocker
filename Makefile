@@ -168,7 +168,7 @@ endef
 # stale generator writes a list in a format the daemon no longer reads
 HDR := $(wildcard src/*.h)
 
-.PHONY: all check clean tools test test-static test-static-run fuzz fuzz-quick mbedtls FORCE
+.PHONY: all check clean package tools test test-static test-static-run fuzz fuzz-quick mbedtls FORCE
 all: $(TARGET)
 
 $(TARGET): $(OBJ) $(TLS_DEPS) | $(LICENSE_FILES) $(TLS_CHECK)
@@ -268,6 +268,13 @@ check: $(BUILD)/dns_blocker.check
 $(BUILD)/dns_blocker.check: tools/check.c | $(BUILD)
 	$(CC) $(CFLAGS_COMMON) $(CFLAGS_ARCH) $< -o $@
 	$(call assert_static,$@)
+
+# One installable package a target and profile: daemon, probe, unit, installer,
+# license text and the trust tool the encrypted profile needs
+PACKAGE_DIR ?= build/package
+
+package: $(TARGET) $(BUILD)/dns_blocker.check
+	@BUILD=$(BUILD) sh tools/package-release.sh $(ARCH) $(PROFILE) $(PACKAGE_DIR)
 
 $(BUILD)/%.o: src/%.c | $(BUILD)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
