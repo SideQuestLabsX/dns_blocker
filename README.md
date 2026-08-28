@@ -467,6 +467,12 @@ DoT state tests and the real mbedTLS backend test. The rest of the suite, which
 includes the server, arena, upstream and sync tests and the fuzz drivers, runs on
 the host only.
 
+`make live` runs two checks against the real network: the blocklist sync against
+the published release, and DoH channel reuse against the configured resolvers.
+Each one builds its own daemon, listens on port 15353 and keeps its files under
+`build/live`. They need `dig` and outbound HTTPS, so they sit outside `make
+test` and run weekly in CI.
+
 CI runs the host and encrypted tests, links both profiles and fuzzes each target
 against a corpus that stays between runs. Alpine target toolchains build six targets in
 containers. Zig builds LoongArch and both MIPS byte orders. QEMU runs each

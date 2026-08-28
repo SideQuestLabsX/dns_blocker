@@ -168,7 +168,7 @@ endef
 # stale generator writes a list in a format the daemon no longer reads
 HDR := $(wildcard src/*.h)
 
-.PHONY: all check clean package tools test test-static test-static-run fuzz fuzz-quick mbedtls FORCE
+.PHONY: all check clean live live-sync live-doh-reuse package tools test test-static test-static-run fuzz fuzz-quick mbedtls FORCE
 all: $(TARGET)
 
 $(TARGET): $(OBJ) $(TLS_DEPS) | $(LICENSE_FILES) $(TLS_CHECK)
@@ -456,6 +456,21 @@ $(BUILD)/upstream_dot_test_native: tests/upstream_dot_test.c src/upstream.c src/
 
 $(BUILD)/tls_backend_test_native: tests/tls_backend_test.c src/tls.c src/arena.c $(HDR) $(TLS_DEPS) | $(BUILD) $(TLS_CHECK)
 	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@ $(LIBS)
+
+# Checks against the real network and the published release. They build their
+# own daemons through FEATURES, so they are outside `make test` and outside CI
+# except on the weekly run.
+# Both bind the same port, so one recipe holds them. As prerequisites, -j would
+# start them together
+live:
+	@sh tests/live/sync.sh
+	@sh tests/live/doh-reuse.sh
+
+live-sync:
+	@sh tests/live/sync.sh
+
+live-doh-reuse:
+	@sh tests/live/doh-reuse.sh
 
 # Coverage-blind driver for the same entry points, so the fuzz targets are
 # exercised on any toolchain with a sanitizer. One driver, and each entry point
