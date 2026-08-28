@@ -97,6 +97,15 @@ bool WireReadRecord(Reader *reader, WireRecord *out);
 /* Skips one resource record including its rdata. */
 bool WireSkipRecord(Reader *reader);
 
+/* True for RFC 1918, loopback, link local and the v6 equivalents. */
+bool WireAddressIsPrivate(const uint8_t *addr, uint8_t addrLen);
+
+/* The address out of an `A` or `AAAA` record, bounds-checked against the
+   message. False for any other type, or a length the type does not allow, so a
+   caller cannot read rdata this file has not measured. */
+bool WireRecordAddress(const uint8_t *msg, size_t len, const WireRecord *record,
+                       uint8_t out[16], uint8_t *outLen);
+
 /* MINIMUM field of an SOA record, which bounds negative cache lifetime per
    RFC 2308. Fails when the record is not an SOA or its rdata is malformed. */
 bool WireSoaMinimum(const uint8_t *msg, size_t len, const WireRecord *soa,

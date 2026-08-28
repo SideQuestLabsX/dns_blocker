@@ -180,6 +180,57 @@ bool WireSkipRecord(Reader *reader)
     return WireReadRecord(reader, &record);
 }
 
+/* RFC 1918, loopback, link local and their v6 equivalents. Here rather than
+   beside the host map, because the verifier needs it and must not depend on a
+   unit that reads files and carves an arena. */
+bool WireAddressIsPrivate(const uint8_t *addr, uint8_t addrLen)
+{
+    if(addrLen == 4)
+    {
+        if(addr[0] == 10)  return true;
+        if(addr[0] == 127) return true;
+        if(addr[0] == 172 && addr[1] >= 16 && addr[1] <= 31) return true;
+        if(addr[0] == 192 && addr[1] == 168) return true;
+        if(addr[0] == 169 && addr[1] == 254) return true;
+        return false;
+    }
+
+    if(addrLen == 16)
+    {
+        static const uint8_t loopback[16] = { [15] = 1 };
+
+        /* fc00::/7 unique local, fe80::/10 link local, ::1 loopback. */
+        if((addr[0] & 0xFEu) == 0xFCu) return true;
+        if(addr[0] == 0xFE && (addr[1] & 0xC0u) == 0x80u) return true;
+        if(memcmp(addr, loopback, 16) == 0) return true;
+    }
+
+    return false;
+}
+
+bool WireRecordAddress(const uint8_t *msg, size_t len, const WireRecord *record,
+                       uint8_t out[16], uint8_t *outLen)
+{
+    if(msg == NULL || record == NULL || out == NULL || outLen == NULL)
+        return false;
+
+    uint8_t want = 0;
+    if(record->type == WIRE_TYPE_A)
+        want = 4;
+    else if(record->type == WIRE_TYPE_AAAA)
+        want = 16;
+
+    if(want == 0 || record->rdLength != want)
+        return false;
+
+    if(record->rdOffset > len || len - record->rdOffset < want)
+        return false;
+
+    memcpy(out, msg + record->rdOffset, want);
+    *outLen = want;
+    return true;
+}
+
 bool WireSoaMinimum(const uint8_t *msg, size_t len, const WireRecord *soa,
                     uint32_t *out)
 {

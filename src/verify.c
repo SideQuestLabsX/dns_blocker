@@ -119,6 +119,58 @@ VerifyResult VerifyAnswer(const WireQuestion *asked,
     return VerifyResult_Ok;
 }
 
+VerifyResult VerifyRebind(const WireQuestion *asked, const uint8_t *response,
+                          size_t responseLen)
+{
+    Reader     reader;
+    WireHeader header;
+
+    if(asked == NULL || response == NULL)
+        return VerifyResult_Malformed;
+
+    /* The local domain is the one namespace an operator owns, so a private
+       address under it is the configuration working rather than an attack.
+       Encoded once: this runs on the answer path, once a record */
+    WireName local;
+    bool bHaveLocal = CFG_LOCAL_DOMAIN != NULL
+                   && WireEncodeName(CFG_LOCAL_DOMAIN, &local);
+
+    if(bHaveLocal && WireNameInZone(&asked->name, &local))
+        return VerifyResult_Ok;
+
+    ReaderInit(&reader, response, responseLen);
+    if(!WireParseHeader(&reader, &header) || header.qdCount != 1)
+        return VerifyResult_Malformed;
+
+    WireQuestion answered;
+    if(!WireParseQuestion(&reader, &answered))
+        return VerifyResult_Malformed;
+
+    for(uint32_t i = 0; i < header.anCount; i++)
+    {
+        WireRecord record;
+
+        if(!WireReadRecord(&reader, &record))
+            return VerifyResult_Malformed;
+
+        uint8_t addr[16];
+        uint8_t addrLen = 0;
+
+        if(!WireRecordAddress(response, responseLen, &record, addr, &addrLen))
+            continue;
+
+        /* A chain may leave the queried zone, so the owner decides the
+           exemption rather than the question alone */
+        if(bHaveLocal && WireNameInZone(&record.name, &local))
+            continue;
+
+        if(WireAddressIsPrivate(addr, addrLen))
+            return VerifyResult_Rebind;
+    }
+
+    return VerifyResult_Ok;
+}
+
 const char *VerifyResultName(VerifyResult result)
 {
     switch(result)
@@ -128,6 +180,8 @@ const char *VerifyResultName(VerifyResult result)
         case VerifyResult_NotAResponse:     return "not a response";
         case VerifyResult_QuestionMismatch: return "question mismatch";
         case VerifyResult_OutOfBailiwick:   return "out of bailiwick";
+        case VerifyResult_Rebind:           return "rebind";
+        case VerifyResult_Count:            break;
     }
 
     return "unknown";

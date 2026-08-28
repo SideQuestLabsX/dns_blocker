@@ -119,6 +119,22 @@
   #define CFG_LOCAL_TTL_SEC     60
 #endif
 
+/* DNS rebinding: a public name answering with a private address points a client
+   at something on its own network. The answer is refused and the query fails,
+   which is what a rebind deserves and what an operator running split-horizon DNS
+   has to know about.
+
+   The exception is the host map. A name that legitimately resolves into RFC 1918
+   goes in /etc/dns_blocker/hosts, which answers before anything reaches an
+   upstream, so it needs no second list and no lookup on the forwarding path.
+   Names inside CFG_LOCAL_DOMAIN are exempt outright.
+
+   Zero removes the check. A resolver that sinkholes to 127.0.0.1 rather than
+   NXDOMAIN would otherwise have those answers refused. */
+#ifndef CFG_REBIND_PROTECT
+  #define CFG_REBIND_PROTECT    1
+#endif
+
 /* A reverse query for a private address is answered here rather than forwarded.
    The upstream cannot know a LAN, so forwarding leaks the internal addressing
    and gets NXDOMAIN back anyway. RFC 6303 asks resolvers to serve these zones

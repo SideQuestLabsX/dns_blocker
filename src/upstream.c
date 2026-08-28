@@ -1299,6 +1299,12 @@ UpstreamRead UpstreamComplete(UpstreamPool *pool, UpstreamExchange *exchange,
     }
 
     VerifyResult verdict = VerifyAnswer(&exchange->asked, out, (size_t)got);
+
+#if CFG_REBIND_PROTECT
+    if(verdict == VerifyResult_Ok)
+        verdict = VerifyRebind(&exchange->asked, out, (size_t)got);
+#endif
+
     if(verdict != VerifyResult_Ok)
     {
         member->rejected++;

@@ -64,9 +64,6 @@ bool HostsReverseAddress(const WireName *name, uint8_t *addr, uint8_t *addrLen);
 const HostEntry *HostsByAddress(const HostMap *map, const uint8_t *addr,
                                 uint8_t addrLen);
 
-/* True for the ranges a LAN uses, which no upstream can answer for. */
-bool HostsAddressIsPrivate(const uint8_t *addr, uint8_t addrLen);
-
 /* True when an IPv4 address falls within a configured network prefix */
 bool HostsAddressInPrefix(const uint8_t *addr, uint8_t addrLen,
                           const uint8_t *prefix, uint8_t prefixBits);

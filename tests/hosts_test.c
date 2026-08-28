@@ -260,7 +260,7 @@ static void TestPrivateRanges(void)
     };
 
     for(size_t i = 0; i < sizeof v4 / sizeof v4[0]; i++)
-        CHECK(HostsAddressIsPrivate(v4[i].a, 4) == v4[i].bPrivate);
+        CHECK(WireAddressIsPrivate(v4[i].a, 4) == v4[i].bPrivate);
 
     uint8_t ula[16]  = { 0xFD };
     uint8_t link[16] = { 0xFE, 0x80 };
@@ -269,10 +269,10 @@ static void TestPrivateRanges(void)
 
     loop[15] = 1;
 
-    CHECK(HostsAddressIsPrivate(ula, 16));
-    CHECK(HostsAddressIsPrivate(link, 16));
-    CHECK(HostsAddressIsPrivate(loop, 16));
-    CHECK(!HostsAddressIsPrivate(global, 16));
+    CHECK(WireAddressIsPrivate(ula, 16));
+    CHECK(WireAddressIsPrivate(link, 16));
+    CHECK(WireAddressIsPrivate(loop, 16));
+    CHECK(!WireAddressIsPrivate(global, 16));
 }
 
 static void TestAddressPrefixes(void)

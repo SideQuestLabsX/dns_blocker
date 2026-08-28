@@ -16,6 +16,9 @@
 _Static_assert(sizeof(StatusBlock) < 4096,
                "the status block must stay within one page");
 
+_Static_assert((unsigned)VerifyResult_Count == STATUS_REJECT_COUNT,
+               "a VerifyResult was added without a status name for it");
+
 #define STATUS_READ_TRIES 64
 
 static void StoreSequence(uint32_t *at, uint32_t value)
@@ -116,6 +119,7 @@ static void PublishUpstreams(StatusBlock *block, const UpstreamPool *pool,
         to->transport           = (uint8_t)from->transport;
         to->bDown               = bHeld ? 1u : 0u;
         to->bUnusable           = from->bUnusable ? 1u : 0u;
+        to->lastReject          = (uint8_t)from->lastReject;
         to->srttMs              = from->srttMs;
         to->consecutiveFailures = from->consecutiveFailures;
         to->queries             = from->queries;
@@ -391,6 +395,10 @@ void StatusPrint(const StatusBlock *block, FILE *out)
                 (unsigned long long)upstream->rejected,
                 (unsigned long long)upstream->probes);
 
+        if(upstream->rejected != 0)
+            fprintf(out, ", last refusal %s",
+                    StatusRejectName(upstream->lastReject));
+
         if(upstream->bDown != 0)
             fprintf(out, ", held down for %u ms", upstream->downForMs);
         if(upstream->bUnusable != 0)
@@ -426,6 +434,20 @@ const char *StatusSyncFailName(uint32_t fail)
         case 7: return "the release URL is invalid";
         case 8: return "the configured tier is not a valid name";
         case 9: return "no TLS channel was free";
+        default: return "unknown";
+    }
+}
+
+const char *StatusRejectName(uint8_t reject)
+{
+    switch(reject)
+    {
+        case 0: return "ok";
+        case 1: return "malformed";
+        case 2: return "not a response";
+        case 3: return "question mismatch";
+        case 4: return "out of bailiwick";
+        case 5: return "rebind";
         default: return "unknown";
     }
 }

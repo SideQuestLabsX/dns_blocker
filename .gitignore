@@ -13,12 +13,12 @@ dns_blocker
 # vendored deps
 /vendor/
 
-# generated and downloaded blocklists. Only sources are tracked
-/blocklists/*.bin
-/blocklists/*.trie
-/blocklists/generated/
+# compiled blocklists. The reviewed allowlist in tools/ is tracked, the tries
+# it produces never are
+*.trie
 
 # editors / tooling
+__pycache__/
 .vscode/
 .idea/
 .cache/

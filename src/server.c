@@ -864,7 +864,7 @@ static Handled AnswerLocal(Server *server, const uint8_t *query, size_t queryLen
         }
 
 #if CFG_PRIVATE_PTR_LOCAL
-        if(HostsAddressIsPrivate(addr, addrLen)
+        if(WireAddressIsPrivate(addr, addrLen)
            && !ShouldForwardPtr(server, question))
         {
             return LocalReply(server, query, queryLen, out, cap, outLen,

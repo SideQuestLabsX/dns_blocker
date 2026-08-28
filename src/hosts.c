@@ -363,30 +363,6 @@ bool HostsReverseAddress(const WireName *name, uint8_t *addr, uint8_t *addrLen)
     return false;
 }
 
-bool HostsAddressIsPrivate(const uint8_t *addr, uint8_t addrLen)
-{
-    if(addrLen == 4)
-    {
-        if(addr[0] == 10)  return true;
-        if(addr[0] == 127) return true;
-        if(addr[0] == 172 && addr[1] >= 16 && addr[1] <= 31) return true;
-        if(addr[0] == 192 && addr[1] == 168) return true;
-        if(addr[0] == 169 && addr[1] == 254) return true;
-        return false;
-    }
-
-    if(addrLen == 16)
-    {
-        static const uint8_t loopback[16] = { [15] = 1 };
-
-        /* fc00::/7 unique local, fe80::/10 link local, ::1 loopback. */
-        if((addr[0] & 0xFEu) == 0xFCu) return true;
-        if(addr[0] == 0xFE && (addr[1] & 0xC0u) == 0x80u) return true;
-        if(memcmp(addr, loopback, 16) == 0) return true;
-    }
-
-    return false;
-}
 
 bool HostsAddressInPrefix(const uint8_t *addr, uint8_t addrLen,
                           const uint8_t *prefix, uint8_t prefixBits)

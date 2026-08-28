@@ -24,8 +24,8 @@
    reader works against every build. */
 
 #define STATUS_MAGIC   "DBS1"
-/* Readers refuse unknown layouts. Version 4 adds latency and blocklist tier */
-#define STATUS_VERSION 4u
+/* Readers refuse unknown layouts. Version 5 adds the last refusal reason */
+#define STATUS_VERSION 5u
 
 #define STATUS_TIER_BYTES CFG_BLOCKLIST_TIER_BYTES
 
@@ -49,6 +49,10 @@ typedef struct
     uint8_t  transport;
     uint8_t  bDown;
     uint8_t  bUnusable;          /* refused the protocol, not merely slow */
+    /* VerifyResult of the last refused answer. A refusal is not a dead
+       resolver, and counting them without naming them reads like one */
+    uint8_t  lastReject;
+    uint8_t  reserved;
     uint16_t port;
     uint16_t consecutiveFailures;
     uint32_t srttMs;              /* UINT32_MAX until something is measured */
@@ -147,6 +151,11 @@ void StatusPrint(const StatusBlock *block, FILE *out);
 bool StatusReport(const char *path, FILE *out);
 
 const char *StatusTransportName(uint8_t transport);
+
+/* The names mirror VerifyResultName. status.c cannot call that: a reader has
+   only the number, and the status tests do not link verify.c. */
+#define STATUS_REJECT_COUNT 6u
+const char *StatusRejectName(uint8_t reject);
 
 /* Why the last sync stopped. The segment stores the reason as a number and this
    file is built in both profiles, so the names are a second copy of the ones

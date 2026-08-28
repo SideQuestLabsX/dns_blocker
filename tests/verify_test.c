@@ -339,6 +339,170 @@ static void TestOptRecordIsExempt(void)
     CHECK_VERDICT(VerifyResponse(query, queryLen, reply, b.len), VerifyResult_Ok);
 }
 
+/* A rebind is a public name answering with an address on the client's own
+   network. It is a property of the answer, so no blocklist can state it. */
+static void TestRebindIsRefused(void)
+{
+    uint8_t query[512];
+    uint8_t reply[512];
+
+    size_t queryLen = BuildQuery(query, sizeof query, 1, "www.example.com",
+                                 WIRE_TYPE_A);
+    Reader       r;
+    WireHeader   h;
+    WireQuestion asked;
+    ReaderInit(&r, query, queryLen);
+    WireParseHeader(&r, &h);
+    WireParseQuestion(&r, &asked);
+
+    /* A public answer passes */
+    Builder ok = { reply, sizeof reply, 0 };
+    PutHeader(&ok, 1, 0x8180u, 1, 1, 0, 0);
+    PutQuestion(&ok, "www.example.com", WIRE_TYPE_A);
+    PutAddrRecord(&ok, "www.example.com", 300, 93, 184, 216, 34);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, ok.len), VerifyResult_Ok);
+
+    /* Every RFC 1918 range, loopback and link local are refused */
+    const uint8_t privateV4[][4] = {
+        { 10, 0, 0, 1 }, { 172, 16, 0, 1 }, { 172, 31, 255, 254 },
+        { 192, 168, 1, 1 }, { 127, 0, 0, 1 }, { 169, 254, 1, 1 }
+    };
+
+    for(size_t i = 0; i < sizeof privateV4 / sizeof *privateV4; i++)
+    {
+        Builder b = { reply, sizeof reply, 0 };
+        PutHeader(&b, 1, 0x8180u, 1, 1, 0, 0);
+        PutQuestion(&b, "www.example.com", WIRE_TYPE_A);
+        PutAddrRecord(&b, "www.example.com", 300, privateV4[i][0],
+                      privateV4[i][1], privateV4[i][2], privateV4[i][3]);
+        CHECK_VERDICT(VerifyRebind(&asked, reply, b.len), VerifyResult_Rebind);
+    }
+
+    /* 172.15 and 172.32 are outside the block and must not be refused */
+    Builder edge = { reply, sizeof reply, 0 };
+    PutHeader(&edge, 1, 0x8180u, 1, 1, 0, 0);
+    PutQuestion(&edge, "www.example.com", WIRE_TYPE_A);
+    PutAddrRecord(&edge, "www.example.com", 300, 172, 15, 0, 1);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, edge.len), VerifyResult_Ok);
+}
+
+/* A chain that leaves the queried zone still has to be checked, or a CNAME to
+   an attacker name carries the private address instead. */
+static void TestRebindThroughAChain(void)
+{
+    uint8_t query[512];
+    uint8_t reply[512];
+
+    size_t queryLen = BuildQuery(query, sizeof query, 1, "www.example.com",
+                                 WIRE_TYPE_A);
+    Reader       r;
+    WireHeader   h;
+    WireQuestion asked;
+    ReaderInit(&r, query, queryLen);
+    WireParseHeader(&r, &h);
+    WireParseQuestion(&r, &asked);
+
+    Builder b = { reply, sizeof reply, 0 };
+    PutHeader(&b, 1, 0x8180u, 1, 2, 0, 0);
+    PutQuestion(&b, "www.example.com", WIRE_TYPE_A);
+    PutCname(&b, "www.example.com", "cdn.other.net", 300);
+    PutAddrRecord(&b, "cdn.other.net", 300, 192, 168, 1, 5);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, b.len), VerifyResult_Rebind);
+
+    /* The same chain ending publicly is fine */
+    Builder good = { reply, sizeof reply, 0 };
+    PutHeader(&good, 1, 0x8180u, 1, 2, 0, 0);
+    PutQuestion(&good, "www.example.com", WIRE_TYPE_A);
+    PutCname(&good, "www.example.com", "cdn.other.net", 300);
+    PutAddrRecord(&good, "cdn.other.net", 300, 93, 184, 216, 34);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, good.len), VerifyResult_Ok);
+}
+
+static void TestRebindV6(void)
+{
+    uint8_t query[512];
+    uint8_t reply[512];
+
+    size_t queryLen = BuildQuery(query, sizeof query, 1, "www.example.com",
+                                 WIRE_TYPE_AAAA);
+    Reader       r;
+    WireHeader   h;
+    WireQuestion asked;
+    ReaderInit(&r, query, queryLen);
+    WireParseHeader(&r, &h);
+    WireParseQuestion(&r, &asked);
+
+    /* fc00::/7 unique local */
+    Builder ula = { reply, sizeof reply, 0 };
+    PutHeader(&ula, 1, 0x8180u, 1, 1, 0, 0);
+    PutQuestion(&ula, "www.example.com", WIRE_TYPE_AAAA);
+    PutAaaaRecord(&ula, "www.example.com", 300, 0xFD, 1);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, ula.len), VerifyResult_Rebind);
+
+    /* ::1 loopback */
+    Builder loop = { reply, sizeof reply, 0 };
+    PutHeader(&loop, 1, 0x8180u, 1, 1, 0, 0);
+    PutQuestion(&loop, "www.example.com", WIRE_TYPE_AAAA);
+    PutAaaaRecord(&loop, "www.example.com", 300, 0x00, 1);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, loop.len), VerifyResult_Rebind);
+
+    /* A global 2000::/3 address passes */
+    Builder global = { reply, sizeof reply, 0 };
+    PutHeader(&global, 1, 0x8180u, 1, 1, 0, 0);
+    PutQuestion(&global, "www.example.com", WIRE_TYPE_AAAA);
+    PutAaaaRecord(&global, "www.example.com", 300, 0x20, 1);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, global.len), VerifyResult_Ok);
+}
+
+/* The local domain is the operator's own namespace, so a private address under
+   it is the configuration working rather than an attack. */
+static void TestLocalZoneIsExempt(void)
+{
+    uint8_t query[512];
+    uint8_t reply[512];
+    char    name[128];
+
+    snprintf(name, sizeof name, "nas.%s", CFG_LOCAL_DOMAIN);
+
+    size_t queryLen = BuildQuery(query, sizeof query, 1, name, WIRE_TYPE_A);
+    Reader       r;
+    WireHeader   h;
+    WireQuestion asked;
+    ReaderInit(&r, query, queryLen);
+    WireParseHeader(&r, &h);
+    WireParseQuestion(&r, &asked);
+
+    Builder b = { reply, sizeof reply, 0 };
+    PutHeader(&b, 1, 0x8180u, 1, 1, 0, 0);
+    PutQuestion(&b, name, WIRE_TYPE_A);
+    PutAddrRecord(&b, name, 300, 192, 168, 1, 10);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, b.len), VerifyResult_Ok);
+}
+
+/* Only the answer section decides. A forwarder never follows additional-section
+   glue, and refusing on it would reject ordinary referrals. */
+static void TestAdditionalSectionIsNotChecked(void)
+{
+    uint8_t query[512];
+    uint8_t reply[512];
+
+    size_t queryLen = BuildQuery(query, sizeof query, 1, "www.example.com",
+                                 WIRE_TYPE_A);
+    Reader       r;
+    WireHeader   h;
+    WireQuestion asked;
+    ReaderInit(&r, query, queryLen);
+    WireParseHeader(&r, &h);
+    WireParseQuestion(&r, &asked);
+
+    Builder b = { reply, sizeof reply, 0 };
+    PutHeader(&b, 1, 0x8180u, 1, 1, 0, 1);
+    PutQuestion(&b, "www.example.com", WIRE_TYPE_A);
+    PutAddrRecord(&b, "www.example.com", 300, 93, 184, 216, 34);
+    PutAddrRecord(&b, "ns.example.com", 300, 10, 0, 0, 1);
+    CHECK_VERDICT(VerifyRebind(&asked, reply, b.len), VerifyResult_Ok);
+}
+
 int main(void)
 {
     TestZoneMatching();
@@ -362,6 +526,12 @@ int main(void)
         printf("%d check(s) failed\n", G_FAILURES);
         return 1;
     }
+
+    TestRebindIsRefused();
+    TestRebindThroughAChain();
+    TestRebindV6();
+    TestLocalZoneIsExempt();
+    TestAdditionalSectionIsNotChecked();
 
     printf("verify: all checks passed\n");
     return 0;

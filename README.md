@@ -178,6 +178,23 @@ and you take the combination you want rather than a bundle somebody else chose.
 | `dns_blocker-blocklist.sha256` | A digest for every other asset in the release |
 | `THIRD_PARTY_LICENSES.md` | The license terms the release carries |
 
+### Rebind protection
+
+An answer that gives a private address for a public name is refused, because it
+points a client at something on its own network. That covers RFC 1918, loopback
+and link local, and their IPv6 equivalents, on `A` and `AAAA` records in the
+answer section.
+
+Names under `CFG_LOCAL_DOMAIN` are exempt. If a public name of yours genuinely
+resolves into RFC 1918, which is ordinary split-horizon DNS, put it in
+`/etc/dns_blocker/hosts`: the daemon answers from there without asking an
+upstream, so no second list is needed.
+
+The refusal appears on the upstream line of `--status` as
+`last refusal rebind`, so it does not read as a failing resolver. Build with
+`CFG_REBIND_PROTECT=0` to remove the check, which is what an upstream that
+sinkholes to `127.0.0.1` rather than `NXDOMAIN` needs.
+
 ### A name blocked by mistake
 
 Publishers sometimes list a name that should not be blocked.

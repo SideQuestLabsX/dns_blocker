@@ -108,6 +108,37 @@ static inline void PutARecord(Builder *b, const char *name, uint32_t ttl)
     PutU8(b, 34);
 }
 
+/* An A record with a chosen address, for the rebind checks */
+static inline void PutAddrRecord(Builder *b, const char *name, uint32_t ttl,
+                                 uint8_t a, uint8_t c, uint8_t d, uint8_t e)
+{
+    PutName(b, name);
+    PutU16(b, WIRE_TYPE_A);
+    PutU16(b, WIRE_CLASS_IN);
+    PutU32(b, ttl);
+    PutU16(b, 4);
+    PutU8(b, a);
+    PutU8(b, c);
+    PutU8(b, d);
+    PutU8(b, e);
+}
+
+/* An AAAA record. `high` becomes the first byte, so fc00::/7 and a global
+   2000::/3 address are both reachable from a test. */
+static inline void PutAaaaRecord(Builder *b, const char *name, uint32_t ttl,
+                                 uint8_t high, uint8_t last)
+{
+    PutName(b, name);
+    PutU16(b, WIRE_TYPE_AAAA);
+    PutU16(b, WIRE_CLASS_IN);
+    PutU32(b, ttl);
+    PutU16(b, 16);
+    PutU8(b, high);
+    for(int i = 0; i < 14; i++)
+        PutU8(b, 0);
+    PutU8(b, last);
+}
+
 static inline void PutSoa(Builder *b, const char *zone, uint32_t ttl,
                           uint32_t minimum)
 {
