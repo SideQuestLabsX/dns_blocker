@@ -258,6 +258,25 @@ static void TestAnEmptyPoolSelectsNothing(void)
     CHECK(UpstreamPoolSelect(&pool, NOW, UPSTREAM_NONE) == UPSTREAM_NONE);
 }
 
+/* Callers read the exchange after a failed start, and UpstreamEnd runs either
+   way. An indeterminate bTcpFallback releases the pool's single TCP slot under
+   whichever exchange holds it. */
+static void TestBeginSettlesTheExchangeBeforeItCanFail(void)
+{
+    UpstreamPool     pool;
+    UpstreamExchange exchange;
+
+    CHECK(PoolOf(&pool, 2));
+    memset(&exchange, 0xA5, sizeof exchange);
+
+    CHECK(UpstreamBegin(&pool, 99, NULL, 0, NOW, &exchange)
+          == UpstreamStart_Failed);
+    CHECK(exchange.fd == -1);
+    CHECK(exchange.tlsSlot == UPSTREAM_NONE);
+    CHECK(exchange.pool == &pool);
+    CHECK(!exchange.bTcpFallback);
+}
+
 static void TestAddRefusesWhatIsNotAnAddress(void)
 {
     UpstreamPool pool;
@@ -423,6 +442,7 @@ int main(void)
     TestRetryMaskMovesAcrossThePool();
     TestAvoidCannotEmptyASinglePool();
     TestAnEmptyPoolSelectsNothing();
+    TestBeginSettlesTheExchangeBeforeItCanFail();
     TestAddRefusesWhatIsNotAnAddress();
     TestDotCarriesItsAuthenticationName();
     TestDohCarriesItsPath();

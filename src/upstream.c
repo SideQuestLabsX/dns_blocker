@@ -814,10 +814,11 @@ UpstreamStart UpstreamBegin(UpstreamPool *pool, size_t index,
 {
     uint8_t sent[CFG_UDP_MSG_BYTES];
 
-    exchange->fd        = -1;
-    exchange->index     = index;
-    exchange->tlsSlot   = UPSTREAM_NONE;
-    exchange->pool      = pool;
+    exchange->fd           = -1;
+    exchange->index        = index;
+    exchange->tlsSlot      = UPSTREAM_NONE;
+    exchange->pool         = pool;
+    exchange->bTcpFallback = false;
 
     if(index >= pool->count)
         return UpstreamStart_Failed;
