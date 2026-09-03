@@ -75,7 +75,8 @@ Report > /dev/null 2>&1 || {
 
 printf 'time\tuptime_s\tqueries\thits\tblocked\tlocal\tforwarded\tfailed\t' > "$out"
 printf 'deferred\topened\treused\tstale\tcache_hits\tcache_misses\t' >> "$out"
-printf 'cache_evictions\tcache_refused\ttrie_bytes\trss_kb\tsync\n' >> "$out"
+printf 'cache_evictions\tcache_refused\ttrie_bytes\trss_kb\t' >> "$out"
+printf 'sync_attempts\tsync_bytes\tsync\n' >> "$out"
 
 : > "$log"
 
@@ -123,6 +124,8 @@ Summary()
             printf "  blocklist   %d bytes, %.1f%% of the %d byte cap\n",
                    last[column["trie_bytes"]],
                    last[column["trie_bytes"]] * 100 / cap, cap
+            printf "  sync        %d attempts, %d bytes downloaded\n",
+                   delta(column["sync_attempts"]), delta(column["sync_bytes"])
             printf "  rss         %s kB at the end, %s at the start\n",
                    last[column["rss_kb"]], first[column["rss_kb"]]
 
@@ -141,6 +144,13 @@ Summary()
             misses = delta(column["cache_misses"])
             if(hits + misses > 0)
                 printf "  cache rate  %.1f%%\n", hits * 100 / (hits + misses)
+
+            # An unchanged asset is skipped after the digest listing, so the
+            # run costs a few hundred bytes rather than a whole trie
+            attempts = delta(column["sync_attempts"])
+            synced = delta(column["sync_bytes"])
+            if(attempts > 0 && synced < last[column["trie_bytes"]])
+                printf "  sync skip   no attempt downloaded a whole list\n"
         }' "$out"
 
     printf '\nEvery upstream line is in %s, one report a sample.\n' "$log"
@@ -185,7 +195,7 @@ while :; do
         "$(StatusCount "$counters" forwarded)" \
         "$(StatusCount "$counters" failed)" >> "$out"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$(StatusCount "$report" deferred)" \
         "$(StatusCount "$channels" opened)" \
         "$(StatusCount "$channels" reused)" \
@@ -196,6 +206,8 @@ while :; do
         "$(StatusCount "$cache" refused)" \
         "$(StatusCount "$blocklist" bytes)" \
         "$rss" \
+        "$(StatusCount "$sync" attempts)" \
+        "$(StatusCount "$sync" downloaded)" \
         "$sync" >> "$out"
 
     G_SAMPLES=$((G_SAMPLES + 1))

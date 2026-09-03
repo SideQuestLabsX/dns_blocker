@@ -362,10 +362,13 @@ void StatusPrint(const StatusBlock *block, FILE *out)
             (unsigned long long)block->blocklistBytes,
             (block->blocklistTier[0] != '\0') ? block->blocklistTier
                                               : "unnamed");
-    fprintf(out, "sync        %s, next in %llu s, installed %llu bytes",
+    fprintf(out, "sync        %s, next in %llu s, installed %llu bytes, "
+                 "attempts %llu, downloaded %llu bytes",
             (block->sync.bActive != 0) ? "running" : "idle",
             (unsigned long long)(block->sync.nextDueMs / 1000u),
-            (unsigned long long)block->sync.installedBytes);
+            (unsigned long long)block->sync.installedBytes,
+            (unsigned long long)block->sync.attempts,
+            (unsigned long long)block->sync.downloadedBytes);
 
     /* A sync that keeps failing retries on a timer and is otherwise silent
        here, which is how two fetch buffer defects survived a green suite */

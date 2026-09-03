@@ -129,6 +129,12 @@ installed=$(StatusCount "$sync" installed)
 [ "${installed:-0}" -eq "$bytes" ] \
     || Fail "live sync: the list is $installed bytes, was $bytes"
 
+# What `installed` cannot say. A skipped run stops after the digest listing, so
+# it costs a few hundred bytes where a download costs the whole trie
+downloaded=$(StatusCount "$sync" downloaded)
+[ "${downloaded:-0}" -lt "$bytes" ] \
+    || Fail "live sync: the second run downloaded $downloaded bytes"
+
 after=$(sha256sum "$trie" | cut -d' ' -f1)
 [ "$before" = "$after" ] || Fail "live sync: the list changed under a skipped run"
 

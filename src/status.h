@@ -24,8 +24,9 @@
    reader works against every build. */
 
 #define STATUS_MAGIC   "DBS1"
-/* Readers refuse unknown layouts. Version 5 adds the last refusal reason */
-#define STATUS_VERSION 5u
+/* Readers refuse unknown layouts. Version 6 adds the sync attempt and download
+   totals */
+#define STATUS_VERSION 6u
 
 #define STATUS_TIER_BYTES CFG_BLOCKLIST_TIER_BYTES
 
@@ -72,6 +73,10 @@ typedef struct
     uint32_t fail;                /* SyncFail, 0 when nothing has failed */
     uint64_t installedBytes;
     uint64_t nextDueMs;           /* until the next attempt */
+    /* Since start. `installedBytes` is the live list and reads the same either
+       way, so these two are what separate a skipped asset from a download */
+    uint64_t attempts;
+    uint64_t downloadedBytes;
 } StatusSync;
 
 typedef struct

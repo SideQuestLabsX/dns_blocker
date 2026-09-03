@@ -127,6 +127,9 @@ typedef struct
     bool bFollowing;
     unsigned readRetries;
 
+    /* Folded in when a transfer ends, so a run in flight does not move it */
+    uint64_t downloadedBytes;
+
     uint8_t  metadataText[CFG_SYNC_DIGEST_BYTES];
     uint8_t  want[FETCH_DIGEST_BYTES];
     const Blocklist *active;
@@ -157,6 +160,11 @@ int SyncFd(const SyncJob *job);
 SyncStep SyncProgress(SyncJob *job, uint32_t nowMs);
 bool SyncNeedsProgress(const SyncJob *job);
 bool SyncInstalled(const SyncJob *job);
+
+/* Response body bytes this run has received, cleared by the read. The caller
+   keeps the total, because `SyncBegin` clears the job for the next run. */
+uint64_t SyncTakeDownloaded(SyncJob *job);
+
 void SyncEnd(SyncJob *job);
 
 /* Which transfer was running, and why it stopped. Both are for a log line and

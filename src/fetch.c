@@ -489,6 +489,16 @@ size_t FetchBodyLength(const FetchJob *job)
     return (job != NULL) ? job->memoryLen : 0;
 }
 
+size_t FetchTakeBodyBytes(FetchJob *job)
+{
+    if(job == NULL)
+        return 0;
+
+    size_t got   = job->bodyGot;
+    job->bodyGot = 0;
+    return got;
+}
+
 bool FetchFollow(FetchJob *job, TlsBackend *backend,
                  const struct sockaddr_storage *addr, socklen_t addrLen)
 {

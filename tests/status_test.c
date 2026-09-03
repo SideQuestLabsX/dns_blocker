@@ -92,7 +92,7 @@ static void TestPublishAndRead(const char *path)
     UpstreamPool pool;
     Blocklist    list;
     StatusBlock  block;
-    StatusSync   sync = { 0, 0, 6543894, 900000 };
+    StatusSync   sync = { 0, 0, 6543894, 900000, 3, 27000000 };
 
     FillServer(&server);
     FillCache(&cache);
@@ -120,6 +120,8 @@ static void TestPublishAndRead(const char *path)
     CHECK(block.blocklistSource == (uint32_t)BlocklistSource_Mapped);
     CHECK(strcmp(block.blocklistTier, CFG_BLOCKLIST_TIER) == 0);
     CHECK(block.sync.installedBytes == 6543894);
+    CHECK(block.sync.attempts == 3);
+    CHECK(block.sync.downloadedBytes == 27000000);
 
     CHECK(block.service.count == 3);
     CHECK(block.service.minUs == 40);
@@ -166,7 +168,7 @@ static void TestExpiredHoldIsNotReported(const char *path)
     UpstreamPool pool;
     Blocklist    list;
     StatusBlock  block;
-    StatusSync   sync = { 0, 0, 0, 0 };
+    StatusSync   sync = { 0, 0, 0, 0, 0, 0 };
 
     FillServer(&server);
     FillCache(&cache);
@@ -203,7 +205,7 @@ static void TestFinalSnapshotReportsNoSync(const char *path)
     UpstreamPool pool;
     Blocklist    list;
     StatusBlock  block;
-    StatusSync   running = { 1, 0, 6543894, 0 };
+    StatusSync   running = { 1, 0, 6543894, 0, 2, 27000000 };
 
     FillServer(&server);
     FillCache(&cache);
@@ -221,12 +223,16 @@ static void TestFinalSnapshotReportsNoSync(const char *path)
 
     /* What main() publishes after SyncEnd: the run is over, the list it
        installed is still on disk */
-    StatusSync stopped = { 0, 0, 6543894, 0 };
+    StatusSync stopped = { 0, 0, 6543894, 0, 2, 27000000 };
     StatusPublish(&status, &server, &cache, &pool, &list, &stopped, NULL, 5000);
     CHECK(StatusRead(path, &block));
     CHECK(block.sync.bActive == 0);
     CHECK(block.sync.nextDueMs == 0);
     CHECK(block.sync.installedBytes == 6543894);
+
+    /* The totals are history, not a running state, so they survive the end */
+    CHECK(block.sync.attempts == 2);
+    CHECK(block.sync.downloadedBytes == 27000000);
 
     /* A null pointer is the same claim, made by a caller with nothing to say */
     StatusPublish(&status, &server, &cache, &pool, &list, &running, NULL, 6000);
@@ -261,7 +267,7 @@ static void TestSyncFailureIsPrinted(const char *path)
     CHECK(StatusOpen(&status, path, 1000));
 
     /* A healthy run stays one line, with no reason appended */
-    StatusSync healthy = { 0, 0, 6543894, 900000 };
+    StatusSync healthy = { 0, 0, 6543894, 900000, 0, 0 };
     StatusPublish(&status, &server, &cache, &pool, &list, &healthy, NULL, 4000);
     CHECK(StatusRead(path, &block));
 
@@ -281,7 +287,7 @@ static void TestSyncFailureIsPrinted(const char *path)
     free(text);
 
     /* 4 is SyncFail_Digest, which is what a corrupted download looks like */
-    StatusSync failed = { 0, 4, 6543894, 900000 };
+    StatusSync failed = { 0, 4, 6543894, 900000, 0, 0 };
     StatusPublish(&status, &server, &cache, &pool, &list, &failed, NULL, 5000);
     CHECK(StatusRead(path, &block));
 
@@ -328,7 +334,7 @@ static void TestPrintRenders(const char *path)
     UpstreamPool pool;
     Blocklist    list;
     StatusBlock  block;
-    StatusSync   sync = { 0, 0, 6543894, 900000 };
+    StatusSync   sync = { 0, 0, 6543894, 900000, 4, 27000000 };
 
     FillServer(&server);
     FillCache(&cache);
@@ -356,6 +362,7 @@ static void TestPrintRenders(const char *path)
     fclose(out);
 
     CHECK(strstr(text, "tier " CFG_BLOCKLIST_TIER) != NULL);
+    CHECK(strstr(text, "attempts 4, downloaded 27000000 bytes") != NULL);
     CHECK(strstr(text, "latency     service, n 3,") != NULL);
     CHECK(strstr(text, "round trip, n 3,") != NULL);
     CHECK(strstr(text, "round trip, no samples") != NULL);

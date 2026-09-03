@@ -151,6 +151,11 @@ bool FetchBeginToMemory(FetchJob *job, TlsBackend *backend, const char *url,
 /* Bytes written into the memory sink. Valid after FetchStep_Done. */
 size_t FetchBodyLength(const FetchJob *job);
 
+/* Body bytes the finished transfer received, cleared by the read. Every start
+   path zeroes the same field, so an unread count is lost when the next transfer
+   connects. Not valid mid-transfer: the body bound is measured against it. */
+size_t FetchTakeBodyBytes(FetchJob *job);
+
 /* Follows the redirect the last step reported, against a freshly resolved
    address for `job->url.host`. Refuses once the hop count is spent. */
 bool FetchFollow(FetchJob *job, TlsBackend *backend,

@@ -177,6 +177,10 @@ typedef struct
     const char  *tier;
     uint32_t     dueMs;
     bool         bActive;
+
+    /* The job is cleared for every run, so the totals across them live here */
+    uint64_t     attempts;
+    uint64_t     downloadedBytes;
 } SyncRun;
 
 static bool SyncDue(uint32_t nowMs, uint32_t dueMs)
@@ -208,11 +212,15 @@ static void SyncStopOnFailure(SyncRun *run, uint32_t nowMs)
 
 static void SyncTick(SyncRun *run, uint32_t nowMs)
 {
+    /* Before the SyncBegin below, which clears the job the count sits in */
+    run->downloadedBytes += SyncTakeDownloaded(run->job);
+
     if(!run->bActive)
     {
         if(!SyncDue(nowMs, run->dueMs))
             return;
 
+        run->attempts++;
         if(!SyncBegin(run->job, run->server->upstreams, run->path, run->tier,
                       run->list))
         {
@@ -518,7 +526,7 @@ int main(int argc, char **argv)
     const bool bSyncEnabled = CFG_BLOCKLIST_PATH != NULL;
 
     SyncRun  run = { &sync, &server, &list, CFG_BLOCKLIST_PATH, tier,
-                     ServerNowMilliseconds() + CFG_SYNC_FIRST_MS, false };
+                     ServerNowMilliseconds() + CFG_SYNC_FIRST_MS, false, 0, 0 };
 #endif
 
     Status   status      = { NULL, 0 };
@@ -546,16 +554,18 @@ int main(int argc, char **argv)
 
         if((int32_t)(nowMs - statusDueMs) >= 0)
         {
-            StatusSync syncState = { 0, 0, 0, 0 };
+            StatusSync syncState = { 0, 0, 0, 0, 0, 0 };
 #if defined(PROFILE_ENCRYPTED)
             syncState.installedBytes = (list.source == BlocklistSource_Mapped)
                                      ? list.size : 0;
             if(bSyncEnabled)
             {
-                syncState.bActive   = run.bActive ? 1u : 0u;
-                syncState.fail      = (uint32_t)sync.fail;
-                syncState.nextDueMs = run.bActive
-                                    ? 0 : (uint64_t)(run.dueMs - nowMs);
+                syncState.bActive         = run.bActive ? 1u : 0u;
+                syncState.fail            = (uint32_t)sync.fail;
+                syncState.nextDueMs       = run.bActive
+                                          ? 0 : (uint64_t)(run.dueMs - nowMs);
+                syncState.attempts        = run.attempts;
+                syncState.downloadedBytes = run.downloadedBytes;
             }
 #endif
             StatusPublish(&status, &server, &cache, &upstreams, &list,
@@ -591,12 +601,21 @@ int main(int argc, char **argv)
             (unsigned long long)rejected);
 
     /* The last snapshot stays on the tmpfs, so a reader can still see how a
-       stopped daemon left things. The sync is over either way, but the list it
-       installed is still the one on disk, so that size is reported and the
-       activity fields are not */
-    StatusSync finalSync = { 0, 0, 0, 0 };
+       stopped daemon left things. The sync is over either way, so the fields
+       that describe a run in progress are cleared. What the list on disk is and
+       what the daemon did to get there are still true */
+    StatusSync finalSync = { 0, 0, 0, 0, 0, 0 };
     finalSync.installedBytes = (list.source == BlocklistSource_Mapped)
                              ? list.size : 0;
+
+#if defined(PROFILE_ENCRYPTED)
+    if(bSyncEnabled)
+    {
+        run.downloadedBytes += SyncTakeDownloaded(&sync);
+        finalSync.attempts        = run.attempts;
+        finalSync.downloadedBytes = run.downloadedBytes;
+    }
+#endif
 
     StatusPublish(&status, &server, &cache, &upstreams, &list, &finalSync, tier,
                   ServerNowMilliseconds());

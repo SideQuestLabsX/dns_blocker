@@ -449,6 +449,9 @@ bool SyncProvideAddress(SyncJob *job, const struct sockaddr_storage *addr,
     }
     else if(job->bFollowing)
     {
+        /* A redirect keeps the job, so nothing has ended the transfer that
+           carried it and the next connect is about to reset its count */
+        job->downloadedBytes += FetchTakeBodyBytes(&job->job);
         bStarted = FetchFollow(&job->job, job->pool->tls, addr, addrLen);
     }
     else
@@ -514,10 +517,18 @@ int SyncFd(const SyncJob *job)
     return job->job.fd;
 }
 
+/* Every place a transfer stops for good. Taking the count here keeps it out of
+   the next transfer, which resets the same field the moment it connects */
+static void EndTransfer(SyncJob *job)
+{
+    job->downloadedBytes += FetchTakeBodyBytes(&job->job);
+    FetchEnd(&job->job);
+}
+
 static SyncStep StartPhase(SyncJob *job, SyncPhase phase)
 {
     /* Each phase resolves its own release URL after the last transfer's redirects */
-    FetchEnd(&job->job);
+    EndTransfer(job);
     job->phase       = phase;
     job->bFollowing  = false;
     job->readRetries = 0;
@@ -563,7 +574,7 @@ static SyncStep FinishDigest(SyncJob *job)
        && job->active->source == BlocklistSource_Mapped
        && job->active->base != NULL && job->active->size != 0)
     {
-        FetchEnd(&job->job);
+        EndTransfer(job);
         mbedtls_sha256_init(&job->activeSha);
         if(mbedtls_sha256_starts(&job->activeSha, 0) == 0)
         {
@@ -678,7 +689,7 @@ SyncStep SyncProgress(SyncJob *job, uint32_t nowMs)
         if(job->job.fail == FetchFail_Read
            && job->readRetries < CFG_FETCH_READ_RETRIES)
         {
-            FetchEnd(&job->job);
+            EndTransfer(job);
             job->readRetries++;
             job->state = SyncState_Resolve;
             return SyncStep_NeedAddress;
@@ -747,6 +758,16 @@ bool SyncInstalled(const SyncJob *job)
     return job != NULL && job->state == SyncState_Done && job->bInstalled;
 }
 
+uint64_t SyncTakeDownloaded(SyncJob *job)
+{
+    if(job == NULL)
+        return 0;
+
+    uint64_t got         = job->downloadedBytes;
+    job->downloadedBytes = 0;
+    return got;
+}
+
 bool SyncNeedsProgress(const SyncJob *job)
 {
     return job != NULL && job->state == SyncState_Compare;
@@ -757,7 +778,7 @@ void SyncEnd(SyncJob *job)
     if(job == NULL)
         return;
 
-    FetchEnd(&job->job);
+    EndTransfer(job);
     job->job.channel = NULL;
 
     if(job->bActiveShaReady)

@@ -670,7 +670,7 @@ deferred    0, waited for a free encrypted channel
 channels    opened 1, reused 2, stale 0
 cache       hits 1, misses 3, inserts 3, evictions 0, refused 0
 blocklist   mapped, 2717008 bytes, tier standard
-sync        idle, next in 3600 s, installed 2717008 bytes
+sync        idle, next in 3600 s, installed 2717008 bytes, attempts 1, downloaded 2717344 bytes
 latency     service, n 4, min 41 us, mean 6.85 ms, p50 52 us, p90 27.30 ms, p99 27.30 ms, max 27.30 ms
 upstream    1.1.1.1:443 doh, 27 ms, queries 3, failures 0, rejected 0, probes 0
 latency       round trip, n 3, min 24.00 ms, mean 27.00 ms, p50 26.62 ms, p90 29.00 ms, p99 29.00 ms, max 29.00 ms
@@ -685,8 +685,14 @@ when the last attempt failed, which is the only place to see it without the
 daemon's `stderr`:
 
 ```text
-sync        idle, next in 780 s, installed 2717008 bytes, the digest did not match
+sync        idle, next in 780 s, installed 2717008 bytes, attempts 4, downloaded 2717344 bytes, the digest did not match
 ```
+
+`installed` is the size of the live list and says the same thing whether an
+attempt downloaded it or skipped it. `attempts` and `downloaded` separate the
+two: an attempt that finds the published digest already matching the live list
+stops after the listing, so it adds a few hundred bytes rather than a whole
+trie.
 
 `latency` uses microseconds below one millisecond. The minimum, mean and maximum
 are exact. Histogram percentiles have up to one part in eight of error.

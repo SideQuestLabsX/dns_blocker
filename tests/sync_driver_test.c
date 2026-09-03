@@ -398,6 +398,12 @@ static void TestUnchangedListSkipsTheAsset(const char *dir)
     CHECK(list.size == imageLen);
 
     SyncEnd(&job);
+
+    /* The two metadata bodies and nothing else, which is what `installedBytes`
+       cannot say: it reports the live list whether one was downloaded or not */
+    CHECK(SyncTakeDownloaded(&job) == strlen(G_LOCATOR) + strlen(listing));
+    CHECK(SyncTakeDownloaded(&job) == 0);
+
     BlocklistUnload(&list);
     free(image);
     unlink(target);
@@ -446,6 +452,9 @@ static void TestChangedListInstallsAndReloads(const char *dir)
     CHECK(BlocklistContains(&list, &newName));
 
     SyncEnd(&job);
+    CHECK(SyncTakeDownloaded(&job)
+          == strlen(G_LOCATOR) + strlen(listing) + newLen);
+
     BlocklistUnload(&list);
     free(oldImage);
     free(newImage);
