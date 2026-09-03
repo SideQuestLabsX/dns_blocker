@@ -522,10 +522,40 @@ static void ReadList(Node *root, FILE *in, size_t *accepted, size_t *skipped,
     }
 }
 
+/* Counts what a source offers and what the format refuses, without building
+   anything. A run that reports one skipped total cannot show which is which. */
+static void Survey(FILE *in, size_t counts[], size_t *examples,
+                   size_t exampleCap)
+{
+    char line[1024];
+
+    while(fgets(line, sizeof line, in) != NULL)
+    {
+        char           original[sizeof line];
+        ListLineReason why = ListLine_Blank;
+
+        snprintf(original, sizeof original, "%s", line);
+
+        (void)ListLineNameWhy(line, &why);
+        counts[why]++;
+
+        if(why == ListLine_Wildcard && *examples < exampleCap)
+        {
+            char *end = strpbrk(original, "\r\n");
+            if(end != NULL)
+                *end = '\0';
+
+            fprintf(stderr, "  %s\n", original);
+            (*examples)++;
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     bool        bCArray     = false;
     bool        bWrap       = false;
+    bool        bSurvey     = false;
     const char *removalPath = NULL;
     int         first       = 1;
 
@@ -535,6 +565,8 @@ int main(int argc, char **argv)
             bCArray = true;
         else if(strcmp(argv[first], "-t") == 0)
             bWrap = true;
+        else if(strcmp(argv[first], "-s") == 0)
+            bSurvey = true;
         else if(strcmp(argv[first], "-x") == 0)
         {
             if(first + 1 >= argc)
@@ -548,10 +580,48 @@ int main(int argc, char **argv)
         first++;
     }
 
+    if(bSurvey)
+    {
+        size_t counts[ListLine_Wildcard + 1] = { 0 };
+        size_t examples = 0;
+        size_t lines    = 0;
+
+        if(argc == first)
+        {
+            Survey(stdin, counts, &examples, 20);
+        }
+        else
+        {
+            for(int i = first; i < argc; i++)
+            {
+                FILE *in = fopen(argv[i], "r");
+                if(in == NULL)
+                {
+                    fprintf(stderr, "mkblocklist: cannot open %s\n", argv[i]);
+                    return 1;
+                }
+
+                Survey(in, counts, &examples, 20);
+                fclose(in);
+            }
+        }
+
+        for(size_t i = 0; i <= (size_t)ListLine_Wildcard; i++)
+            lines += counts[i];
+
+        printf("lines %zu\n", lines);
+        for(size_t i = 0; i <= (size_t)ListLine_Wildcard; i++)
+            printf("%-24s %zu\n", ListLineReasonName((ListLineReason)i),
+                   counts[i]);
+
+        return 0;
+    }
+
     if(argc <= first)
     {
         fprintf(stderr, "usage: mkblocklist [-c] [-x removals] out [list ...]\n"
-                        "       mkblocklist -t out.c in.trie\n");
+                        "       mkblocklist -t out.c in.trie\n"
+                        "       mkblocklist -s [list ...]\n");
         return 1;
     }
 

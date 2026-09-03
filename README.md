@@ -120,6 +120,15 @@ An entry blocks the name and every name below it, so `doubleclick.net` also
 covers `ad.doubleclick.net`. The generator reloads its own output through the
 daemon's lookup and fails if anything it inserted does not match.
 
+A wildcard anywhere but the front, `ads-*.example.com`, is a rule the format
+cannot hold, and those lines are dropped. `mkblocklist -s list...` counts what a
+source offers and what it loses, by reason, and prints the first refusals of
+that kind:
+
+```sh
+mkblocklist -s list1.txt list2.txt
+```
+
 The file is a succinct trie over the reversed names: nodes are numbered
 breadth-first, each degree is written in unary and each character is packed into
 as few bits as the list's alphabet needs. Nothing in it is an offset, which is

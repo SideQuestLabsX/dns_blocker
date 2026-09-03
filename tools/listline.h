@@ -9,9 +9,32 @@
 #include <stddef.h>
 #include <string.h>
 
+/* Why a line carried no name. A source that contributes nothing looks the same
+   as a comment block unless the refusals are counted apart. */
+typedef enum
+{
+    ListLine_Name,
+    ListLine_Blank,
+    ListLine_NoDot,
+    ListLine_Wildcard
+} ListLineReason;
+
+static inline const char *ListLineReasonName(ListLineReason reason)
+{
+    switch(reason)
+    {
+        case ListLine_Name:     return "name";
+        case ListLine_Blank:    return "blank or comment";
+        case ListLine_NoDot:    return "no dot";
+        case ListLine_Wildcard: return "wildcard inside the name";
+    }
+
+    return "unknown";
+}
+
 /* Rewrites line in place and returns the name, or NULL when the line carries
-   none. */
-static inline char *ListLineName(char *line)
+   none. `why` may be NULL. */
+static inline char *ListLineNameWhy(char *line, ListLineReason *why)
 {
     char *at = strchr(line, '#');
     if(at != NULL)
@@ -58,14 +81,37 @@ static inline char *ListLineName(char *line)
         len--;
     }
 
-    if(len == 0 || strchr(name, '.') == NULL)
+    if(len == 0)
+    {
+        if(why != NULL)
+            *why = ListLine_Blank;
         return NULL;
+    }
+
+    if(strchr(name, '.') == NULL)
+    {
+        if(why != NULL)
+            *why = ListLine_NoDot;
+        return NULL;
+    }
 
     /* A wildcard anywhere else is a rule this format cannot express. */
     if(strchr(name, '*') != NULL)
+    {
+        if(why != NULL)
+            *why = ListLine_Wildcard;
         return NULL;
+    }
+
+    if(why != NULL)
+        *why = ListLine_Name;
 
     return name;
+}
+
+static inline char *ListLineName(char *line)
+{
+    return ListLineNameWhy(line, NULL);
 }
 
 #endif

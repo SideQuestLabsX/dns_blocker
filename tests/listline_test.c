@@ -28,6 +28,24 @@ static void Expect(const char *input, const char *want)
     }
 }
 
+/* The survey counts refusals by reason, so a reason that drifts from the
+   refusal it names would misreport what a source offers. */
+static void ExpectReason(const char *input, ListLineReason want)
+{
+    char           line[1024];
+    ListLineReason got = ListLine_Name;
+
+    snprintf(line, sizeof line, "%s", input);
+    (void)ListLineNameWhy(line, &got);
+
+    if(got != want)
+    {
+        printf("FAIL  \"%s\" -> %s, want %s\n", input,
+               ListLineReasonName(got), ListLineReasonName(want));
+        G_FAILURES++;
+    }
+}
+
 /* The allowlist corrects a false positive in a published list. It must take
    the name it names and leave the subtree alone, because a blocked child of a
    legitimate parent is usually the entry the publisher meant. */
@@ -123,6 +141,18 @@ int main(void)
     /* A wildcard the trie cannot express must not become a label. */
     Expect("ad*.example.com", NULL);
     Expect("*ads.example.com", NULL);
+
+    ExpectReason("ads.example.com", ListLine_Name);
+    ExpectReason("*.ads.example.com", ListLine_Name);
+    ExpectReason("# a comment", ListLine_Blank);
+    ExpectReason("", ListLine_Blank);
+    ExpectReason("localhost", ListLine_NoDot);
+    /* The strip wants `*.`, so a bare star is a name of one label */
+    ExpectReason("*", ListLine_NoDot);
+    ExpectReason("*.com", ListLine_NoDot);
+    ExpectReason("ad*.example.com", ListLine_Wildcard);
+    ExpectReason("*ads.example.com", ListLine_Wildcard);
+    ExpectReason("0.0.0.0 ads-*.example.com", ListLine_Wildcard);
 
     TestRemovals();
 
