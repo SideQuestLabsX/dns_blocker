@@ -8,6 +8,9 @@
 
 set -eu
 
+# Both readers of the status report go through one parser
+. tools/statusfields.sh
+
 LIVE_PORT=${LIVE_PORT:-15353}
 LIVE_ROOT=${LIVE_ROOT:-build/live}
 LIVE_MBEDTLS_DIR=${LIVE_MBEDTLS_DIR:-build/x86_64-encrypted/mbedtls}
@@ -109,41 +112,4 @@ Status() # <binary> <status path>
 {
     sleep "$LIVE_SNAPSHOT_WAIT"
     "$1" --status "$2" || Fail "live: cannot read the status segment"
-}
-
-# One line of a status report, without its leading key
-Line() # <report> <key>
-{
-    printf '%s\n' "$1" | awk -v key="$2" '
-        $1 == key { $1 = ""; sub(/^ +/, ""); print; exit }'
-}
-
-# The number a label carries. The report writes both orders, `reused 12` and
-# `12 bytes`, so each pair is read from either side. Commas belong to the
-# report, so a word is stripped to its own alphabet before it is compared
-Count() # <line> <label>
-{
-    printf '%s\n' "$1" | awk -v want="$2" '
-        function word(s) { gsub(/[^a-z0-9]/, "", s); return s }
-        {
-            # Label first, because `local 0, forwarded 9` reads as a value
-            # before `forwarded` as well, and that reading is the wrong one
-            for(i = 1; i < NF; i++)
-            {
-                if(word($i) == want && word($(i + 1)) ~ /^[0-9]+$/)
-                {
-                    print word($(i + 1))
-                    exit
-                }
-            }
-
-            for(i = 1; i < NF; i++)
-            {
-                if(word($(i + 1)) == want && word($i) ~ /^[0-9]+$/)
-                {
-                    print word($i)
-                    exit
-                }
-            }
-        }'
 }

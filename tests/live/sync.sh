@@ -61,8 +61,8 @@ grep -q 'sync: installed' "$work/daemon.log" \
     || Fail "live sync: nothing was installed within 180 s"
 
 report=$(Status "$bin" "$status")
-blocklist=$(Line "$report" blocklist)
-bytes=$(Count "$blocklist" bytes)
+blocklist=$(StatusLine "$report" blocklist)
+bytes=$(StatusCount "$blocklist" bytes)
 
 case $blocklist in
     mapped,*) ;;
@@ -98,8 +98,8 @@ StartDaemon "$bin" "$work"
 n=0
 while [ "$n" -lt 90 ]; do
     report=$(Status "$bin" "$status")
-    sync=$(Line "$report" sync)
-    due=$(Count "$sync" in)
+    sync=$(StatusLine "$report" sync)
+    due=$(StatusCount "$sync" in)
 
     case $sync in
         idle,*)
@@ -125,7 +125,7 @@ fi
 
 # The sync line reports the size of the live list, so the skipped run has to
 # leave the same number the first run mapped
-installed=$(Count "$sync" installed)
+installed=$(StatusCount "$sync" installed)
 [ "${installed:-0}" -eq "$bytes" ] \
     || Fail "live sync: the list is $installed bytes, was $bytes"
 

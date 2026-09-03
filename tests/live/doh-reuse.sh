@@ -51,14 +51,14 @@ while [ "$n" -lt "$queries" ]; do
 done
 
 report=$(Status "$bin" "$status")
-channels=$(Line "$report" channels)
-counters=$(Line "$report" queries)
+channels=$(StatusLine "$report" channels)
+counters=$(StatusLine "$report" queries)
 
-opened=$(Count "$channels" opened)
-reused=$(Count "$channels" reused)
-stale=$(Count "$channels" stale)
-forwarded=$(Count "$counters" forwarded)
-failed=$(Count "$counters" failed)
+opened=$(StatusCount "$channels" opened)
+reused=$(StatusCount "$channels" reused)
+stale=$(StatusCount "$channels" stale)
+forwarded=$(StatusCount "$counters" forwarded)
+failed=$(StatusCount "$counters" failed)
 
 Note "live doh-reuse: channels $channels"
 Note "live doh-reuse: queries $counters"

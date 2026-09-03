@@ -699,6 +699,32 @@ nothing has to be kept or parsed to sample it.
 The file follows the directory it lives in: an operator who can read
 `/run/dns_blocker` can read the status.
 
+### Sampling it over days
+
+`tools/soak.sh` reads the segment on a timer and writes one row a sample:
+
+```sh
+sudo sh soak.sh --interval 300 --out /persist/soak.tsv
+```
+
+| Option | Meaning |
+|---|---|
+| `--binary PATH` | The daemon to read through. Default `dns_blocker` |
+| `--status PATH` | A segment somewhere other than the compiled default |
+| `--interval S` | Seconds between samples. Default 60 |
+| `--duration S` | Stop after this long. Default runs until interrupted |
+| `--out FILE` | The table. Default `soak.tsv`, with the full reports beside it |
+| `--cap BYTES` | `CFG_BLOCKLIST_MAX_BYTES` of the build, for the trie margin |
+
+Ending it with Ctrl-C still prints the summary: queries, channel reuse, cache
+rate, trie size against the cap and resident memory, each as the change across
+the run. The script sends the daemon nothing and writes nowhere the daemon
+reads. Copy it to the device. The release package does not carry it.
+
+Counters are cumulative since start-up, so a restart resets them. The summary
+says when uptime went backwards, and when the pid in the segment has no process
+behind it.
+
 ## Health probe
 
 `make check` builds `dns_blocker.check`. This small companion program resolves
