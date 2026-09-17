@@ -262,7 +262,8 @@ jobs:
       - if: ${{ matrix.image != '' }}
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
-      # ARM1176 faults on unaligned reads that x86 cannot expose
+      # Each target runs on its own instruction set. Generic ARMv6 emulation
+      # does not reproduce ARM1176 alignment trapping, which needs a real board
       - name: Build and test in Alpine
         if: ${{ matrix.image != '' }}
         env:

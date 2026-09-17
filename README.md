@@ -31,10 +31,11 @@ Router Advertisement RDNSS, the clients go around this device, and the network
 continues to look correct. Give this device for IPv6, or stop the IPv6 DNS
 advertisement.
 
-The daemon builds for the nine architectures in the table below and runs on any
-Linux host among them. It is developed against the Raspberry Pi Zero W. A
-prebuilt appliance image is planned and does not exist yet, so every deployment
-today installs a binary onto an existing Linux system.
+The daemon builds for the nine architectures in the table below. CI builds each
+one and runs the static test subset on it, most of them under emulation. It is
+developed against a Raspberry Pi Zero W. A prebuilt appliance image is planned
+and does not exist yet, so every deployment today installs a binary onto an
+existing Linux system.
 
 ## Behavior
 
@@ -435,9 +436,9 @@ A cross build also needs a native compiler, because the generator that compiles
 the embedded list runs on the build host. `HOSTCC` names it and defaults to
 `gcc`.
 
-Every released target links static, and `-fstack-protector-strong` is always on. The
-`x86_64`, `x86` and `aarch64` Alpine builds also link position independent.
-ARM, RISC-V, LoongArch and MIPS use static executables because their selected
+Every released target links static, and `-fstack-protector-strong` is always on.
+`x86_64`, `x86` and `aarch64` also link position independent. ARMv7, ARMv6,
+RISC-V, LoongArch and MIPS use static executables because their selected
 toolchains do not produce a valid static PIE. The build reads the linked file
 and stops if the result needs a loader.
 
@@ -472,7 +473,7 @@ and needs clang.
 `make test-static` builds a **subset** without sanitizers, using the shipped
 flags so it cross-compiles: the wire, cache, message, verification, blocklist,
 host-map, fetch, status and trust tests. The encrypted profile adds the DoH and
-DoT state tests and the real mbedTLS backend test. The rest of the suite, which
+DoT state test and the real mbedTLS backend test. The rest of the suite, which
 includes the server, arena, upstream and sync tests and the fuzz drivers, runs on
 the host only.
 
@@ -482,12 +483,14 @@ Each one builds its own daemon, listens on port 15353 and keeps its files under
 `build/live`. They need `dig` and outbound HTTPS, so they sit outside `make
 test` and run weekly in CI.
 
-CI runs the host and encrypted tests, links both profiles and fuzzes each target
-against a corpus that stays between runs. Alpine target toolchains build six targets in
-containers. Zig builds LoongArch and both MIPS byte orders. QEMU runs each
-non-x86 target on its own instruction set, which is what exercises the byte-wise
-reads the parser uses. Generic ARMv6 emulation does not reproduce ARM1176
-alignment trapping, so that behaviour still needs a real board.
+CI runs the host and encrypted tests, links both profiles and fuzzes both
+drivers on the host against a corpus that stays between runs. Alpine target
+toolchains build six targets in containers. Zig builds LoongArch and both MIPS
+byte orders. QEMU runs each non-x86 target on its own instruction set, so each
+binary is known to execute and pass the static subset there, byte order on
+big-endian MIPS included. That does not extend to exact CPU behaviour: generic
+ARMv6 emulation does not reproduce ARM1176 alignment trapping, which still needs
+a real board.
 
 ## Install
 

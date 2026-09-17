@@ -16,6 +16,9 @@ set -eu
 # header, so it carries trust-bundle.env beside this script, which --print-env
 # writes from the same parse.
 #
+# TRUST_PROBES handshakes a host, 4 by default, retried up to TRUST_ROUNDS
+# times. A host can serve more than one chain and every root found is kept.
+#
 # Roots rotate. Regenerate after changing an upstream, and again if the sync and
 # DoH start failing together, because one stale bundle breaks both.
 
@@ -132,54 +135,133 @@ done
 
 : > "$work/roots.txt"
 
+# One handshake shows one chain. dns.google alternates between two, GTS Root R4
+# and GTS Root R1, per connection and on the same address, at about even odds.
+# Measured, and it is why collection alone cannot settle the question: any run
+# of handshakes can draw the same chain throughout and leave a root out.
+#
+# So the verification is the gate, not the collection. TRUST_CHECKS handshakes a
+# host have to verify against the bundle, and a host that draws a chain the
+# bundle misses sends the whole pass round again up to TRUST_ROUNDS, adding what
+# it finds. Collection stays cheap and the union of roots only grows.
+probes=${TRUST_PROBES:-3}
+checks=${TRUST_CHECKS:-12}
+rounds=${TRUST_ROUNDS:-4}
+
+# A host that alternates chains would otherwise never settle
+ceiling=$((probes * 4))
+
+for value in "$probes" "$checks" "$rounds"; do
+    case "$value" in
+        ''|*[!0-9]*|0)
+            printf 'make-trust-bundle: TRUST_PROBES, TRUST_CHECKS and TRUST_ROUNDS must be positive numbers\n' >&2
+            exit 1
+            ;;
+    esac
+done
+
+# The daemon connects to an address, so the addresses are what has to be
+# covered. IPv4 only, which is what the sync resolves and what the upstreams are
+# configured as. Without a resolver to ask, the name is probed instead
+HostAddresses() # <host>
+{
+    if command -v getent >/dev/null 2>&1; then
+        getent ahosts "$1" 2>/dev/null \
+            | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }' \
+            | sort -u
+    elif command -v dig >/dev/null 2>&1; then
+        dig +short A "$1" 2>/dev/null \
+            | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print }' | sort -u
+    fi
+}
+
+# Collect, build, verify. Body stays at the outer indent, ending at the `done`
+# marked below
+round=0
+while :; do
+round=$((round + 1))
+
 for host in $hosts; do
     printf 'make-trust-bundle: %s\n' "$host" >&2
 
-    if ! openssl s_client -connect "$host:443" -servername "$host" \
-            -showcerts </dev/null > "$work/chain.txt" 2>/dev/null; then
-        printf 'make-trust-bundle: cannot reach %s\n' "$host" >&2
-        exit 1
+    got=0
+    reason="cannot reach it"
+
+    targets=$(HostAddresses "$host")
+    if [ -z "$targets" ]; then
+        targets=$host
     fi
 
-    # The server rarely sends the root, so the last certificate it does send
-    # names the root in its issuer
-    awk -v dir="$work" '
-        /-----BEGIN CERTIFICATE-----/ { n++; f = sprintf("%s/hop%04d.pem", dir, n) }
-        f { print > f }
-        /-----END CERTIFICATE-----/ { close(f); f = "" }
-    ' "$work/chain.txt"
+    for target in $targets; do
+    probe=0
+    quiet=0
 
-    last=$(ls "$work"/hop*.pem 2>/dev/null | tail -1)
-    if [ -z "$last" ]; then
-        printf 'make-trust-bundle: %s sent no certificate\n' "$host" >&2
-        exit 1
-    fi
+    while [ "$quiet" -lt "$probes" ] && [ "$probe" -lt "$ceiling" ]; do
+        probe=$((probe + 1))
+        quiet=$((quiet + 1))
+        rm -f "$work"/hop*.pem
 
-    issuer=$(openssl x509 -in "$last" -noout -issuer_hash)
-    subject=$(openssl x509 -in "$last" -noout -subject_hash)
+        if ! openssl s_client -connect "$target:443" -servername "$host" \
+                -showcerts </dev/null > "$work/chain.txt" 2>/dev/null; then
+            continue
+        fi
 
-    found=""
-    for candidate in "$work"/by-subject/"$issuer".*.pem; do
-        [ -e "$candidate" ] && { found=$candidate; break; }
+        # The server rarely sends the root, so the last certificate it does
+        # send names the root in its issuer
+        awk -v dir="$work" '
+            /-----BEGIN CERTIFICATE-----/ { n++; f = sprintf("%s/hop%04d.pem", dir, n) }
+            f { print > f }
+            /-----END CERTIFICATE-----/ { close(f); f = "" }
+        ' "$work/chain.txt"
+
+        last=$(ls "$work"/hop*.pem 2>/dev/null | tail -1)
+        if [ -z "$last" ]; then
+            reason="it sent no certificate"
+            continue
+        fi
+
+        issuer=$(openssl x509 -in "$last" -noout -issuer_hash 2>/dev/null || true)
+        subject=$(openssl x509 -in "$last" -noout -subject_hash 2>/dev/null || true)
+
+        found=""
+        for candidate in "$work"/by-subject/"$issuer".*.pem; do
+            [ -n "$issuer" ] && [ -e "$candidate" ] && { found=$candidate; break; }
+        done
+
+        # dns.google ends on a root cross-signed by an authority the store may
+        # not carry, so its issuer resolves to nothing. The certificate's own
+        # subject then names the root to trust
+        if [ -z "$found" ]; then
+            for candidate in "$work"/by-subject/"$subject".*.pem; do
+                [ -n "$subject" ] && [ -e "$candidate" ] && { found=$candidate; break; }
+            done
+        fi
+
+        if [ -z "$found" ]; then
+            reason="no root in $store for it"
+            continue
+        fi
+
+        # Keyed by the store file, so a root drawn twice is reported once. A new
+        # one restarts the count of quiet handshakes
+        rootId=$(basename "$found")
+        if [ ! -e "$work/seen.$rootId" ]; then
+            : > "$work/seen.$rootId"
+            openssl x509 -in "$found" -noout -subject >&2
+            cat "$found" >> "$work/roots.txt"
+            quiet=0
+        fi
+
+        got=$((got + 1))
+    done
     done
 
-    # dns.google ends on a root cross-signed by an authority the store may not
-    # carry, so its issuer resolves to nothing. The certificate's own subject
-    # then names the root to trust, which is GTS Root R4 today.
-    if [ -z "$found" ]; then
-        for candidate in "$work"/by-subject/"$subject".*.pem; do
-            [ -e "$candidate" ] && { found=$candidate; break; }
-        done
-    fi
+    rm -f "$work"/hop*.pem
 
-    if [ -z "$found" ]; then
-        printf 'make-trust-bundle: no root in %s for %s\n' "$store" "$host" >&2
+    if [ "$got" -eq 0 ]; then
+        printf 'make-trust-bundle: %s, %s\n' "$host" "$reason" >&2
         exit 1
     fi
-
-    openssl x509 -in "$found" -noout -subject >&2
-    cat "$found" >> "$work/roots.txt"
-    rm -f "$work"/hop*.pem
 done
 
 # One copy a root however many hosts chain to it
@@ -215,16 +297,40 @@ size=$(wc -c < "$work/bundle.der")
 size=$(printf '%s' "$size" | tr -d ' ')
 
 # Every configured chain has to verify against the bundle alone, or the daemon
-# will fail at run time on a host this tool said it covered
+# will fail at run time on a host this tool said it covered. One handshake only
+# proves the chain it drew, so this is where the count has to be high: a root
+# the collection missed has to show up here rather than on the device
+missed=
 for host in $hosts; do
-    if ! openssl s_client -connect "$host:443" -servername "$host" \
-            -CAfile "$work/unique.pem" -verify_return_error \
-            </dev/null >/dev/null 2>&1; then
-        printf 'make-trust-bundle: %s does not verify against the bundle\n' \
-            "$host" >&2
-        exit 1
+    probe=0
+    while [ "$probe" -lt "$checks" ]; do
+        probe=$((probe + 1))
+        if ! openssl s_client -connect "$host:443" -servername "$host" \
+                -CAfile "$work/unique.pem" -verify_return_error \
+                </dev/null >/dev/null 2>&1; then
+            missed=$host
+            break
+        fi
+    done
+
+    if [ -n "$missed" ]; then
+        break
     fi
 done
+
+if [ -z "$missed" ]; then
+    break
+fi
+
+if [ "$round" -ge "$rounds" ]; then
+    printf 'make-trust-bundle: %s does not verify against the bundle after %s rounds\n' \
+        "$missed" "$rounds" >&2
+    exit 1
+fi
+
+printf 'make-trust-bundle: %s drew a chain the bundle missed, collecting again\n' \
+    "$missed" >&2
+done # end of the collect and verify round
 
 if [ "$size" -gt "$cap" ]; then
     printf 'make-trust-bundle: %s bytes from %s roots, cap is %s\n' \
