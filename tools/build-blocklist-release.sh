@@ -64,44 +64,44 @@ project="$outputDir/LICENSE"
 # yoyo.org is excluded for the same reason: it grants redistribution but states
 # no license, and its 2111 unique domains were 0 of 250 live.
 TIERS=${TIERS:-'
-source sb-stevenblack  2000  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/StevenBlack/hosts
-source sb-baddboyz     900   MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/Badd-Boyz-Hosts/hosts
-source sb-hostsvn      1200  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/hostsVN/hosts
-source sb-uncheckyads  5     MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/UncheckyAds/hosts
-source sb-2o7net       1500  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.2o7Net/hosts
-source sb-dead         5     MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Dead/hosts
-source sb-risk         1500  MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Risk/hosts
-source sb-spam         20    MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Spam/hosts
-source sb-adaway       5000  CC-BY-3.0     https://raw.githubusercontent.com/StevenBlack/hosts/master/data/adaway.org/hosts
-source sb-tiuxo        1200  CC-BY-4.0     https://raw.githubusercontent.com/StevenBlack/hosts/master/data/tiuxo/hosts
-source sb-kadhosts     40000 CC-BY-SA-4.0  https://raw.githubusercontent.com/StevenBlack/hosts/master/data/KADhosts/hosts
-source sb-minecraft    5     CC0-1.0       https://raw.githubusercontent.com/StevenBlack/hosts/master/data/minecraft-hosts/hosts
-source sb-urlhaus      50    CC0-1.0       https://raw.githubusercontent.com/StevenBlack/hosts/master/data/URLHaus/hosts
+source sb-stevenblack  100   MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/StevenBlack/hosts
+source sb-baddboyz     50    MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/Badd-Boyz-Hosts/hosts
+source sb-hostsvn      50    MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/hostsVN/hosts
+source sb-uncheckyads  1     MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/UncheckyAds/hosts
+source sb-2o7net       50    MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.2o7Net/hosts
+source sb-dead         1     MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Dead/hosts
+source sb-risk         50    MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Risk/hosts
+source sb-spam         1     MIT           https://raw.githubusercontent.com/StevenBlack/hosts/master/data/add.Spam/hosts
+source sb-adaway       100   CC-BY-3.0     https://raw.githubusercontent.com/StevenBlack/hosts/master/data/adaway.org/hosts
+source sb-tiuxo        50    CC-BY-4.0     https://raw.githubusercontent.com/StevenBlack/hosts/master/data/tiuxo/hosts
+source sb-kadhosts     1000  CC-BY-SA-4.0  https://raw.githubusercontent.com/StevenBlack/hosts/master/data/KADhosts/hosts
+source sb-minecraft    1     CC0-1.0       https://raw.githubusercontent.com/StevenBlack/hosts/master/data/minecraft-hosts/hosts
+source sb-urlhaus      1     CC0-1.0       https://raw.githubusercontent.com/StevenBlack/hosts/master/data/URLHaus/hosts
 
 group  stevenblack sb-stevenblack sb-baddboyz sb-hostsvn sb-uncheckyads
 group  stevenblack sb-2o7net sb-dead sb-risk sb-spam
 group  stevenblack sb-adaway sb-tiuxo sb-kadhosts
 group  stevenblack sb-minecraft sb-urlhaus
 
-source hagezi-lite   35000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt
-source hagezi-pro    190000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt
-source hagezi-max    240000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/ultimate-onlydomains.txt
-source oisd-small    50000  GPL-3.0-only https://small.oisd.nl/domainswild
-source oisd-big      220000 GPL-3.0-only https://big.oisd.nl/domainswild
+source hagezi-lite   5000   GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/light-onlydomains.txt
+source hagezi-pro    50000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt
+source hagezi-max    50000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/ultimate-onlydomains.txt
+source oisd-small    10000  GPL-3.0-only https://small.oisd.nl/domainswild
+source oisd-big      50000  GPL-3.0-only https://big.oisd.nl/domainswild
 
-source adult-small   70000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt
-source adult-big     400000 GPL-3.0-only https://nsfw.oisd.nl/domainswild
+source adult-small   10000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt
+source adult-big     50000  GPL-3.0-only https://nsfw.oisd.nl/domainswild
 
-source tif-small     120000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt
-source tif-mid       250000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt
-source tif-big       1500000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
+source tif-small     10000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.mini-onlydomains.txt
+source tif-mid       50000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif.medium-onlydomains.txt
+source tif-big       100000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/tif-onlydomains.txt
 
-source gambling-small 65000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.mini-onlydomains.txt
-source gambling-mid   100000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt
-source gambling-big   280000 GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt
+source gambling-small 5000   GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.mini-onlydomains.txt
+source gambling-mid   10000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt
+source gambling-big   50000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt
 
-source piracy        27000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
-source bypass        12000  GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt
+source piracy        5000   GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt
+source bypass        1000   GPL-3.0-only https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt
 
 base compact    stevenblack hagezi-lite
 base standard   stevenblack hagezi-pro oisd-small
